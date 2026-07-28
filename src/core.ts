@@ -45,8 +45,12 @@ export function loadAgents(home: Home): Agent[] {
     .map((l) => l.trim())
     .filter((l) => l !== '' && !l.startsWith('#'))
     .map((l) => {
-      const [name, dir] = l.split('=', 2).map((s) => s.trim());
-      return { name, dir: expandHome(dir) };
+      const eq = l.indexOf('=');
+      if (eq === -1) throw new Error(`bad line in agents.conf: ${l}`);
+      return {
+        name: l.slice(0, eq).trim(),
+        dir: expandHome(l.slice(eq + 1).trim()),
+      };
     });
 }
 
@@ -133,8 +137,9 @@ export function scanAll(agents: Agent[]): Row[] {
 
 // --- on/off ops (off = 挪进 .off/,关 ≠ 删) ---
 
-/** @returns 'on' | 'off' | 'already' */
-export function setSkill(agent: Agent, name: string, on: boolean): string {
+export type SetResult = 'on' | 'off' | 'already';
+
+export function setSkill(agent: Agent, name: string, on: boolean): SetResult {
   const live = path.join(agent.dir, name);
   const offDir = path.join(agent.dir, '.off');
   const parked = path.join(offDir, name);

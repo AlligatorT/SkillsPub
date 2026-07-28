@@ -163,3 +163,11 @@ test('filterRows --agent/--tag; untagged lists skills with no tags', () => {
   assert.deepEqual(filterRows(rows, { agent: 'a' }, tags).map((r) => r.name), ['grilling']);
   assert.deepEqual(untagged(rows, tags), ['grilling', 'only-b']);
 });
+
+test('loadAgents throws a clear error on malformed lines, keeps paths containing =', () => {
+  const home = tmpHome();
+  fs.writeFileSync(path.join(home.configDir, 'agents.conf'), 'no-equals-here\n');
+  assert.throws(() => loadAgents(home), /bad line in agents.conf/);
+  fs.writeFileSync(path.join(home.configDir, 'agents.conf'), 'x = /tmp/a=b\n');
+  assert.equal(loadAgents(home)[0].dir, '/tmp/a=b');
+});

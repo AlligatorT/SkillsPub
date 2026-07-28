@@ -4,6 +4,7 @@
   "description": "Multi-agent skills on/off manager — disk is the source of truth",
   "type": "module",
   "bin": { "skm": "src/cli.ts" },
+  "engines": { "node": ">=22.18" },
   "scripts": {
     "test": "node --test",
     "typecheck": "tsc --noEmit"

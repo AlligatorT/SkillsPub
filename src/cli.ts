@@ -104,7 +104,10 @@ function cmdStatus(args: string[]): void {
     const extra = info.target ? ` -> ${info.target}` : '';
     console.log(`${agent.name}\t${CELL[info.presence]}\t${where}${extra}`);
   }
-  if (!any) console.error(`warning: ${skill} not found in any agent`);
+  if (!any) {
+    console.error(`warning: ${skill} not found in any agent`);
+    process.exitCode = 1;
+  }
 }
 
 function cmdAgents(): void {
