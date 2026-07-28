@@ -1,0 +1,15 @@
+{
+  "name": "skm",
+  "version": "0.1.0",
+  "description": "Multi-agent skills on/off manager — disk is the source of truth",
+  "type": "module",
+  "bin": { "skm": "src/cli.ts" },
+  "scripts": {
+    "test": "node --test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^5.8"
+  }
+}
