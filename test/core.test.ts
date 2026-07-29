@@ -95,7 +95,15 @@ test('scanAgent: missing skills dir scans empty, does not throw', () => {
 
 // --- on/off ops + state ---
 
-import { setSkill, loadState, filterRows, untagged } from '../src/core.ts';
+import {
+  setSkill,
+  toggleSkill,
+  loadState,
+  filterRows,
+  untagged,
+  skillDetail,
+  tuiSnapshot,
+} from '../src/core.ts';
 
 test('setSkill off moves skill into .off/, on moves it back', () => {
   const home = tmpHome();
@@ -123,6 +131,16 @@ test('setSkill errors when skill is absent; no-op when already in target state',
   assert.equal(setSkill(agent, 'grilling', true), 'already');
 });
 
+test('toggleSkill derives the next state from a fresh disk scan', () => {
+  const home = tmpHome();
+  const dir = path.join(home.configDir, 'skills');
+  mkSkill(dir, 'grilling');
+  const agent = { name: 'a', dir };
+
+  assert.equal(toggleSkill(agent, 'grilling'), 'off');
+  assert.equal(toggleSkill(agent, 'grilling'), 'on');
+});
+
 test('setSkill off moves a dead symlink into .off/ too', () => {
   const home = tmpHome();
   const dir = path.join(home.configDir, 'skills');
@@ -136,14 +154,68 @@ test('setSkill off moves a dead symlink into .off/ too', () => {
   assert.equal(scanAgent(agent).get('broken')?.target, '/gone/target');
 });
 
-test('loadState reads tags from state.json; missing file = empty', () => {
+test('loadState reads metadata from state.json; missing fields are empty', () => {
   const home = tmpHome();
-  assert.deepEqual(loadState(home).tags, {});
+  assert.deepEqual(loadState(home), { bundles: {}, tags: {}, inventory: {} });
   fs.writeFileSync(
     path.join(home.configDir, 'state.json'),
-    JSON.stringify({ tags: { 'code-review': ['review', 'backend'] } }),
+    JSON.stringify({
+      bundles: { reviewers: ['code-review'] },
+      tags: { 'code-review': ['review', 'backend'] },
+      inventory: { 'code-review': { source: 'owner/repo' } },
+    }),
   );
-  assert.deepEqual(loadState(home).tags, { 'code-review': ['review', 'backend'] });
+  assert.deepEqual(loadState(home), {
+    bundles: { reviewers: ['code-review'] },
+    tags: { 'code-review': ['review', 'backend'] },
+    inventory: { 'code-review': { source: 'owner/repo' } },
+  });
+});
+
+test('skillDetail assembles live paths, agent state, metadata, and SKILL.md', () => {
+  const home = tmpHome();
+  const shared = path.join(home.configDir, 'shared', 'grilling');
+  const a = path.join(home.configDir, 'a');
+  const b = path.join(home.configDir, 'b');
+  mkSkill(path.dirname(shared), path.basename(shared));
+  fs.mkdirSync(a, { recursive: true });
+  fs.mkdirSync(path.join(b, '.off'), { recursive: true });
+  fs.symlinkSync(shared, path.join(a, 'grilling'));
+  fs.symlinkSync(shared, path.join(b, '.off', 'grilling'));
+  fs.writeFileSync(
+    path.join(home.configDir, 'state.json'),
+    JSON.stringify({
+      bundles: { cooks: ['grilling'], unrelated: ['other'] },
+      tags: { grilling: ['food'] },
+      inventory: { grilling: { source: 'chef/skills' } },
+    }),
+  );
+  const agents = [
+    { name: 'a', dir: a },
+    { name: 'b', dir: b },
+  ];
+
+  const detail = skillDetail(home, agents, 'grilling')!;
+  assert.equal(detail.source, 'chef/skills');
+  assert.deepEqual(detail.bundles, ['cooks']);
+  assert.deepEqual(detail.tags, ['food']);
+  assert.deepEqual(detail.realPaths, [fs.realpathSync(shared)]);
+  assert.equal(detail.content, '# grilling');
+  assert.equal(detail.agents.a?.linked, true);
+  assert.equal(detail.agents.a?.underOff, false);
+  assert.equal(detail.agents.b?.underOff, true);
+  assert.equal(detail.contentPath, path.join(fs.realpathSync(shared), 'SKILL.md'));
+});
+
+test('tuiSnapshot rescans disk instead of caching on/off state', () => {
+  const home = tmpHome();
+  const dir = path.join(home.configDir, 'skills');
+  mkSkill(dir, 'grilling');
+  fs.writeFileSync(path.join(home.configDir, 'agents.conf'), `a = ${dir}\n`);
+
+  assert.equal(tuiSnapshot(home).rows[0].agents.a?.presence, 'on');
+  setSkill({ name: 'a', dir }, 'grilling', false);
+  assert.equal(tuiSnapshot(home).rows[0].agents.a?.presence, 'off');
 });
 
 test('filterRows --agent/--tag; untagged lists skills with no tags', () => {

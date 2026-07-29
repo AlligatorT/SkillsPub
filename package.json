@@ -3,14 +3,23 @@
   "version": "0.1.0",
   "description": "Multi-agent skills on/off manager — disk is the source of truth",
   "type": "module",
-  "bin": { "skm": "src/cli.ts" },
-  "engines": { "node": ">=22.18" },
+  "bin": {
+    "skm": "src/cli.ts"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
   "scripts": {
     "test": "node --test",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/node": "^22",
+    "@types/react": "^19.2.17",
     "typescript": "^5.8"
+  },
+  "dependencies": {
+    "ink": "^7.1.1",
+    "react": "^19.2.8"
   }
 }

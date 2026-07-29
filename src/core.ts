@@ -60,6 +60,10 @@ export type Presence = 'on' | 'off' | 'deadlink';
 
 export interface SkillInfo {
   presence: Presence;
+  path: string;
+  realPath?: string;
+  linked: boolean;
+  underOff: boolean;
   /** symlink target, for symlinked skills and dead links */
   target?: string;
 }
@@ -91,7 +95,13 @@ function scanDir(
     try {
       stat = fs.statSync(p);
     } catch {
-      out.set(e.name, { presence: 'deadlink', target: readlinkOr(p) });
+      out.set(e.name, {
+        presence: 'deadlink',
+        path: p,
+        linked: e.isSymbolicLink(),
+        underOff: presence === 'off',
+        target: readlinkOr(p),
+      });
       continue;
     }
     if (!stat.isDirectory()) continue;
@@ -99,6 +109,10 @@ function scanDir(
     if (!fs.existsSync(path.join(p, 'SKILL.md'))) continue;
     out.set(e.name, {
       presence,
+      path: p,
+      realPath: fs.realpathSync(p),
+      linked: e.isSymbolicLink(),
+      underOff: presence === 'off',
       target: e.isSymbolicLink() ? readlinkOr(p) : undefined,
     });
   }
@@ -155,21 +169,100 @@ export function setSkill(agent: Agent, name: string, on: boolean): SetResult {
   return on ? 'on' : 'off';
 }
 
+export function toggleSkill(agent: Agent, name: string): SetResult {
+  const info = scanAgent(agent).get(name);
+  return setSkill(
+    agent,
+    name,
+    info?.underOff === true || info?.presence === 'off',
+  );
+}
+
 // --- state file: metadata only (ADR-0001), tags read for ls --tag/未分类 ---
 
-export interface State {
-  tags: Record<string, string[]>;
+export interface InventoryEntry {
+  source?: string;
+  hash?: string;
+  seen_at?: string;
 }
+
+export interface State {
+  bundles: Record<string, string[]>;
+  tags: Record<string, string[]>;
+  inventory: Record<string, InventoryEntry>;
+}
+
+const EMPTY_STATE: State = { bundles: {}, tags: {}, inventory: {} };
 
 export function loadState(home: Home): State {
   try {
     const s = JSON.parse(
       fs.readFileSync(path.join(home.configDir, 'state.json'), 'utf8'),
-    );
-    return { tags: s.tags ?? {} };
+    ) as Partial<State>;
+    return {
+      bundles: s.bundles ?? {},
+      tags: s.tags ?? {},
+      inventory: s.inventory ?? {},
+    };
   } catch {
-    return { tags: {} };
+    return EMPTY_STATE;
   }
+}
+
+export interface SkillDetail {
+  name: string;
+  agents: Record<string, SkillInfo | undefined>;
+  realPaths: string[];
+  source?: string;
+  bundles: string[];
+  tags: string[];
+  content?: string;
+  contentPath?: string;
+}
+
+export interface TuiSnapshot {
+  agents: Agent[];
+  rows: Row[];
+}
+
+/** Read the live disk state. Call again after every mutation (ADR-0001). */
+export function tuiSnapshot(home: Home): TuiSnapshot {
+  const agents = loadAgents(home);
+  return { agents, rows: scanAll(agents) };
+}
+
+/** Assemble read-only detail from live disk plus state-file metadata. */
+export function skillDetail(
+  home: Home,
+  agents: Agent[],
+  name: string,
+): SkillDetail | undefined {
+  const row = scanAll(agents).find((candidate) => candidate.name === name);
+  if (!row) return undefined;
+
+  const state = loadState(home);
+  const infos = agents.flatMap((agent) => {
+    const info = row.agents[agent.name];
+    return info ? [info] : [];
+  });
+  const readable = infos.find((info) => info.realPath !== undefined);
+  const contentPath = readable
+    ? path.join(readable.realPath as string, 'SKILL.md')
+    : undefined;
+
+  return {
+    name,
+    agents: row.agents,
+    realPaths: [...new Set(infos.flatMap((info) => info.realPath ?? []))],
+    source: state.inventory[name]?.source,
+    bundles: Object.entries(state.bundles)
+      .filter(([, members]) => members.includes(name))
+      .map(([bundle]) => bundle)
+      .sort(),
+    tags: state.tags[name] ?? [],
+    content: contentPath ? fs.readFileSync(contentPath, 'utf8') : undefined,
+    contentPath,
+  };
 }
 
 export function filterRows(
