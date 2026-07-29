@@ -19,6 +19,7 @@ const USAGE = `skm — multi-agent skills on/off manager (disk is the source of 
   skm on|off <skill> <agent...>  move skill between skills/ and skills/.off/
   skm status <skill>             per-agent state of one skill
   skm agents                     agent registry (~/.config/skm/agents.conf)
+  skm tui                        interactive full-screen skill browser
 `;
 
 const home = defaultHome();
@@ -132,6 +133,10 @@ try {
       break;
     case 'agents':
       cmdAgents();
+      break;
+    case 'tui':
+      if (rest.length > 0) throw new Error('usage: skm tui');
+      await (await import('./tui.ts')).runTui(home);
       break;
     default:
       process.stderr.write(USAGE);
