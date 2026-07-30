@@ -1,4 +1,4 @@
-# skill-pub
+# SkillsPub
 
 ## Agent skills
 

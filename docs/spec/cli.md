@@ -1,88 +1,89 @@
 # Spec: SkillsPub CLI
 
-命令名 `skillspub`。设计决策见 `docs/adr/`,术语见 `CONTEXT.md`。
+产品名 **SkillsPub**，npm 包与命令名为 `skillspub`。设计决策见 `docs/adr/`，术语见 `CONTEXT.md`。
 
-## State file
+## Disk and metadata
 
-`~/.config/skillspub/state.json`,只存元数据(ADR-0001):
+磁盘是 activation 与 relationship 的唯一真相（ADR-0001）。`~/.config/skillspub/state.json` 只保存 bundle、tag、preset、inventory/provenance 等 metadata，不保存 on/off 状态；agent registry 位于 `~/.config/skillspub/agents.conf`。
 
-```json
-{
-  "bundles":   { "matt-pocock": ["grilling", "batch-grill-me"] },
-  "tags":      { "code-review": ["review", "backend"] },
-  "presets":   { "frontend": { "bundles": ["matt-pocock"], "skills": ["..."], "agents": ["claude", "pi"] } },
-  "inventory": { "code-review": { "source": "owner/repo", "hash": "...", "seen_at": "..." } }
-}
-```
+首次运行时，SkillsPub 会把旧配置目录中目标位置尚不存在的文件复制到新目录；已有 SkillsPub 文件优先，旧文件不会被删除或覆盖。
 
-on/off 状态不入此文件,每次现场扫磁盘。agent 注册表在 `~/.config/skillspub/agents.conf`。
+Instance-level metadata 必须以 skill instance identity 关联，不能只按 skill name 关联。Provenance 优先读取 installer lock 中可靠的 `sourceUrl`、`skillPath` 等字段；字段不足时保留 `Source unknown` 与本地 `realPath`，不联网猜测。
 
-首次运行时,SkillsPub 会把旧配置目录里目标位置尚不存在的文件复制到新目录;已有 SkillsPub 文件优先,旧文件不会被删除或覆盖。
-
-## 命令面
+## Entry behavior
 
 ```text
-skillspub ls [--agent A] [--tag T]     # skill × agent 开关矩阵(扫磁盘);顺带提示未分类/死链
-skillspub on|off <skill|bundle:X|tag:Y> <agent...>
+skillspub                         # stdin/stdout 为 TTY 时打开 TUI
+skillspub tui                     # 显式打开同一个 TUI
+skillspub ls [--agent A] [--tag T]
+skillspub on|off <skill> <agent...>
 skillspub status <skill>
-skillspub agents                       # agent 注册表
-skillspub bundle ls|show|create|add|rm
-skillspub tag add|rm|ls
-skillspub preset create|add|apply|off|ls
-skillspub scan                         # 发现新 skill,更新 inventory
-skillspub doctor                       # 清理死链,标 missing
-skillspub tui                          # 全功能 TUI(ADR-0005)
+skillspub agents
 ```
 
-裸 `skillspub` 在 stdin/stdout 都是 TTY 时进入 TUI;其他环境只打印 usage。`skillspub tui` 显式进入同一 TUI,不接受额外参数。
+裸命令只在交互式 TTY 中启动 Ink。非 TTY 环境不得尝试渲染 TUI，应输出 CLI usage。保留 `tui` 子命令，便于脚本、文档和排错时显式调用；该子命令不接受额外参数。
 
-### bundle
+`ls`、`status`、`on`、`off` 不得把同名 variants 当成同一个实例，也不得静默选择第一个同名目录。名称只能在唯一解析时作为简写；有歧义时命令必须失败并清楚列出 variants，用户可改用 TUI 选择明确实例。具体的非交互 identity selector 由 naming/core ticket 定义。
 
-```bash
-skillspub bundle ls                    # 所有 bundle(自动 repo:* + 手动)
-skillspub bundle show repo:ai-hero     # 看成员
-skillspub on  bundle:matt-pocock pi    # 整组开
-skillspub off bundle:matt-pocock claude
-```
+## TUI scope
 
-### tag
+TUI 是 matrix-first 的单项 relationship manager，不追求完整 CLI parity。
 
-```bash
-skillspub tag add code-review backend review
-skillspub tag ls [--skill code-review]
-skillspub ls --tag backend             # 过滤视图
-skillspub off tag:backend grok         # 按 tag 批量关
-```
+### Tabs and projection
 
-### preset
+1. **Agent**（默认）
+   - Agents
+   - selected agent 已有的 skill relationships（包含 on、off、local、link、broken）
+   - selected skill 的 passive summary
+   - 完全 absent 的 skills 不出现在此 tab
+2. **Skill**
+   - 所有 skill instances/variants
+   - selected skill 的 passive summary
+   - Agents 与 selected skill 的 relationship/status
 
-```bash
-skillspub preset create frontend
-skillspub preset add frontend bundle:matt-pocock tag:ui code-review
-skillspub preset agents frontend claude pi
-skillspub preset apply frontend        # 幂等收敛:preset 内的开,其他已管 skill 不动
-skillspub preset off frontend          # 只关 preset 里的,可恢复
-```
+宽屏显示三栏。终端宽度低于一个简单 breakpoint 时只隐藏 passive summary，保留两个 actionable columns；Enter 仍可打开详情。水平焦点移动必须跳过 summary：Agent tab 为 Agents ↔ Skills，Skill tab 为 Skills ↔ Agents。
 
-## 同步规则(ADR-0003)
+### Identity and labels
 
-| 事件 | 来源 | CLI 行为 | 命令 |
-| --- | --- | --- | --- |
-| 新 skill 装入 | npx skills / gh skill / 手动 | 发现它;从 lock 文件读来源 repo → 自动入 `repo:*` bundle;标 untagged 提醒分类 | `skillspub scan` |
-| skill 被更新 | npx skills update | symlink 场景 agent 自动看到最新版,什么都不用做;只更新 inventory 的 hash(用于检测"本地被手改过") | `skillspub scan` |
-| skill 被删除 | skills remove / 手动 rm | 死链 → doctor 清理;bundle/tag/preset 成员关系标 missing,不自动删(重装回来自动复活) | `skillspub doctor` |
-| 新 agent 装了 | 用户装新工具 | agents.conf 加一行;preset 里 `agents: [all]` 不自动铺开,apply 时提示 | 手动 + apply |
-| 上游 repo 加了新 skill | 上游发布 | scan 对比 `repo:*` bundle 成员和 lock 文件,发现"同源但未安装" → 提示可安装(不自动装) | `skillspub scan` |
+- 可解析的 skill instance 以 canonical `realPath` 为身份。
+- 多个 agents 指向同一 `realPath` 时聚合为一个 instance。
+- 同名但不同 `realPath` 时保留为 variants。
+- 只有同名歧义时才显示来源后缀，例如 `tdd — claude`。
+- Broken link 保留其 link path/target 作为异常 relationship，不得按名称并入可解析实例。
 
-## TUI
+### Status
 
-`skillspub tui`:全功能交互管理(ADR-0005)。skill × agent 开关矩阵 + on/off,bundle/tag/preset 的创建、成员管理、apply,与 CLI 命令面一一对应。TUI 是纯壳,业务逻辑在 core library,与 CLI、薄 skill 层共用。
+- Activation：`[ ON ]` / `[ OFF ]`
+- Resource form：`local` / `link`
+- Absent relationship：灰色 `missing`
+- Broken symlink：明显异常的 `broken`
 
-## 薄 skill 层
+文字承载主要语义，颜色只做强化；不要求 Nerd Font。
 
-`~/.agents/skills/skillspub/SKILL.md`,只写路由规则:
+### Actions and safety
 
-- 用户说"开/关/禁用某个 skill/某组 skills" → 跑 `skillspub on/off`
-- 用户问"某某 skill 在哪些 agent 上" → 跑 `skillspub status` / `skillspub ls`
-- 执行前先 `skillspub ls` 展示现状,执行后复述变更
-- bundle/tag/preset 相关话术 → 对应子命令
+- `Space`：现有 relationship 在 root ↔ `.off/` 间切换，不确认。
+- `Link`：从当前明确选中的 variant 向 selected agent 创建 symlink，显示 source → target 并确认。
+- `Unlink`：只移除 symlink（包括 `.off/` 下的 symlink），显示 source → target 并确认。
+- Local directory 不提供 Unlink；本版本绝不删除真实 skill directory。
+- Missing relationship 不能通过 ON/OFF 创建，必须使用 Link。
+- 单项操作；不支持 multiselect 或 bulk mutation。
+- 启动和自身 mutation 后重扫磁盘。外部变化由 `R` 显式刷新；不使用 watcher、polling 或后台进程。
+
+### Search, sort, details
+
+- `/` 搜索 skill name、frontmatter description 与 provenance/source；不搜索完整 SKILL.md body。
+- `s` 按 Name（默认）→ Status → Source 循环排序。
+- 排序或刷新后 selection 跟随 skill instance identity，不跟随旧 row index。
+- Agent 顺序保持 registry order。
+- Summary 显示 name、description、`sourceUrl`；无可靠来源时显示 `Source unknown` 与 `realPath`。
+- Enter 打开非全屏、可滚动的完整 SKILL.md modal；Esc 返回且保留 selection。
+- Keyboard-only；footer 只显示当前上下文可用动作。
+
+## Deferred command surface
+
+ADR-0002/0003 中的 bundle、tag、preset、scan 与 doctor 仍是独立 CLI roadmap，但不属于本次 matrix-first TUI build，也不得作为 TUI 上线依赖。Skill discovery、install、update、uninstall、真实目录删除与 recoverable trash 均不在本版本范围。
+
+## Thin skill layer
+
+薄 skill 通过 `skillspub` CLI 读取现场状态并执行明确的单项操作。它与 TUI 共享 programmatic core，但两个入口不要求暴露完全相同的功能。
