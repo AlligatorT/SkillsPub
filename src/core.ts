@@ -193,6 +193,59 @@ export interface SkillInstance {
 }
 
 export type Row = SkillInstance;
+export type SortOrder = 'name' | 'status' | 'source';
+
+function sourceSortValue(row: Row): string {
+  return row.provenance.sourceUrl
+    ?? row.provenance.source
+    ?? row.provenance.skillPath
+    ?? row.realPath
+    ?? row.relationships.map(({info}) => info.path).sort()[0]
+    ?? row.displayName;
+}
+
+/** Match only the inventory metadata already loaded for a skill instance. */
+export function matchesSearch(row: Row, query: string): boolean {
+  const needle = query.trim().toLocaleLowerCase();
+  if (!needle) return true;
+  return [
+    row.name,
+    row.displayName,
+    row.description,
+    row.provenance.source,
+    row.provenance.sourceUrl,
+    row.provenance.skillPath,
+  ].some((value) => value?.toLocaleLowerCase().includes(needle));
+}
+
+export function searchRows(rows: Row[], query: string): Row[] {
+  return rows.filter((row) => matchesSearch(row, query));
+}
+
+/** Compare rows in a projection; callers provide its active status when needed. */
+export function compareRows(
+  a: Row,
+  b: Row,
+  sort: SortOrder,
+  statusA = '',
+  statusB = '',
+): number {
+  const primary = sort === 'name'
+    ? a.displayName.localeCompare(b.displayName)
+    : sort === 'source'
+      ? sourceSortValue(a).localeCompare(sourceSortValue(b))
+      : statusA.localeCompare(statusB);
+  return primary || a.displayName.localeCompare(b.displayName) || a.id.localeCompare(b.id);
+}
+
+export function sortRows(
+  rows: Row[],
+  sort: SortOrder,
+  statusFor: (row: Row) => string = () => '',
+): Row[] {
+  return [...rows].sort((a, b) =>
+    compareRows(a, b, sort, statusFor(a), statusFor(b)));
+}
 
 function descriptionFrom(content: string): string | undefined {
   const frontmatter = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1];
