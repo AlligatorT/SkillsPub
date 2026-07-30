@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { loadAgents, scanAgent, scanAll } from '../src/core.ts';
+import { defaultHome, loadAgents, scanAgent, scanAll } from '../src/core.ts';
 
 function tmpHome(): { configDir: string } {
-  return { configDir: fs.mkdtempSync(path.join(os.tmpdir(), 'skm-test-')) };
+  return {
+    configDir: fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-test-')),
+  };
 }
 
 function mkSkill(dir: string, name: string): void {
@@ -100,6 +102,7 @@ import {
   setSkill,
   toggleSkill,
   loadState,
+  migrateLegacyConfig,
   filterRows,
   untagged,
   buildInventory,
@@ -172,6 +175,60 @@ test('loadState reads metadata from state.json; missing fields are empty', () =>
     tags: { 'code-review': ['review', 'backend'] },
     inventory: { 'code-review': { source: 'owner/repo' } },
   });
+});
+
+test('legacy configuration migrates into SkillsPub without removing its source', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-migration-'));
+  const legacy = path.join(root, 'skm');
+  const configDir = path.join(root, 'skillspub');
+  fs.mkdirSync(legacy);
+  fs.writeFileSync(path.join(legacy, 'agents.conf'), 'legacy = /tmp/skills\n');
+  fs.writeFileSync(
+    path.join(legacy, 'state.json'),
+    JSON.stringify({ tags: { grilling: ['legacy'] } }),
+  );
+
+  const previousConfig = process.env.SKILLSPUB_CONFIG_DIR;
+  const previousLegacy = process.env.SKM_CONFIG_DIR;
+  process.env.SKILLSPUB_CONFIG_DIR = configDir;
+  process.env.SKM_CONFIG_DIR = legacy;
+  try {
+    assert.deepEqual(defaultHome(), { configDir });
+  } finally {
+    if (previousConfig === undefined) delete process.env.SKILLSPUB_CONFIG_DIR;
+    else process.env.SKILLSPUB_CONFIG_DIR = previousConfig;
+    if (previousLegacy === undefined) delete process.env.SKM_CONFIG_DIR;
+    else process.env.SKM_CONFIG_DIR = previousLegacy;
+  }
+
+  assert.deepEqual(loadAgents({ configDir }), [
+    { name: 'legacy', dir: '/tmp/skills' },
+  ]);
+  assert.deepEqual(loadState({ configDir }).tags, { grilling: ['legacy'] });
+  assert.ok(fs.existsSync(path.join(legacy, 'state.json')));
+});
+
+test('legacy migration fills missing files without overwriting newer SkillsPub data', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-migration-'));
+  const legacy = path.join(root, 'skm');
+  const configDir = path.join(root, 'skillspub');
+  fs.mkdirSync(legacy);
+  fs.mkdirSync(configDir);
+  fs.writeFileSync(path.join(legacy, 'agents.conf'), 'legacy = /tmp/skills\n');
+  fs.writeFileSync(path.join(legacy, 'state.json'), '{"tags":{"old":[]}}');
+  fs.writeFileSync(path.join(configDir, 'state.json'), '{"tags":{"new":[]}}');
+
+  migrateLegacyConfig(configDir, legacy);
+
+  assert.deepEqual(loadState({ configDir }).tags, { new: [] });
+  assert.equal(
+    fs.readFileSync(path.join(configDir, 'agents.conf'), 'utf8'),
+    'legacy = /tmp/skills\n',
+  );
+  assert.equal(
+    fs.readFileSync(path.join(legacy, 'state.json'), 'utf8'),
+    '{"tags":{"old":[]}}',
+  );
 });
 
 test('skillDetail assembles live paths, agent state, metadata, and SKILL.md', () => {

@@ -6,14 +6,30 @@ export interface Home {
   configDir: string;
 }
 
-export function defaultHome(): Home {
-  return {
-    configDir:
-      process.env.SKM_CONFIG_DIR ?? path.join(os.homedir(), '.config', 'skm'),
-  };
+export function migrateLegacyConfig(configDir: string, legacyDir: string): void {
+  if (configDir === legacyDir || !fs.existsSync(legacyDir)) return;
+  fs.mkdirSync(configDir, { recursive: true });
+  for (const entry of fs.readdirSync(legacyDir)) {
+    const destination = path.join(configDir, entry);
+    if (!lexists(destination))
+      fs.cpSync(path.join(legacyDir, entry), destination, { recursive: true });
+  }
 }
 
-// --- agent registry (~/.config/skm/agents.conf) ---
+export function defaultHome(): Home {
+  const configDir =
+    process.env.SKILLSPUB_CONFIG_DIR ??
+    path.join(os.homedir(), '.config', 'skillspub');
+  // Migration-only: legacy data is copied into canonical config, never used directly.
+  if (process.env.SKM_CONFIG_DIR || !process.env.SKILLSPUB_CONFIG_DIR)
+    migrateLegacyConfig(
+      configDir,
+      process.env.SKM_CONFIG_DIR ?? path.join(os.homedir(), '.config', 'skm'),
+    );
+  return { configDir };
+}
+
+// --- agent registry (~/.config/skillspub/agents.conf) ---
 
 export interface Agent {
   name: string;

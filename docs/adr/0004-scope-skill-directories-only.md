@@ -18,7 +18,7 @@ agent 生态里"能力包"有多种形态:纯 skill 目录、CLI 耦合型 skill
 | plugin 包 | Claude Code plugins(`~/.claude/plugins/`)、codex/pi/opencode 各自格式 | skill + hooks + scripts + commands 打包,格式各家私有;要开关只能用各 agent 自己的 plugin 管理机制 |
 | MCP 配置 | 各 agent 的 mcp.json / config.toml | MCP 是通用原语,但每个 agent 的配置文件格式/位置都不同,是另一个工具的事 |
 
-**转换(可选,后做)**:`skm import <path>` 把 plugin 里纯粹的 skills/ 子目录抽出来变成普通 shared skill;hooks/scripts 部分直接丢弃并警告。
+**转换(可选,后做)**:`skillspub import <path>` 把 plugin 里纯粹的 skills/ 子目录抽出来变成普通 shared skill;hooks/scripts 部分直接丢弃并警告。
 
 ## 后果
 
