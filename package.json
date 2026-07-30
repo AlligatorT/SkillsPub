@@ -1,10 +1,11 @@
 {
-  "name": "skm",
+  "name": "skillspub",
   "version": "0.1.0",
-  "description": "Multi-agent skills on/off manager — disk is the source of truth",
+  "description": "SkillsPub multi-agent skills on/off manager — disk is the source of truth",
   "type": "module",
+  "files": ["src"],
   "bin": {
-    "skm": "src/cli.ts"
+    "skillspub": "src/cli.ts"
   },
   "engines": {
     "node": ">=22.18"

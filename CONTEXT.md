@@ -1,18 +1,18 @@
-# CONTEXT: skill-pub
+# CONTEXT: SkillsPub
 
-多 agent skills 开关管理 CLI(命令名 `skm`)+ 薄 skill 路由层。
+多 agent skills 开关管理 CLI(命令名 `skillspub`)+ 薄 skill 路由层。
 
 ## Ubiquitous Language
 
 | 术语 | 定义 |
 | --- | --- |
 | **skill** | 唯一管理单元:自包含的 `SKILL.md` 目录,位于各 agent 的全局 skills 根目录(`~/.claude/skills/`、`~/.agents/skills/`、`~/.pi/agent/skills/` 等) |
-| **agent** | 消费 skills 的工具(claude、pi、codex 等)。注册表在 `~/.config/skm/agents.conf` |
+| **agent** | 消费 skills 的工具(claude、pi、codex 等)。注册表在 `~/.config/skillspub/agents.conf` |
 | **开 (on)** | symlink/目录存在于某 agent 的 skills/ 一级目录 |
 | **关 (off)** | 挪到同目录的 `.off/` 子目录(agent 只扫一级,自动隐身)。**关 ≠ 删**,可恢复 |
-| **state file** | `~/.config/skm/state.json`,只存元数据(bundle/tag/preset/inventory),**不存 on/off 状态** |
+| **state file** | `~/.config/skillspub/state.json`,只存元数据(bundle/tag/preset/inventory),**不存 on/off 状态** |
 | **inventory** | state file 的一部分,记录每个 skill 的来源 repo、内容 hash、首次发现时间 |
-| **bundle** | skill 的命名分组。**自动 bundle** 按来源 repo 成组,命名 `repo:<owner>/<name>`;**手动 bundle** 由 `skm bundle create` 自由组合 |
+| **bundle** | skill 的命名分组。**自动 bundle** 按来源 repo 成组,命名 `repo:<owner>/<name>`;**手动 bundle** 由 `skillspub bundle create` 自由组合 |
 | **tag** | 纯标签,手动打,用于过滤和批量操作。不做智能分类 |
 | **preset** | bundles + skills + 目标 agents 的命名组合。`apply` 是**幂等的收敛操作**,不是一次性拷贝 |
 | **cli-coupled skill** | SKILL.md 里声明了 `allowed-tools`/`Bash(...cli...)` 的 skill(如 lark-*、agent-browser)。本体只是文档,能力在配套 CLI;可开关,但 CLI 不管 |
@@ -20,7 +20,7 @@
 
 ## 核心模型
 
-**磁盘是唯一真相,state file 只存元数据。** on/off 状态每次 `skm ls` 现场扫磁盘,外部工具(npx skills / skills-manager / 手动)怎么动都不冲突。
+**磁盘是唯一真相,state file 只存元数据。** on/off 状态每次 `skillspub ls` 现场扫磁盘,外部工具(npx skills / skills-manager / 手动)怎么动都不冲突。
 
 关键决策见 `docs/adr/`:
 
@@ -30,7 +30,7 @@
 - [0004](adr/0004-scope-skill-directories-only.md) — 管理范围 = 纯 SKILL.md 目录
 - [0005](adr/0005-tui.md) — 全功能 TUI;core 是 library,CLI/TUI/skill 三个入口共用
 
-实现:TypeScript/Node,TUI 用 Ink,分发走 npm(`npx skm`)。(ADR-0005)
+实现:TypeScript/Node,TUI 用 Ink,分发走 npm(`npx skillspub`)。(ADR-0005)
 
 命令面与同步规则见 [docs/spec/cli.md](spec/cli.md)。
 
