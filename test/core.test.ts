@@ -116,6 +116,9 @@ import {
   buildInventory,
   skillDetail,
   tuiSnapshot,
+  linkSkill,
+  toggleRelationship,
+  unlinkRelationship,
 } from '../src/core.ts';
 
 test('setSkill off moves skill into .off/, on moves it back', () => {
@@ -435,6 +438,53 @@ test('filterRows --agent/--tag; untagged lists skills with no tags', () => {
   assert.deepEqual(filterRows(rows, { tag: 'review' }, tags).map((r) => r.name), ['code-review']);
   assert.deepEqual(filterRows(rows, { agent: 'a' }, tags).map((r) => r.name), ['grilling']);
   assert.deepEqual(untagged(rows, tags), ['grilling', 'only-b']);
+});
+
+test('relationship mutations preserve links and never delete local skill directories', () => {
+  const home = tmpHome();
+  const shared = path.join(home.configDir, 'shared');
+  const sourceDir = path.join(home.configDir, 'source');
+  const targetDir = path.join(home.configDir, 'target');
+  mkSkill(shared, 'shared');
+  mkSkill(sourceDir, 'local');
+  fs.mkdirSync(targetDir, {recursive: true});
+  const source = scanAgent({name: 'source', dir: sourceDir}).get('local')!;
+  const target = {name: 'target', dir: targetDir};
+
+  linkSkill(target, 'local', source.realPath!);
+  const linked = scanAgent(target).get('local')!;
+  assert.equal(linked.linked, true);
+  assert.equal(linked.target, source.realPath);
+  assert.throws(() => linkSkill(target, 'local', source.realPath!), /relationship already exists/);
+
+  unlinkRelationship(target, linked);
+  assert.equal(scanAgent(target).has('local'), false);
+  assert.ok(fs.existsSync(path.join(sourceDir, 'local', 'SKILL.md')));
+
+  mkSkill(targetDir, 'local');
+  const local = scanAgent(target).get('local')!;
+  assert.throws(() => unlinkRelationship(target, local), /never deleted/);
+  assert.ok(fs.existsSync(path.join(targetDir, 'local', 'SKILL.md')));
+});
+
+test('selected relationship operations move broken links without dereferencing', () => {
+  const home = tmpHome();
+  const dir = path.join(home.configDir, 'skills');
+  const agent = {name: 'a', dir};
+  fs.mkdirSync(dir, {recursive: true});
+  fs.symlinkSync('/gone/target', path.join(dir, 'broken'));
+
+  const on = scanAgent(agent).get('broken')!;
+  assert.equal(toggleRelationship(agent, on), 'off');
+  const off = scanAgent(agent).get('broken')!;
+  assert.equal(off.path, path.join(dir, '.off', 'broken'));
+  assert.equal(off.target, '/gone/target');
+  assert.equal(toggleRelationship(agent, off), 'on');
+  const restored = scanAgent(agent).get('broken')!;
+  assert.equal(restored.target, '/gone/target');
+
+  unlinkRelationship(agent, restored);
+  assert.throws(() => fs.lstatSync(path.join(dir, 'broken')));
 });
 
 test('loadAgents throws a clear error on malformed lines, keeps paths containing =', () => {
