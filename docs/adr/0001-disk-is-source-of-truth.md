@@ -26,11 +26,11 @@
 ## 决策
 
 - **磁盘是唯一真相**:开 = symlink/目录存在于 agent 的 skills/ 一级目录;关 = 挪到同目录的 `.off/` 子目录(agent 只扫一级,自动隐身)。
-- **state file(`~/.config/skm/state.json`)只存元数据**:bundles、tags、presets、inventory。**on/off 状态不入状态文件**,每次 `skm ls` 现场扫磁盘。
+- **state file(`~/.config/skillspub/state.json`)只存元数据**:bundles、tags、presets、inventory。**on/off 状态不入状态文件**,每次 `skillspub ls` 现场扫磁盘。
 - 关 ≠ 删:`.off/` 里的 skill 随时可恢复。
 
 ## 后果
 
-- 外部工具(npx skills / skills-manager / 手动)怎么动磁盘都不冲突,`skm` 永远以现场扫描为准。
+- 外部工具(npx skills / skills-manager / 手动)怎么动磁盘都不冲突,`skillspub` 永远以现场扫描为准。
 - 状态文件可以丢:bundle/tag/preset 配置没了能重建,开关状态本来就活在磁盘上。
 - 代价:每次 `ls` 要扫磁盘——skill 数量级下可忽略。

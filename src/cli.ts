@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   defaultHome,
   loadAgents,
@@ -13,17 +14,23 @@ import {
   type Row,
 } from './core.ts';
 
-const USAGE = `skm — multi-agent skills on/off manager (disk is the source of truth)
+const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the source of truth)
 
-  skm ls [--agent A] [--tag T]   skill × agent matrix (+ untagged/deadlink hints)
-  skm on|off <skill> <agent...>  move skill between skills/ and skills/.off/
-  skm status <skill>             per-agent state of one skill
-  skm agents                     agent registry (~/.config/skm/agents.conf)
-  skm tui                        interactive full-screen skill browser
+  skillspub ls [--agent A] [--tag T]   skill × agent matrix (+ untagged/deadlink hints)
+  skillspub on|off <skill> <agent...>  move skill between skills/ and skills/.off/
+  skillspub status <skill>             per-agent state of one skill
+  skillspub agents                     agent registry (~/.config/skillspub/agents.conf)
+  skillspub tui                        interactive full-screen skill browser
 `;
 
-const home = defaultHome();
-const [cmd, ...rest] = process.argv.slice(2);
+export function shouldRunTui(
+  command: string | undefined,
+  stdinIsTty: boolean,
+  stdoutIsTty: boolean,
+): boolean {
+  return command === 'tui' ||
+    (command === undefined && stdinIsTty && stdoutIsTty);
+}
 
 const CELL: Record<string, string> = { on: 'on', off: 'off', deadlink: '!' };
 
@@ -44,7 +51,7 @@ function printMatrix(rows: Row[], agentNames: string[]): void {
   }
 }
 
-function cmdLs(args: string[]): void {
+function cmdLs(home: ReturnType<typeof defaultHome>, args: string[]): void {
   const { values } = parseArgs({
     args,
     options: { agent: { type: 'string' }, tag: { type: 'string' } },
@@ -71,12 +78,20 @@ function cmdLs(args: string[]): void {
   );
   const unt = untagged(rows, tags);
   if (dead.length > 0) console.log(`\n死链 (doctor 清理): ${dead.join(', ')}`);
-  if (unt.length > 0) console.log(`未分类 (skm tag add): ${unt.join(', ')}`);
+  if (unt.length > 0)
+    console.log(`未分类 (skillspub tag add): ${unt.join(', ')}`);
 }
 
-function cmdOnOff(on: boolean, args: string[]): void {
+function cmdOnOff(
+  home: ReturnType<typeof defaultHome>,
+  on: boolean,
+  args: string[],
+): void {
   const [skill, ...names] = args;
-  if (!skill || names.length === 0) throw new Error(`usage: skm ${on ? 'on' : 'off'} <skill> <agent...>`);
+  if (!skill || names.length === 0)
+    throw new Error(
+      `usage: skillspub ${on ? 'on' : 'off'} <skill> <agent...>`,
+    );
   const agents = loadAgents(home);
   for (const name of names) {
     const agent = agents.find((a) => a.name === name);
@@ -90,9 +105,12 @@ function cmdOnOff(on: boolean, args: string[]): void {
   }
 }
 
-function cmdStatus(args: string[]): void {
+function cmdStatus(
+  home: ReturnType<typeof defaultHome>,
+  args: string[],
+): void {
   const [skill] = args;
-  if (!skill) throw new Error('usage: skm status <skill>');
+  if (!skill) throw new Error('usage: skillspub status <skill>');
   let any = false;
   for (const agent of loadAgents(home)) {
     const info = scanAgent(agent).get(skill);
@@ -111,38 +129,51 @@ function cmdStatus(args: string[]): void {
   }
 }
 
-function cmdAgents(): void {
+function cmdAgents(home: ReturnType<typeof defaultHome>): void {
   for (const a of loadAgents(home)) {
     console.log(`${a.name}\t${a.dir}\t${fs.existsSync(a.dir) ? 'ok' : 'missing dir'}`);
   }
 }
 
-try {
-  switch (cmd) {
-    case 'ls':
-      cmdLs(rest);
-      break;
-    case 'on':
-      cmdOnOff(true, rest);
-      break;
-    case 'off':
-      cmdOnOff(false, rest);
-      break;
-    case 'status':
-      cmdStatus(rest);
-      break;
-    case 'agents':
-      cmdAgents();
-      break;
-    case 'tui':
-      if (rest.length > 0) throw new Error('usage: skm tui');
+async function main(
+  args: string[] = process.argv.slice(2),
+  stdinIsTty = Boolean(process.stdin.isTTY),
+  stdoutIsTty = Boolean(process.stdout.isTTY),
+): Promise<void> {
+  const home = defaultHome();
+  const [cmd, ...rest] = args;
+  try {
+    if (shouldRunTui(cmd, stdinIsTty, stdoutIsTty)) {
+      if (cmd === 'tui' && rest.length > 0)
+        throw new Error('usage: skillspub tui');
       await (await import('./tui.ts')).runTui(home);
-      break;
-    default:
-      process.stderr.write(USAGE);
-      process.exit(cmd === undefined ? 0 : 1);
+    } else switch (cmd) {
+      case 'ls':
+        cmdLs(home, rest);
+        break;
+      case 'on':
+        cmdOnOff(home, true, rest);
+        break;
+      case 'off':
+        cmdOnOff(home, false, rest);
+        break;
+      case 'status':
+        cmdStatus(home, rest);
+        break;
+      case 'agents':
+        cmdAgents(home);
+        break;
+      default:
+        process.stderr.write(USAGE);
+        process.exit(cmd === undefined ? 0 : 1);
+    }
+  } catch (err) {
+    console.error(`skillspub: ${(err as Error).message}`);
+    process.exit(1);
   }
-} catch (err) {
-  console.error(`skm: ${(err as Error).message}`);
-  process.exit(1);
 }
+
+if (
+  process.argv[1] &&
+  fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)
+) await main();

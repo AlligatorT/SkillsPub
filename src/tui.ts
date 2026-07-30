@@ -296,7 +296,7 @@ function App({home}: {home: Home}): ReactNode {
 
 export async function runTui(home: Home = defaultHome()): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    throw new Error('skm tui requires an interactive terminal');
+    throw new Error('skillspub tui requires an interactive terminal');
   }
   process.stdout.write('\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l');
   try {
