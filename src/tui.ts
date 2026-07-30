@@ -1,314 +1,337 @@
 import {createElement as h, useEffect, useMemo, useState} from 'react';
 import type {ReactNode} from 'react';
-import {Box, Text, render, useApp, useInput} from 'ink';
+import {Box, Text, render, useApp, useInput, useStdout} from 'ink';
 import {
   defaultHome,
   skillDetail,
-  toggleSkill,
   tuiSnapshot,
-  type Agent,
   type Home,
-  type Presence,
   type Row,
-  type SkillDetail,
   type SkillInfo,
+  type SkillRelationship,
   type TuiSnapshot,
 } from './core.ts';
 
-const CELL: Record<Presence, {mark: string; color: string}> = {
-  on: {mark: '●', color: 'green'},
-  off: {mark: '○', color: 'yellow'},
-  deadlink: {mark: '!', color: 'red'},
-};
+/** Below this width the passive summary column is hidden. */
+const WIDE_MIN = 80;
 
-function useTerminalSize(): {width: number; height: number} {
-  const read = () => ({
-    width: process.stdout.columns ?? 100,
-    height: process.stdout.rows ?? 30,
-  });
-  const [size, setSize] = useState(read);
-  useEffect(() => {
-    const resize = () => setSize(read());
-    process.stdout.on('resize', resize);
-    return () => {
-      process.stdout.off('resize', resize);
-    };
-  }, []);
-  return size;
+interface RelEntry {
+  row: Row;
+  relationship: SkillRelationship;
+  key: string;
 }
 
-function Indicator({info}: {info?: SkillInfo}): ReactNode {
-  if (!info) return h(Text, {dimColor: true}, '·');
-  const cell = CELL[info.presence];
-  return h(Text, {color: cell.color}, cell.mark);
+/** Existing relationships of one agent, in inventory order (absent skills excluded). */
+function entriesFor(rows: Row[], agentName: string): RelEntry[] {
+  return rows.flatMap((row) =>
+    row.relationships
+      .filter((relationship) => relationship.agent === agentName)
+      .map((relationship) => ({
+        row,
+        relationship,
+        key: `${row.id}${relationship.name}`,
+      })),
+  );
 }
 
-function SkillList({
-  rows,
+function statusText(info: SkillInfo): string {
+  if (info.presence === 'deadlink') return 'broken';
+  const state = info.presence === 'on' ? '[ ON ]' : '[ OFF ]';
+  return `${state} ${info.linked ? 'link' : 'local'}`;
+}
+
+function statusColor(info: SkillInfo): string {
+  if (info.presence === 'deadlink') return 'red';
+  return info.presence === 'on' ? 'green' : 'yellow';
+}
+
+/** Visible window [start, start+height) that keeps `selected` on screen. */
+function windowStart(length: number, selected: number, height: number): number {
+  return Math.max(
+    0,
+    Math.min(selected - Math.floor(height / 2), length - height),
+  );
+}
+
+function ListColumn({
+  title,
+  focused,
+  width,
+  flexGrow,
+  children,
+}: {
+  title: string;
+  focused: boolean;
+  width?: number;
+  flexGrow?: number;
+  children?: ReactNode;
+}): ReactNode {
+  return h(
+    Box,
+    {
+      flexDirection: 'column',
+      width,
+      flexGrow,
+      borderStyle: 'single',
+      borderColor: focused ? 'cyan' : 'gray',
+    },
+    h(
+      Text,
+      {bold: focused, color: focused ? 'cyan' : undefined},
+      ` ${title}`,
+    ),
+    children,
+  );
+}
+
+function RowLine({
+  active,
+  focused,
+  children,
+}: {
+  active: boolean;
+  focused: boolean;
+  children?: ReactNode;
+}): ReactNode {
+  return h(
+    Text,
+    {inverse: active && focused, wrap: 'truncate-end'},
+    `${active && focused ? '›' : ' '} `,
+    children,
+  );
+}
+
+function AgentList({
   agents,
   selected,
-  selectedAgent,
+  focused,
   width,
   height,
 }: {
-  rows: Row[];
-  agents: Agent[];
+  agents: TuiSnapshot['agents'];
   selected: number;
-  selectedAgent: number;
+  focused: boolean;
   width: number;
   height: number;
 }): ReactNode {
-  const columnWidths = agents.map((agent) => Math.max(3, agent.name.length + 1));
-  const nameWidth = Math.max(8, width - columnWidths.reduce((a, b) => a + b, 0) - 3);
-  const start = Math.max(0, Math.min(selected - Math.floor(height / 2), rows.length - height));
-  const visible = rows.slice(start, start + height);
-
+  const start = windowStart(agents.length, selected, height);
   return h(
-    Box,
-    {flexDirection: 'column', width},
-    h(
-      Box,
-      null,
-      h(Text, {bold: true, color: 'cyan', wrap: 'truncate-end'}, 'skill'.padEnd(nameWidth)),
-      ...agents.map((agent, index) =>
-        h(
-          Text,
-          {
-            key: agent.name,
-            bold: index === selectedAgent,
-            color: index === selectedAgent ? 'cyan' : undefined,
-            wrap: 'truncate-end',
-          },
-          agent.name.padEnd(columnWidths[index]),
-        ),
+    ListColumn,
+    {title: 'Agents', focused, width},
+    ...agents.slice(start, start + height).map((agent, index) =>
+      h(
+        RowLine,
+        {key: agent.name, active: start + index === selected, focused},
+        agent.name,
       ),
     ),
-    ...visible.map((row, visibleIndex) => {
-      const active = start + visibleIndex === selected;
-      return h(
-        Box,
-        {key: row.id},
-        h(
-          Text,
-          {inverse: active, bold: active, wrap: 'truncate-end'},
-          `${active ? '›' : ' '} ${row.displayName}`.padEnd(nameWidth),
-        ),
-        ...agents.map((agent, index) =>
-          h(
-            Box,
-            {key: agent.name, width: columnWidths[index]},
-            h(Indicator, {info: row.agents[agent.name]}),
-          ),
-        ),
-      );
-    }),
-    rows.length === 0 ? h(Text, {dimColor: true}, '  no matching skills') : null,
   );
 }
 
-function stateLabel(info?: SkillInfo): string {
-  if (!info) return '—';
-  if (info.presence === 'deadlink') return info.underOff ? 'deadlink (.off)' : 'deadlink';
-  return info.presence;
+function RelationshipList({
+  entries,
+  selected,
+  focused,
+  height,
+}: {
+  entries: RelEntry[];
+  selected: number;
+  focused: boolean;
+  height: number;
+}): ReactNode {
+  const start = windowStart(entries.length, selected, height);
+  return h(
+    ListColumn,
+    {title: 'Relationships', focused, flexGrow: 1},
+    ...entries.slice(start, start + height).map((entry, index) => {
+      const info = entry.relationship.info;
+      const active = start + index === selected;
+      return h(
+        RowLine,
+        {key: entry.key, active, focused},
+        h(Text, {color: statusColor(info)}, statusText(info)),
+        ' ',
+        entry.row.displayName,
+        info.presence === 'deadlink' && info.target
+          ? h(Text, {dimColor: true}, ` -> ${info.target}`)
+          : null,
+      );
+    }),
+    entries.length === 0
+      ? h(Text, {dimColor: true}, '  no skills for this agent')
+      : null,
+  );
 }
 
-function DetailPane({
-  detail,
-  agents,
-  selectedAgent,
+function Summary({entry, width}: {entry?: RelEntry; width: number}): ReactNode {
+  const info = entry?.relationship.info;
+  return h(
+    ListColumn,
+    {title: 'Summary', focused: false, width},
+    !entry || !info
+      ? h(Text, {dimColor: true}, '  nothing selected')
+      : [
+          h(Text, {key: 'name', bold: true, wrap: 'truncate-end'}, ` ${entry.row.displayName}`),
+          h(Text, {key: 'desc', wrap: 'truncate-end'}, ` ${entry.row.description ?? '—'}`),
+          h(Text, {key: 'source', wrap: 'truncate-end'}, ` Source: ${entry.row.sourceLabel}`),
+          h(
+            Text,
+            {key: 'path', wrap: 'truncate-end', dimColor: info.presence === 'deadlink'},
+            ` ${entry.row.realPath ?? `${info.path}${info.target ? ` -> ${info.target}` : ''}`}`,
+          ),
+        ],
+  );
+}
+
+function DetailModal({
+  entry,
+  content,
   scroll,
   height,
 }: {
-  detail?: SkillDetail;
-  agents: Agent[];
-  selectedAgent: number;
+  entry: RelEntry;
+  content: string;
   scroll: number;
   height: number;
 }): ReactNode {
-  if (!detail) return h(Text, {dimColor: true}, 'Select a skill');
-  const content = (detail.content ?? 'SKILL.md unavailable').split('\n');
-  const metadataHeight = 10 + detail.realPaths.length + agents.length;
-  const contentHeight = Math.max(3, height - metadataHeight);
-  const visible = content.slice(scroll, scroll + contentHeight);
-
+  const lines = content.split('\n');
+  // header + footer + modal chrome/title leave this many content rows
+  const viewHeight = Math.max(1, height - 8);
+  const visible = lines.slice(scroll, scroll + viewHeight);
   return h(
     Box,
-    {flexDirection: 'column', flexGrow: 1, paddingLeft: 1},
-    h(Text, {bold: true, color: 'cyan'}, detail.displayName),
-    h(
-      Box,
-      null,
-      h(Text, {bold: true}, 'State: '),
-      ...agents.flatMap((agent, index) => [
-        h(Text, {key: `${agent.name}-name`, bold: index === selectedAgent, color: index === selectedAgent ? 'cyan' : undefined}, `${agent.name}=`),
-        h(Indicator, {key: `${agent.name}-state`, info: detail.agents[agent.name]}),
-        h(Text, {key: `${agent.name}-space`}, '  '),
-      ]),
-    ),
-    h(Text, null, h(Text, {bold: true}, 'Description: '), detail.description ?? '—'),
-    h(Text, null, h(Text, {bold: true}, 'Source: '), detail.sourceLabel),
-    h(Text, null, h(Text, {bold: true}, 'Bundles: '), detail.bundles.join(', ') || '—'),
-    h(Text, null, h(Text, {bold: true}, 'Tags: '), detail.tags.join(', ') || '—'),
-    h(Text, {bold: true}, 'Resolved install path(s):'),
-    ...(detail.realPaths.length > 0
-      ? detail.realPaths.map((realPath) => h(Text, {key: realPath, wrap: 'truncate-end'}, `  ${realPath}`))
-      : [h(Text, {key: 'none', dimColor: true}, '  unavailable')]),
-    h(Text, {bold: true}, 'Agent roots / links:'),
-    ...agents.map((agent) => {
-      const info = detail.agents[agent.name];
-      const suffix = info?.linked && info.realPath ? ` -> ${info.realPath}` : '';
-      return h(
-        Text,
-        {key: agent.name, wrap: 'truncate-end'},
-        `  ${agent.name}: ${stateLabel(info)}  ${info?.path ?? agent.dir}${suffix}`,
-      );
-    }),
+    {
+      flexGrow: 1,
+      flexDirection: 'column',
+      borderStyle: 'round',
+      borderColor: 'cyan',
+      paddingX: 1,
+      overflow: 'hidden',
+    },
     h(
       Text,
-      {bold: true},
-      `SKILL.md${detail.contentPath ? ` — ${detail.contentPath}` : ''}  [${Math.min(scroll + 1, content.length)}/${content.length}]`,
+      {bold: true, wrap: 'truncate-end'},
+      `SKILL.md — ${entry.row.displayName}  [${Math.min(scroll + 1, lines.length)}/${lines.length}]`,
     ),
-    h(
-      Box,
-      {flexDirection: 'column', flexGrow: 1, overflow: 'hidden'},
-      ...visible.map((line, index) => h(Text, {key: scroll + index, wrap: 'truncate-end'}, line || ' ')),
+    ...visible.map((line, index) =>
+      h(Text, {key: scroll + index, wrap: 'truncate-end'}, line || ' '),
     ),
   );
 }
 
-function App({home}: {home: Home}): ReactNode {
+export function App({home}: {home: Home}): ReactNode {
   const {exit} = useApp();
-  const {width, height} = useTerminalSize();
-  const [snapshot, setSnapshot] = useState<TuiSnapshot>(() => tuiSnapshot(home));
-  const [selected, setSelected] = useState(0);
-  const [selectedAgent, setSelectedAgent] = useState(0);
-  const [query, setQuery] = useState('');
-  const [searching, setSearching] = useState(false);
-  const [scroll, setScroll] = useState(0);
-  const [message, setMessage] = useState('');
+  const {stdout} = useStdout();
+  const readSize = () => ({
+    width: stdout.columns ?? 100,
+    height: stdout.rows ?? 30,
+  });
+  const [size, setSize] = useState(readSize);
+  useEffect(() => {
+    const resize = () => setSize(readSize());
+    stdout.on('resize', resize);
+    return () => {
+      stdout.off('resize', resize);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stdout]);
+  const {width, height} = size;
 
-  const rows = useMemo(() => {
-    const needle = query.toLowerCase();
-    return snapshot.rows.filter((row) =>
-      [
-        row.name,
-        row.description,
-        row.provenance.source,
-        row.provenance.sourceUrl,
-        row.provenance.skillPath,
-      ].some((value) => value?.toLowerCase().includes(needle)),
-    );
-  }, [query, snapshot]);
-  const row = rows[selected];
-  const detail = useMemo(
-    () => row ? skillDetail(home, snapshot.agents, row.id) : undefined,
-    [home, row, snapshot.agents],
+  const [snapshot] = useState<TuiSnapshot>(() => tuiSnapshot(home));
+  const [focusColumn, setFocusColumn] = useState<0 | 1>(0);
+  const [agentIndex, setAgentIndex] = useState(0);
+  const [skillIndex, setSkillIndex] = useState(0);
+  const [modal, setModal] = useState<{entry: RelEntry; scroll: number} | null>(null);
+
+  const agents = snapshot.agents;
+  const agent = agents[Math.min(agentIndex, Math.max(0, agents.length - 1))];
+  const entries = useMemo(
+    () => (agent ? entriesFor(snapshot.rows, agent.name) : []),
+    [snapshot.rows, agent],
   );
-  const leftWidth = Math.max(30, Math.floor(width * 0.43));
-  const bodyHeight = Math.max(6, height - 3);
-  const contentLines = (detail?.content ?? 'SKILL.md unavailable').split('\n').length;
-  let searchStatus = ' ';
-  if (searching) searchStatus = `/${query}▌`;
-  else if (query) searchStatus = `filter: ${query}`;
+  const skill = Math.min(skillIndex, Math.max(0, entries.length - 1));
+  const entry = entries[skill];
 
-  useEffect(() => {
-    if (selected >= rows.length) setSelected(Math.max(0, rows.length - 1));
-  }, [rows.length, selected]);
-  useEffect(() => setScroll(0), [row?.id]);
-  useEffect(() => {
-    if (scroll >= contentLines) setScroll(Math.max(0, contentLines - 1));
-  }, [contentLines, scroll]);
+  const wide = width >= WIDE_MIN;
+  const bodyHeight = Math.max(3, height - 2);
+  const listHeight = Math.max(1, bodyHeight - 3);
+  const agentWidth = Math.max(
+    10,
+    Math.min(24, Math.max(0, ...agents.map((a) => a.name.length)) + 6),
+  );
+  const summaryWidth = Math.max(24, Math.floor(width * 0.3));
+  const modalContent = modal
+    ? (skillDetail(home, agents, modal.entry.row.id)?.content ?? 'SKILL.md unavailable')
+    : '';
+  const modalLines = modal ? modalContent.split('\n').length : 0;
+  const modalPage = Math.max(1, height - 6);
+
+  useEffect(() => setSkillIndex(0), [agent?.name]);
 
   useInput((input, key) => {
-    if (searching) {
-      if (key.escape || key.return) setSearching(false);
-      else if (key.backspace || key.delete) setQuery((value) => value.slice(0, -1));
-      else if (key.ctrl && input === 'u') setQuery('');
-      else if (!key.ctrl && !key.meta && input) setQuery((value) => value + input);
+    if (modal) {
+      if (key.escape) return setModal(null);
+      if (key.downArrow || input === 'j')
+        return setModal({...modal, scroll: Math.min(modalLines - 1, modal.scroll + 1)});
+      if (key.upArrow || input === 'k')
+        return setModal({...modal, scroll: Math.max(0, modal.scroll - 1)});
+      if (key.pageDown || (key.ctrl && input === 'd'))
+        return setModal({...modal, scroll: Math.min(modalLines - 1, modal.scroll + modalPage)});
+      if (key.pageUp || (key.ctrl && input === 'u'))
+        return setModal({...modal, scroll: Math.max(0, modal.scroll - modalPage)});
       return;
     }
     if (input === 'q' || (key.ctrl && input === 'c')) return exit();
-    if (input === '/') return setSearching(true);
-    if (key.escape) {
-      setQuery('');
-      setMessage('');
-      return;
-    }
+    if (key.rightArrow || input === 'l') return setFocusColumn(1);
+    if (key.leftArrow || input === 'h') return setFocusColumn(0);
     if (key.downArrow || input === 'j') {
-      setSelected((value) => Math.min(Math.max(0, rows.length - 1), value + 1));
+      if (focusColumn === 0)
+        setAgentIndex((value) => Math.min(Math.max(0, agents.length - 1), value + 1));
+      else setSkillIndex((value) => Math.min(Math.max(0, entries.length - 1), value + 1));
       return;
     }
     if (key.upArrow || input === 'k') {
-      setSelected((value) => Math.max(0, value - 1));
+      if (focusColumn === 0) setAgentIndex((value) => Math.max(0, value - 1));
+      else setSkillIndex((value) => Math.max(0, value - 1));
       return;
     }
-    if (key.home) return setSelected(0);
-    if (key.end) return setSelected(Math.max(0, rows.length - 1));
-    if (key.tab || key.rightArrow || input === 'l') {
-      if (snapshot.agents.length > 0)
-        setSelectedAgent((value) => (value + 1) % snapshot.agents.length);
-      return;
-    }
-    if (key.leftArrow || input === 'h') {
-      if (snapshot.agents.length > 0)
-        setSelectedAgent((value) => (value - 1 + snapshot.agents.length) % snapshot.agents.length);
-      return;
-    }
-    if (key.pageDown || (key.ctrl && input === 'd')) {
-      setScroll((value) =>
-        Math.min(contentLines - 1, value + Math.max(1, Math.floor(bodyHeight / 2))),
-      );
-      return;
-    }
-    if (key.pageUp || (key.ctrl && input === 'u')) {
-      setScroll((value) => Math.max(0, value - Math.max(1, Math.floor(bodyHeight / 2))));
-      return;
-    }
-    if ((input === ' ' || key.return) && row) {
-      const agent = snapshot.agents[selectedAgent];
-      if (!agent) return;
-      try {
-        const found = row.relationships.filter(
-          (relationship) => relationship.agent === agent.name,
-        );
-        if (found.length !== 1) {
-          throw new Error(
-            found.length === 0
-              ? `${row.displayName} has no relationship with ${agent.name}`
-              : `${row.displayName} has multiple relationships with ${agent.name}`,
-          );
-        }
-        const result = toggleSkill(agent, found[0].name);
-        setSnapshot(tuiSnapshot(home));
-        setMessage(`${row.displayName} @ ${agent.name}: ${result}`);
-      } catch (error) {
-        setMessage((error as Error).message);
-      }
-    }
+    if (key.return && entry) setModal({entry, scroll: 0});
   });
 
   return h(
     Box,
     {flexDirection: 'column', width, height},
-    h(
-      Box,
-      {height: bodyHeight},
-      h(SkillList, {
-        rows,
-        agents: snapshot.agents,
-        selected,
-        selectedAgent,
-        width: leftWidth,
-        height: bodyHeight - 1,
-      }),
-      h(Box, {borderStyle: 'single', borderTop: false, borderBottom: false, borderRight: false}),
-      h(DetailPane, {detail, agents: snapshot.agents, selectedAgent, scroll, height: bodyHeight}),
-    ),
-    h(Text, {color: searching ? 'cyan' : undefined}, searchStatus),
+    h(Text, null, h(Text, {inverse: true}, ' Agent ')),
+    modal
+      ? h(
+          Box,
+          {height: bodyHeight, paddingLeft: 2, paddingRight: 2, paddingTop: 1},
+          h(DetailModal, {entry: modal.entry, content: modalContent, scroll: modal.scroll, height}),
+        )
+      : h(
+          Box,
+          {height: bodyHeight},
+          h(AgentList, {
+            agents,
+            selected: agentIndex,
+            focused: focusColumn === 0,
+            width: agentWidth,
+            height: listHeight,
+          }),
+          h(RelationshipList, {
+            entries,
+            selected: skill,
+            focused: focusColumn === 1,
+            height: listHeight,
+          }),
+          wide ? h(Summary, {entry, width: summaryWidth}) : null,
+        ),
     h(
       Text,
       {inverse: true, wrap: 'truncate-end'},
-      message || ' ↑↓/jk skill  ←→/hl/tab agent  space/enter toggle  / search  PgUp/PgDn detail  q quit ',
+      modal
+        ? ' ↑↓/jk scroll  PgUp/PgDn page  esc close '
+        : ' ←→/hl column  ↑↓/jk select  enter SKILL.md  q quit ',
     ),
   );
 }
