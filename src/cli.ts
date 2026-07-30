@@ -5,8 +5,7 @@ import { fileURLToPath } from 'node:url';
 import {
   defaultHome,
   loadAgents,
-  scanAll,
-  scanAgent,
+  buildInventory,
   setSkill,
   loadState,
   filterRows,
@@ -38,17 +37,45 @@ function pad(s: string, n: number): string {
   return s + ' '.repeat(Math.max(0, n - s.length));
 }
 
+function relationships(row: Row, agent: string) {
+  return row.relationships.filter((relationship) => relationship.agent === agent);
+}
+
+function matrixCell(row: Row, agent: string): string {
+  const states = [...new Set(relationships(row, agent).map(({info}) => CELL[info.presence]))];
+  return states.join('/') || '·';
+}
+
 function printMatrix(rows: Row[], agentNames: string[]): void {
-  const w = Math.max(5, ...rows.map((r) => r.name.length)) + 2;
+  const w = Math.max(5, ...rows.map((r) => r.displayName.length)) + 2;
   console.log(pad('skill', w) + agentNames.map((a) => pad(a, 9)).join(''));
   for (const r of rows) {
     console.log(
-      pad(r.name, w) +
-        agentNames
-          .map((a) => pad(CELL[r.agents[a]?.presence ?? ''] ?? '·', 9))
-          .join(''),
+      pad(r.displayName, w) +
+        agentNames.map((agent) => pad(matrixCell(r, agent), 9)).join(''),
     );
   }
+}
+
+function matchingInstances(rows: Row[], name: string): Row[] {
+  return rows.filter((row) =>
+    row.relationships.some((relationship) => relationship.name === name),
+  );
+}
+
+function variantLocation(row: Row): string {
+  return row.realPath
+    ?? `${row.relationships[0].info.path} -> ${row.relationships[0].info.target ?? '?'}`;
+}
+
+function refuseAmbiguousName(rows: Row[], name: string): void {
+  const matches = matchingInstances(rows, name);
+  if (matches.length < 2) return;
+  throw new Error(
+    `skill name "${name}" is ambiguous:\n${matches
+      .map((row) => `  - ${row.displayName}: ${variantLocation(row)}`)
+      .join('\n')}\nUse skillspub tui to select a specific variant.`,
+  );
 }
 
 function cmdLs(home: ReturnType<typeof defaultHome>, args: string[]): void {
@@ -61,7 +88,7 @@ function cmdLs(home: ReturnType<typeof defaultHome>, args: string[]): void {
     throw new Error(`unknown agent: ${values.agent}`);
   const { tags } = loadState(home);
   const rows = filterRows(
-    scanAll(agents),
+    buildInventory(home, agents).instances,
     { agent: values.agent, tag: values.tag },
     tags,
   );
@@ -71,10 +98,10 @@ function cmdLs(home: ReturnType<typeof defaultHome>, args: string[]): void {
     return;
   }
   printMatrix(rows, cols);
-  const dead = rows.flatMap((r) =>
-    Object.entries(r.agents)
-      .filter(([, i]) => i?.presence === 'deadlink')
-      .map(([a, i]) => `${a}/${r.name} -> ${i?.target ?? '?'}`),
+  const dead = rows.flatMap((row) =>
+    row.relationships
+      .filter(({info}) => info.presence === 'deadlink')
+      .map(({agent, name, info}) => `${agent}/${name} -> ${info.target ?? '?'}`),
   );
   const unt = untagged(rows, tags);
   if (dead.length > 0) console.log(`\n死链 (doctor 清理): ${dead.join(', ')}`);
@@ -93,6 +120,7 @@ function cmdOnOff(
       `usage: skillspub ${on ? 'on' : 'off'} <skill> <agent...>`,
     );
   const agents = loadAgents(home);
+  refuseAmbiguousName(buildInventory(home, agents).instances, skill);
   for (const name of names) {
     const agent = agents.find((a) => a.name === name);
     if (!agent) throw new Error(`unknown agent: ${name}`);
@@ -111,21 +139,29 @@ function cmdStatus(
 ): void {
   const [skill] = args;
   if (!skill) throw new Error('usage: skillspub status <skill>');
-  let any = false;
-  for (const agent of loadAgents(home)) {
-    const info = scanAgent(agent).get(skill);
-    if (!info) {
-      console.log(`${agent.name}\t—`);
-      continue;
-    }
-    any = true;
-    const where = info.presence === 'off' ? `${agent.dir}/.off/${skill}` : `${agent.dir}/${skill}`;
-    const extra = info.target ? ` -> ${info.target}` : '';
-    console.log(`${agent.name}\t${CELL[info.presence]}\t${where}${extra}`);
-  }
-  if (!any) {
+  const agents = loadAgents(home);
+  const matches = matchingInstances(buildInventory(home, agents).instances, skill);
+  if (matches.length === 0) {
     console.error(`warning: ${skill} not found in any agent`);
     process.exitCode = 1;
+    return;
+  }
+  for (const [index, instance] of matches.entries()) {
+    if (matches.length > 1) {
+      if (index > 0) console.log('');
+      console.log(`${instance.displayName}\t${variantLocation(instance)}`);
+    }
+    for (const agent of agents) {
+      const found = relationships(instance, agent.name);
+      if (found.length === 0) {
+        console.log(`${agent.name}\t—`);
+        continue;
+      }
+      for (const {name, info} of found) {
+        const extra = info.target ? ` -> ${info.target}` : '';
+        console.log(`${agent.name}\t${CELL[info.presence]}\t${info.path}${extra}${name === skill ? '' : ` (${name})`}`);
+      }
+    }
   }
 }
 
