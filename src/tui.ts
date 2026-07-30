@@ -3,11 +3,14 @@ import type {ReactNode} from 'react';
 import {Box, Text, render, useApp, useInput, useStdout} from 'ink';
 import {
   defaultHome,
+  searchRows,
   skillDetail,
+  sortRows,
   tuiSnapshot,
   type Home,
   type Row,
   type SkillInfo,
+  type SortOrder,
   type SkillRelationship,
   type TuiSnapshot,
 } from './core.ts';
@@ -45,6 +48,16 @@ function statusText(info: SkillInfo): string {
 function statusColor(info: SkillInfo): string {
   if (info.presence === 'deadlink') return 'red';
   return info.presence === 'on' ? 'green' : 'yellow';
+}
+
+function statusSortValue(info?: SkillInfo): string {
+  if (!info) return '3:missing';
+  const rank = info.presence === 'on' ? '0' : info.presence === 'off' ? '1' : '2';
+  return `${rank}:${info.linked ? 'link' : 'local'}`;
+}
+
+function sortLabel(sort: SortOrder): string {
+  return sort[0].toUpperCase() + sort.slice(1);
 }
 
 /** Visible window [start, start+height) that keeps `selected` on screen. */
@@ -309,30 +322,42 @@ export function App({home}: {home: Home}): ReactNode {
   }, [stdout]);
   const {width, height} = size;
 
-  const [snapshot] = useState<TuiSnapshot>(() => tuiSnapshot(home));
+  const [snapshot, setSnapshot] = useState<TuiSnapshot>(() => tuiSnapshot(home));
   const [tab, setTab] = useState<Tab>('agent');
   const [focusColumn, setFocusColumn] = useState<0 | 1>(0);
   const [agentIndex, setAgentIndex] = useState(0);
-  const [skillIndex, setSkillIndex] = useState(0);
+  const [relationshipId, setRelationshipId] = useState<string>();
   // Skill-tab selection is tracked by instance id so tab switches keep identity.
   const [instanceId, setInstanceId] = useState<string>();
   const [instanceAgentIndex, setInstanceAgentIndex] = useState(0);
+  const [query, setQuery] = useState('');
+  const [searching, setSearching] = useState(false);
+  const [sort, setSort] = useState<SortOrder>('name');
   const [modal, setModal] = useState<{row: Row; scroll: number} | null>(null);
 
   const agents = snapshot.agents;
-  const rows = snapshot.rows;
   const agent = agents[Math.min(agentIndex, Math.max(0, agents.length - 1))];
+  const instAgent = Math.min(instanceAgentIndex, Math.max(0, agents.length - 1));
+  const instanceAgent = agents[instAgent];
+  const rows = useMemo(
+    () => sortRows(
+      searchRows(snapshot.rows, query),
+      sort,
+      (row) => statusSortValue(row.agents[(tab === 'agent' ? agent : instanceAgent)?.name ?? '']),
+    ),
+    [snapshot.rows, query, sort, tab, agent, instanceAgent],
+  );
   const entries = useMemo(
     () => (agent ? entriesFor(rows, agent.name) : []),
     [rows, agent],
   );
-  const skill = Math.min(skillIndex, Math.max(0, entries.length - 1));
-  const entry = entries[skill];
+  const relationshipFound = entries.findIndex((entry) => entry.row.id === relationshipId);
+  const relationshipIndex = relationshipFound === -1 ? 0 : relationshipFound;
+  const entry = entries[relationshipIndex];
 
   const found = rows.findIndex((row) => row.id === instanceId);
   const instanceIndex = found === -1 ? 0 : found; // deterministic fallback: first row
   const instance = rows[instanceIndex];
-  const instAgent = Math.min(instanceAgentIndex, Math.max(0, agents.length - 1));
 
   const wide = width >= WIDE_MIN;
   const bodyHeight = Math.max(3, height - 2);
@@ -352,8 +377,6 @@ export function App({home}: {home: Home}): ReactNode {
   const modalLines = modal ? modalContent.split('\n').length : 0;
   const modalPage = Math.max(1, height - 6);
 
-  useEffect(() => setSkillIndex(0), [agent?.name]);
-
   useInput((input, key) => {
     if (modal) {
       if (key.escape) return setModal(null);
@@ -367,7 +390,30 @@ export function App({home}: {home: Home}): ReactNode {
         return setModal({...modal, scroll: Math.max(0, modal.scroll - modalPage)});
       return;
     }
+    if (searching) {
+      if (key.escape) {
+        setQuery('');
+        return setSearching(false);
+      }
+      if (key.return) return setSearching(false);
+      if (key.backspace || key.delete || input === '\x7f')
+        return setQuery((value) => value.slice(0, -1));
+      if (input && !key.ctrl && !key.meta) return setQuery((value) => value + input);
+      return;
+    }
     if (input === 'q' || (key.ctrl && input === 'c')) return exit();
+    if (input === '/') return setSearching(true);
+    if (input === 's')
+      return setSort((value) => value === 'name' ? 'status' : value === 'status' ? 'source' : 'name');
+    if (input === 'R') {
+      const currentAgent = agent?.name;
+      const currentInstanceAgent = instanceAgent?.name;
+      const next = tuiSnapshot(home);
+      setSnapshot(next);
+      setAgentIndex(Math.max(0, next.agents.findIndex(({name}) => name === currentAgent)));
+      setInstanceAgentIndex(Math.max(0, next.agents.findIndex(({name}) => name === currentInstanceAgent)));
+      return;
+    }
     if (key.tab) return setTab((value) => (value === 'agent' ? 'skill' : 'agent'));
     if (key.rightArrow || input === 'l') return setFocusColumn(1);
     if (key.leftArrow || input === 'h') return setFocusColumn(0);
@@ -375,7 +421,10 @@ export function App({home}: {home: Home}): ReactNode {
       if (tab === 'agent') {
         if (focusColumn === 0)
           setAgentIndex((value) => Math.min(Math.max(0, agents.length - 1), value + 1));
-        else setSkillIndex((value) => Math.min(Math.max(0, entries.length - 1), value + 1));
+        else {
+          const next = entries[Math.min(entries.length - 1, relationshipIndex + 1)];
+          if (next) setRelationshipId(next.row.id);
+        }
       } else if (focusColumn === 0) {
         const next = rows[Math.min(rows.length - 1, instanceIndex + 1)];
         if (next) setInstanceId(next.id);
@@ -387,7 +436,10 @@ export function App({home}: {home: Home}): ReactNode {
     if (key.upArrow || input === 'k') {
       if (tab === 'agent') {
         if (focusColumn === 0) setAgentIndex((value) => Math.max(0, value - 1));
-        else setSkillIndex((value) => Math.max(0, value - 1));
+        else {
+          const next = entries[Math.max(0, relationshipIndex - 1)];
+          if (next) setRelationshipId(next.row.id);
+        }
       } else if (focusColumn === 0) {
         const next = rows[Math.max(0, instanceIndex - 1)];
         if (next) setInstanceId(next.id);
@@ -420,6 +472,7 @@ export function App({home}: {home: Home}): ReactNode {
       h(Text, {inverse: tab === 'agent'}, ' Agent '),
       ' ',
       h(Text, {inverse: tab === 'skill'}, ' Skill '),
+      `  Sort: ${sortLabel(sort)}${query ? `  Search: ${query}` : ''}`,
     ),
     modal
       ? h(
@@ -440,7 +493,7 @@ export function App({home}: {home: Home}): ReactNode {
             }),
             h(RelationshipList, {
               entries,
-              selected: skill,
+              selected: relationshipIndex,
               focused: focusColumn === 1,
               height: listHeight,
             }),
@@ -476,7 +529,9 @@ export function App({home}: {home: Home}): ReactNode {
       {inverse: true, wrap: 'truncate-end'},
       modal
         ? ' ↑↓/jk scroll  PgUp/PgDn page  esc close '
-        : ` ${tab}:${columnName}  ←→/hl column  ↑↓/jk select  enter SKILL.md  tab switch  q quit `,
+        : searching
+          ? ` search: ${query || '…'}  enter apply  esc clear `
+          : ` ${tab}:${columnName}  ←→/hl column  ↑↓/jk select  enter SKILL.md  / search  s sort:${sortLabel(sort)}  R refresh  tab switch  q quit `,
     ),
   );
 }

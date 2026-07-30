@@ -275,15 +275,85 @@ test('skill tab: Enter opens the exact selected variant; Esc returns to tab and 
   t.unmount();
 });
 
-test('footer reflects read-only context and modal state', async () => {
+test('search filters loaded metadata and keeps the selected instance when cleared', async () => {
+  const { home } = setup();
+  const t = await renderApp(home);
+  await t.send('\t');
+  for (let i = 0; i < 3; i++) await t.send('j');
+  assert.match(t.stdout.frame(), /› grilling/);
+
+  await t.send('/');
+  for (const input of 'GRILL') await t.send(input);
+  assert.match(t.stdout.frame(), /Search: GRILL/);
+  assert.match(t.stdout.frame(), /› grilling/);
+  assert.doesNotMatch(t.stdout.frame(), /only-b/);
+  await t.send('\x1b');
+  assert.match(t.stdout.frame(), /› grilling/);
+  assert.match(t.stdout.frame(), /only-b/);
+
+  await t.send('/');
+  for (const input of 'body-only') await t.send(input);
+  assert.doesNotMatch(t.stdout.frame(), /grilling/);
+  t.unmount();
+});
+
+test('s cycles the visible sort order without changing selected identity', async () => {
+  const { home } = setup();
+  const t = await renderApp(home);
+  await t.send('\t');
+  for (let i = 0; i < 3; i++) await t.send('j');
+  assert.match(t.stdout.frame(), /› grilling/);
+
+  await t.send('s');
+  assert.match(t.stdout.frame(), /Sort: Status/);
+  assert.match(t.stdout.frame(), /› grilling/);
+  await t.send('s');
+  assert.match(t.stdout.frame(), /Sort: Source/);
+  assert.match(t.stdout.frame(), /› grilling/);
+  await t.send('s');
+  assert.match(t.stdout.frame(), /Sort: Name/);
+  assert.match(t.stdout.frame(), /› grilling/);
+  t.unmount();
+});
+
+test('R reloads disk changes and preserves selected skill and agent identities', async () => {
+  const { home } = setup();
+  const t = await renderApp(home);
+  await t.send('\t');
+  for (let i = 0; i < 3; i++) await t.send('j');
+  await t.send('l');
+  await t.send('j');
+  assert.match(t.stdout.frame(), /› b {2}missing/);
+
+  mkSkill(path.join(home.configDir, 'a-skills'), 'new-on-disk');
+  await t.send('R');
+  assert.match(t.stdout.frame(), /new-on-disk/);
+  await t.send('h');
+  assert.match(t.stdout.frame(), /› grilling/);
+  await t.send('l');
+  assert.match(t.stdout.frame(), /› b {2}missing/);
+
+  fs.rmSync(path.join(home.configDir, 'a-skills', 'grilling'), {recursive: true});
+  await t.send('R');
+  await t.send('h');
+  assert.match(t.stdout.frame(), /› broken/);
+  await t.send('l');
+  assert.match(t.stdout.frame(), /› b {2}missing/);
+  t.unmount();
+});
+
+test('footer reflects available navigation actions and modal state', async () => {
   const { home } = setup();
   const t = await renderApp(home);
   assert.match(t.stdout.frame(), /enter SKILL\.md/);
-  assert.match(t.stdout.frame(), /q quit/);
+  assert.match(t.stdout.frame(), /\/ search/);
+  assert.match(t.stdout.frame(), /s sort:Name/);
+  assert.match(t.stdout.frame(), /R refresh/);
   // read-only slice: no mutation actions in the footer
   assert.doesNotMatch(t.stdout.frame().split('\n').pop() ?? '', /toggle|space|unlink/i);
   await t.send('l');
   await t.send('\r');
   assert.match(t.stdout.frame(), /esc close/);
+  assert.doesNotMatch(t.stdout.frame(), /R refresh/);
   t.unmount();
 });

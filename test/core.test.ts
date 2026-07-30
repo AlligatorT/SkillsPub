@@ -3,7 +3,15 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { defaultHome, loadAgents, scanAgent, scanAll } from '../src/core.ts';
+import {
+  defaultHome,
+  loadAgents,
+  matchesSearch,
+  scanAgent,
+  scanAll,
+  sortRows,
+  type Row,
+} from '../src/core.ts';
 
 function tmpHome(): { configDir: string } {
   return {
@@ -375,6 +383,40 @@ test('tuiSnapshot rescans disk instead of caching on/off state', () => {
   assert.equal(tuiSnapshot(home).rows[0].agents.a?.presence, 'on');
   setSkill({ name: 'a', dir }, 'grilling', false);
   assert.equal(tuiSnapshot(home).rows[0].agents.a?.presence, 'off');
+});
+
+test('search matches loaded metadata but not SKILL.md body content', () => {
+  const home = tmpHome();
+  const dir = path.join(home.configDir, 'skills');
+  mkSkill(dir, 'grilling');
+  fs.writeFileSync(
+    path.join(dir, 'grilling', 'SKILL.md'),
+    '---\ndescription: Grill with charcoal\n---\nbody-only-needle',
+  );
+  fs.writeFileSync(
+    path.join(home.configDir, 'state.json'),
+    JSON.stringify({inventory: {grilling: {source: 'Chef/Skills'}}}),
+  );
+  const [row] = buildInventory(home, [{name: 'a', dir}]).instances;
+
+  assert.equal(matchesSearch(row, 'CHARCOAL'), true);
+  assert.equal(matchesSearch(row, 'chef/skills'), true);
+  assert.equal(matchesSearch(row, 'body-only-needle'), false);
+});
+
+test('sortRows uses display labels and deterministic status/source fallbacks', () => {
+  const rows = [
+    {id: 'z', name: 'z', displayName: 'Zulu', provenance: {}, relationships: [], agents: {}, sourceLabel: ''},
+    {id: 'a', name: 'a', displayName: 'Alpha', provenance: {source: 'source-z'}, relationships: [], agents: {}, sourceLabel: ''},
+    {id: 'b', name: 'b', displayName: 'Bravo', provenance: {source: 'source-a'}, relationships: [], agents: {}, sourceLabel: ''},
+  ] satisfies Row[];
+
+  assert.deepEqual(sortRows(rows, 'name').map((row) => row.id), ['a', 'b', 'z']);
+  assert.deepEqual(sortRows(rows, 'source').map((row) => row.id), ['b', 'a', 'z']);
+  assert.deepEqual(
+    sortRows(rows, 'status', (row) => row.id === 'z' ? '0:on' : '1:off').map((row) => row.id),
+    ['z', 'a', 'b'],
+  );
 });
 
 test('filterRows --agent/--tag; untagged lists skills with no tags', () => {
