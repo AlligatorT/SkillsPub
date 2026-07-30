@@ -1,10 +1,15 @@
 import {createElement as h, useEffect, useMemo, useState} from 'react';
 import type {ReactNode} from 'react';
+import path from 'node:path';
 import {Box, Text, render, useApp, useInput, useStdout} from 'ink';
 import {
   defaultHome,
+  linkSkill,
   skillDetail,
+  toggleRelationship,
   tuiSnapshot,
+  unlinkRelationship,
+  type Agent,
   type Home,
   type Row,
   type SkillInfo,
@@ -21,6 +26,15 @@ interface RelEntry {
   row: Row;
   relationship: SkillRelationship;
   key: string;
+}
+
+interface Confirmation {
+  kind: 'link' | 'unlink';
+  row: Row;
+  agent: Agent;
+  info?: SkillInfo;
+  source: string;
+  target: string;
 }
 
 /** Existing relationships of one agent, in inventory order (absent skills excluded). */
@@ -74,6 +88,7 @@ function ListColumn({
       flexDirection: 'column',
       width,
       flexGrow,
+      flexShrink: width === undefined ? 1 : 0,
       borderStyle: 'single',
       borderColor: focused ? 'cyan' : 'gray',
     },
@@ -89,15 +104,17 @@ function ListColumn({
 function RowLine({
   active,
   focused,
+  wrap = 'truncate-end',
   children,
 }: {
   active: boolean;
   focused: boolean;
+  wrap?: 'truncate-end' | 'wrap';
   children?: ReactNode;
 }): ReactNode {
   return h(
     Text,
-    {inverse: active && focused, wrap: 'truncate-end'},
+    {inverse: active && focused, wrap},
     `${active && focused ? '›' : ' '} `,
     children,
   );
@@ -186,7 +203,7 @@ function InstanceList({
     ...rows.slice(start, start + height).map((row, index) =>
       h(
         RowLine,
-        {key: row.id, active: start + index === selected, focused},
+        {key: row.id, active: start + index === selected, focused, wrap: 'wrap'},
         row.displayName,
       ),
     ),
@@ -202,18 +219,20 @@ function AgentStatusList({
   row,
   selected,
   focused,
+  width,
   height,
 }: {
   agents: TuiSnapshot['agents'];
   row?: Row;
   selected: number;
   focused: boolean;
+  width: number;
   height: number;
 }): ReactNode {
   const start = windowStart(agents.length, selected, height);
   return h(
     ListColumn,
-    {title: 'Agents', focused, flexGrow: 1},
+    {title: 'Agents', focused, width},
     ...agents.slice(start, start + height).map((agent, index) => {
       const info = row?.agents[agent.name];
       return h(
@@ -249,9 +268,30 @@ function Summary({
           h(
             Text,
             {key: 'path', wrap: 'truncate-end', dimColor: info?.presence === 'deadlink'},
-            ` ${row.realPath ?? (info ? `${info.path}${info.target ? ` -> ${info.target}` : ''}` : '—')}`,
+            ` Path: ${row.realPath ?? (info ? `${info.path}${info.target ? ` -> ${info.target}` : ''}` : '—')}`,
           ),
         ],
+  );
+}
+
+function ConfirmationModal({
+  confirmation,
+}: {
+  confirmation: Confirmation;
+}): ReactNode {
+  return h(
+    Box,
+    {
+      flexGrow: 1,
+      flexDirection: 'column',
+      borderStyle: 'round',
+      borderColor: 'yellow',
+      paddingX: 1,
+      justifyContent: 'center',
+    },
+    h(Text, {bold: true}, `${confirmation.kind === 'link' ? 'Link' : 'Unlink'} relationship?`),
+    h(Text, {wrap: 'wrap'}, ` ${confirmation.source} → ${confirmation.target}`),
+    h(Text, {color: 'yellow'}, ' y confirm  n/esc cancel '),
   );
 }
 
@@ -309,7 +349,9 @@ export function App({home}: {home: Home}): ReactNode {
   }, [stdout]);
   const {width, height} = size;
 
-  const [snapshot] = useState<TuiSnapshot>(() => tuiSnapshot(home));
+  const [snapshot, setSnapshot] = useState<TuiSnapshot>(() => tuiSnapshot(home));
+  // A just-unlinked source can live outside every agent root; keep it selectable this session.
+  const [retainedRows, setRetainedRows] = useState<Row[]>([]);
   const [tab, setTab] = useState<Tab>('agent');
   const [focusColumn, setFocusColumn] = useState<0 | 1>(0);
   const [agentIndex, setAgentIndex] = useState(0);
@@ -318,9 +360,14 @@ export function App({home}: {home: Home}): ReactNode {
   const [instanceId, setInstanceId] = useState<string>();
   const [instanceAgentIndex, setInstanceAgentIndex] = useState(0);
   const [modal, setModal] = useState<{row: Row; scroll: number} | null>(null);
+  const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
+  const [feedback, setFeedback] = useState('');
 
   const agents = snapshot.agents;
-  const rows = snapshot.rows;
+  const rows = useMemo(() => {
+    const visible = new Set(snapshot.rows.map((row) => row.id));
+    return [...snapshot.rows, ...retainedRows.filter((row) => !visible.has(row.id))];
+  }, [snapshot.rows, retainedRows]);
   const agent = agents[Math.min(agentIndex, Math.max(0, agents.length - 1))];
   const entries = useMemo(
     () => (agent ? entriesFor(rows, agent.name) : []),
@@ -338,14 +385,18 @@ export function App({home}: {home: Home}): ReactNode {
   const bodyHeight = Math.max(3, height - 2);
   const listHeight = Math.max(1, bodyHeight - 3);
   const agentWidth = Math.max(
-    10,
-    Math.min(24, Math.max(0, ...agents.map((a) => a.name.length)) + 6),
+    18,
+    Math.min(32, Math.max(0, ...agents.map((a) => a.name.length)) + 6),
   );
+  const agentStatusWidth = Math.max(
+    24,
+    Math.min(34, Math.max(0, ...agents.map((agent) => agent.name.length)) + 19),
+  );
+  const summaryWidth = Math.max(24, Math.min(30, Math.floor(width * 0.26)));
   const instanceWidth = Math.max(
     10,
-    Math.min(36, Math.max(0, ...rows.map((row) => row.displayName.length)) + 4),
+    width - agentStatusWidth - (wide ? summaryWidth : 0),
   );
-  const summaryWidth = Math.max(24, Math.floor(width * 0.3));
   const modalContent = modal
     ? (skillDetail(home, agents, modal.row.id)?.content ?? 'SKILL.md unavailable')
     : '';
@@ -353,6 +404,25 @@ export function App({home}: {home: Home}): ReactNode {
   const modalPage = Math.max(1, height - 6);
 
   useEffect(() => setSkillIndex(0), [agent?.name]);
+
+  const selectedRow = tab === 'agent' ? entry?.row : instance;
+  const selectedAgent = tab === 'agent' ? agent : agents[instAgent];
+  const selectedInfo = tab === 'agent'
+    ? entry?.relationship.info
+    : selectedRow?.agents[selectedAgent?.name ?? ''];
+  const actionable = focusColumn === 1 && selectedRow && selectedAgent;
+  const refresh = (row?: Row, retainSource = false) => {
+    const next = tuiSnapshot(home);
+    setSnapshot(next);
+    setRetainedRows((previous) => {
+      const kept = previous.filter((candidate) => candidate.id !== row?.id);
+      if (retainSource && row?.realPath)
+        kept.push({...row, relationships: [], agents: {}});
+      const visible = new Set(next.rows.map((candidate) => candidate.id));
+      return kept.filter((candidate) => !visible.has(candidate.id));
+    });
+    if (row) setInstanceId(row.id);
+  };
 
   useInput((input, key) => {
     if (modal) {
@@ -365,6 +435,23 @@ export function App({home}: {home: Home}): ReactNode {
         return setModal({...modal, scroll: Math.min(modalLines - 1, modal.scroll + modalPage)});
       if (key.pageUp || (key.ctrl && input === 'u'))
         return setModal({...modal, scroll: Math.max(0, modal.scroll - modalPage)});
+      return;
+    }
+    if (confirmation) {
+      if (input === 'y') {
+        try {
+          if (confirmation.kind === 'link')
+            linkSkill(confirmation.agent, confirmation.row.name, confirmation.source);
+          else if (confirmation.info)
+            unlinkRelationship(confirmation.agent, confirmation.info);
+          refresh(confirmation.row, confirmation.kind === 'unlink');
+          setFeedback(`${confirmation.kind === 'link' ? 'Linked' : 'Unlinked'} ${confirmation.row.name} @ ${confirmation.agent.name}`);
+        } catch (err) {
+          setFeedback((err as Error).message);
+        }
+        return setConfirmation(null);
+      }
+      if (input === 'n' || key.escape) return setConfirmation(null);
       return;
     }
     if (input === 'q' || (key.ctrl && input === 'c')) return exit();
@@ -396,6 +483,36 @@ export function App({home}: {home: Home}): ReactNode {
       }
       return;
     }
+    if (input === ' ' && actionable && selectedInfo) {
+      try {
+        const result = toggleRelationship(selectedAgent, selectedInfo);
+        refresh(selectedRow);
+        setFeedback(`${selectedRow.name} @ ${selectedAgent.name}: ${result}`);
+      } catch (err) {
+        setFeedback((err as Error).message);
+      }
+      return;
+    }
+    if (input === 'i' && actionable && !selectedInfo) {
+      if (!selectedRow.realPath) return setFeedback('Link unavailable: selected skill has no directory');
+      return setConfirmation({
+        kind: 'link',
+        row: selectedRow,
+        agent: selectedAgent,
+        source: selectedRow.realPath,
+        target: path.join(selectedAgent.dir, selectedRow.name),
+      });
+    }
+    if (input === 'u' && actionable && selectedInfo?.linked) {
+      return setConfirmation({
+        kind: 'unlink',
+        row: selectedRow,
+        agent: selectedAgent,
+        info: selectedInfo,
+        source: selectedInfo.path,
+        target: selectedInfo.target ?? '?',
+      });
+    }
     if (key.return) {
       const row = tab === 'agent' ? entry?.row : instance;
       if (row) setModal({row, scroll: 0});
@@ -410,6 +527,13 @@ export function App({home}: {home: Home}): ReactNode {
       : focusColumn === 0
         ? 'skills'
         : 'agents';
+  const actionHint = actionable
+    ? selectedInfo
+      ? ` space ${selectedInfo.underOff ? 'on' : 'off'}${selectedInfo.linked ? '  u unlink' : ''}`
+      : selectedRow.realPath
+        ? ' i link'
+        : ''
+    : '';
 
   return h(
     Box,
@@ -427,6 +551,12 @@ export function App({home}: {home: Home}): ReactNode {
           {height: bodyHeight, paddingLeft: 2, paddingRight: 2, paddingTop: 1},
           h(DetailModal, {row: modal.row, content: modalContent, scroll: modal.scroll, height}),
         )
+      : confirmation
+        ? h(
+            Box,
+            {height: bodyHeight, paddingLeft: 2, paddingRight: 2, paddingTop: 1},
+            h(ConfirmationModal, {confirmation}),
+          )
       : tab === 'agent'
         ? h(
             Box,
@@ -461,6 +591,7 @@ export function App({home}: {home: Home}): ReactNode {
               row: instance,
               selected: instAgent,
               focused: focusColumn === 1,
+              width: agentStatusWidth,
               height: listHeight,
             }),
             wide
@@ -476,7 +607,9 @@ export function App({home}: {home: Home}): ReactNode {
       {inverse: true, wrap: 'truncate-end'},
       modal
         ? ' ↑↓/jk scroll  PgUp/PgDn page  esc close '
-        : ` ${tab}:${columnName}  ←→/hl column  ↑↓/jk select  enter SKILL.md  tab switch  q quit `,
+        : confirmation
+          ? ' y confirm  n/esc cancel '
+          : ` ${feedback}${feedback ? '  ' : ''}${tab}:${columnName}  ←→/hl column  ↑↓/jk select${actionHint}  enter SKILL.md  tab switch  q quit `,
     ),
   );
 }
