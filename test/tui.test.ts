@@ -183,6 +183,98 @@ test('Enter opens a scrollable modal; Esc closes it and preserves selection', as
   t.unmount();
 });
 
+test('skill tab lists every live instance/variant and per-agent states', async () => {
+  const { home } = setup();
+  const t = await renderApp(home);
+  await t.send('\t');
+  const frame = t.stdout.frame();
+  assert.match(frame, /Skills/);
+  // every instance/variant gets a row, not one row per name
+  assert.equal((frame.match(/code-review \(/g) ?? []).length, 2);
+  assert.match(frame, /only-b/);
+  // first instance is the broken symlink: broken for a, missing for b (registry order)
+  assert.match(frame, /a {2}broken/);
+  assert.match(frame, /b {2}missing/);
+  t.unmount();
+});
+
+test('skill tab: missing is distinct from off', async () => {
+  const { home } = setup();
+  const t = await renderApp(home);
+  await t.send('\t');
+  // instances: broken, code-review x2, grilling, linked, only-b, parked
+  for (let i = 0; i < 6; i++) await t.send('j');
+  const frame = t.stdout.frame();
+  assert.match(frame, /› parked/);
+  // parked is off for a but missing for b — the two states stay distinct
+  assert.match(frame, /a {2}\[ OFF \] local/);
+  assert.match(frame, /b {2}missing/);
+  t.unmount();
+});
+
+test('skill tab: horizontal focus moves Skills ↔ Agents, never the summary', async () => {
+  const { home } = setup();
+  const t = await renderApp(home);
+  await t.send('\t');
+  assert.match(t.stdout.frame(), /› broken/);
+  await t.send('l');
+  assert.match(t.stdout.frame(), /› a {2}broken/);
+  // further right never lands on the passive summary; left returns to skills
+  await t.send('l');
+  assert.match(t.stdout.frame(), /› a {2}broken/);
+  await t.send('h');
+  assert.match(t.stdout.frame(), /› broken/);
+  t.unmount();
+});
+
+test('skill tab: tab switch preserves the selected instance identity', async () => {
+  const { home } = setup();
+  const t = await renderApp(home);
+  await t.send('\t');
+  for (let i = 0; i < 3; i++) await t.send('j');
+  assert.match(t.stdout.frame(), /› grilling/);
+  await t.send('\t'); // to agent tab
+  assert.match(t.stdout.frame(), /Relationships/);
+  await t.send('\t'); // back to skill tab
+  const frame = t.stdout.frame();
+  assert.match(frame, /Skills/);
+  assert.match(frame, /› grilling/);
+  t.unmount();
+});
+
+test('skill tab: narrow terminal hides only the passive summary', async () => {
+  const { home } = setup();
+  const t = await renderApp(home, 60, 30);
+  await t.send('\t');
+  const frame = t.stdout.frame();
+  assert.doesNotMatch(frame, /Summary/);
+  assert.doesNotMatch(frame, /Source:/);
+  assert.match(frame, /Skills/);
+  assert.match(frame, /b {2}missing/);
+  t.unmount();
+});
+
+test('skill tab: Enter opens the exact selected variant; Esc returns to tab and selection', async () => {
+  const { home } = setup();
+  fs.writeFileSync(
+    path.join(home.configDir, 'other', 'code-review', 'SKILL.md'),
+    '# VARIANT-B',
+  );
+  const t = await renderApp(home);
+  await t.send('\t');
+  await t.send('j'); // code-review (a-skills)
+  await t.send('j'); // code-review (other)
+  await t.send('\r');
+  assert.match(t.stdout.frame(), /VARIANT-B/);
+  await t.send('\x1b');
+  const frame = t.stdout.frame();
+  assert.match(frame, /Skills/); // still on the skill tab
+  // selection kept the exact variant: reopening shows the same content
+  await t.send('\r');
+  assert.match(t.stdout.frame(), /VARIANT-B/);
+  t.unmount();
+});
+
 test('footer reflects read-only context and modal state', async () => {
   const { home } = setup();
   const t = await renderApp(home);
