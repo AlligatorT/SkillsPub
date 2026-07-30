@@ -49,7 +49,7 @@ function entriesFor(rows: Row[], agentName: string): RelEntry[] {
       .map((relationship) => ({
         row,
         relationship,
-        key: `${row.id}${relationship.name}`,
+        key: relationship.info.path,
       })),
   );
 }

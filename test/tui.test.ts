@@ -411,6 +411,26 @@ test('Agent projection keeps aliases to one instance independently selectable', 
   t.unmount();
 });
 
+test('Agent projection distinguishes on and off entries with the same name and instance', async () => {
+  const { home } = setup();
+  const a = path.join(home.configDir, 'a-skills');
+  const sourceRoot = path.join(home.configDir, 'same-source');
+  mkSkill(sourceRoot, 'dual');
+  const source = path.join(sourceRoot, 'dual');
+  fs.symlinkSync(source, path.join(a, 'dual'));
+  fs.symlinkSync(source, path.join(a, '.off', 'dual'));
+  const t = await renderApp(home);
+  await t.send('l');
+  for (let i = 0; i < 3; i++) await t.send('j');
+  assert.match(t.stdout.frame(), /› \[ ON \] link\s+dual/);
+
+  await t.send('u');
+  await t.send('y');
+  assert.throws(() => fs.lstatSync(path.join(a, 'dual')));
+  assert.ok(fs.lstatSync(path.join(a, '.off', 'dual')).isSymbolicLink());
+  t.unmount();
+});
+
 test('Skill projection confirms link and unlink before changing disk', async () => {
   const { home } = setup();
   const target = path.join(home.configDir, 'b-skills', 'grilling');
