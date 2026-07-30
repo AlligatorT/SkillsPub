@@ -15,6 +15,8 @@ import {
 /** Below this width the passive summary column is hidden. */
 const WIDE_MIN = 80;
 
+type Tab = 'agent' | 'skill';
+
 interface RelEntry {
   row: Row;
   relationship: SkillRelationship;
@@ -163,33 +165,103 @@ function RelationshipList({
   );
 }
 
-function Summary({entry, width}: {entry?: RelEntry; width: number}): ReactNode {
-  const info = entry?.relationship.info;
+/** Skill tab: every live skill instance/variant, one row each. */
+function InstanceList({
+  rows,
+  selected,
+  focused,
+  width,
+  height,
+}: {
+  rows: Row[];
+  selected: number;
+  focused: boolean;
+  width: number;
+  height: number;
+}): ReactNode {
+  const start = windowStart(rows.length, selected, height);
+  return h(
+    ListColumn,
+    {title: 'Skills', focused, width},
+    ...rows.slice(start, start + height).map((row, index) =>
+      h(
+        RowLine,
+        {key: row.id, active: start + index === selected, focused},
+        row.displayName,
+      ),
+    ),
+    rows.length === 0
+      ? h(Text, {dimColor: true}, '  no skills on disk')
+      : null,
+  );
+}
+
+/** Skill tab: every agent in registry order with its state for the selected instance. */
+function AgentStatusList({
+  agents,
+  row,
+  selected,
+  focused,
+  height,
+}: {
+  agents: TuiSnapshot['agents'];
+  row?: Row;
+  selected: number;
+  focused: boolean;
+  height: number;
+}): ReactNode {
+  const start = windowStart(agents.length, selected, height);
+  return h(
+    ListColumn,
+    {title: 'Agents', focused, flexGrow: 1},
+    ...agents.slice(start, start + height).map((agent, index) => {
+      const info = row?.agents[agent.name];
+      return h(
+        RowLine,
+        {key: agent.name, active: start + index === selected, focused},
+        `${agent.name}  `,
+        info
+          ? h(Text, {color: statusColor(info)}, statusText(info))
+          : h(Text, {dimColor: true}, 'missing'),
+      );
+    }),
+  );
+}
+
+function Summary({
+  row,
+  info,
+  width,
+}: {
+  row?: Row;
+  info?: SkillInfo;
+  width: number;
+}): ReactNode {
   return h(
     ListColumn,
     {title: 'Summary', focused: false, width},
-    !entry || !info
+    !row
       ? h(Text, {dimColor: true}, '  nothing selected')
       : [
-          h(Text, {key: 'name', bold: true, wrap: 'truncate-end'}, ` ${entry.row.displayName}`),
-          h(Text, {key: 'desc', wrap: 'truncate-end'}, ` ${entry.row.description ?? '—'}`),
-          h(Text, {key: 'source', wrap: 'truncate-end'}, ` Source: ${entry.row.sourceLabel}`),
+          h(Text, {key: 'name', bold: true, wrap: 'truncate-end'}, ` ${row.displayName}`),
+          h(Text, {key: 'desc', wrap: 'truncate-end'}, ` ${row.description ?? '—'}`),
+          h(Text, {key: 'source', wrap: 'truncate-end'}, ` Source: ${row.sourceLabel}`),
           h(
             Text,
-            {key: 'path', wrap: 'truncate-end', dimColor: info.presence === 'deadlink'},
-            ` ${entry.row.realPath ?? `${info.path}${info.target ? ` -> ${info.target}` : ''}`}`,
+            {key: 'path', wrap: 'truncate-end', dimColor: info?.presence === 'deadlink'},
+            ` ${row.realPath ?? (info ? `${info.path}${info.target ? ` -> ${info.target}` : ''}` : '—')}`,
           ),
         ],
   );
 }
 
 function DetailModal({
-  entry,
+  row,
   content,
   scroll,
   height,
 }: {
-  entry: RelEntry;
+  row: Row;
   content: string;
   scroll: number;
   height: number;
@@ -211,7 +283,7 @@ function DetailModal({
     h(
       Text,
       {bold: true, wrap: 'truncate-end'},
-      `SKILL.md — ${entry.row.displayName}  [${Math.min(scroll + 1, lines.length)}/${lines.length}]`,
+      `SKILL.md — ${row.displayName}  [${Math.min(scroll + 1, lines.length)}/${lines.length}]`,
     ),
     ...visible.map((line, index) =>
       h(Text, {key: scroll + index, wrap: 'truncate-end'}, line || ' '),
@@ -238,19 +310,29 @@ export function App({home}: {home: Home}): ReactNode {
   const {width, height} = size;
 
   const [snapshot] = useState<TuiSnapshot>(() => tuiSnapshot(home));
+  const [tab, setTab] = useState<Tab>('agent');
   const [focusColumn, setFocusColumn] = useState<0 | 1>(0);
   const [agentIndex, setAgentIndex] = useState(0);
   const [skillIndex, setSkillIndex] = useState(0);
-  const [modal, setModal] = useState<{entry: RelEntry; scroll: number} | null>(null);
+  // Skill-tab selection is tracked by instance id so tab switches keep identity.
+  const [instanceId, setInstanceId] = useState<string>();
+  const [instanceAgentIndex, setInstanceAgentIndex] = useState(0);
+  const [modal, setModal] = useState<{row: Row; scroll: number} | null>(null);
 
   const agents = snapshot.agents;
+  const rows = snapshot.rows;
   const agent = agents[Math.min(agentIndex, Math.max(0, agents.length - 1))];
   const entries = useMemo(
-    () => (agent ? entriesFor(snapshot.rows, agent.name) : []),
-    [snapshot.rows, agent],
+    () => (agent ? entriesFor(rows, agent.name) : []),
+    [rows, agent],
   );
   const skill = Math.min(skillIndex, Math.max(0, entries.length - 1));
   const entry = entries[skill];
+
+  const found = rows.findIndex((row) => row.id === instanceId);
+  const instanceIndex = found === -1 ? 0 : found; // deterministic fallback: first row
+  const instance = rows[instanceIndex];
+  const instAgent = Math.min(instanceAgentIndex, Math.max(0, agents.length - 1));
 
   const wide = width >= WIDE_MIN;
   const bodyHeight = Math.max(3, height - 2);
@@ -259,9 +341,13 @@ export function App({home}: {home: Home}): ReactNode {
     10,
     Math.min(24, Math.max(0, ...agents.map((a) => a.name.length)) + 6),
   );
+  const instanceWidth = Math.max(
+    10,
+    Math.min(36, Math.max(0, ...rows.map((row) => row.displayName.length)) + 4),
+  );
   const summaryWidth = Math.max(24, Math.floor(width * 0.3));
   const modalContent = modal
-    ? (skillDetail(home, agents, modal.entry.row.id)?.content ?? 'SKILL.md unavailable')
+    ? (skillDetail(home, agents, modal.row.id)?.content ?? 'SKILL.md unavailable')
     : '';
   const modalLines = modal ? modalContent.split('\n').length : 0;
   const modalPage = Math.max(1, height - 6);
@@ -282,56 +368,115 @@ export function App({home}: {home: Home}): ReactNode {
       return;
     }
     if (input === 'q' || (key.ctrl && input === 'c')) return exit();
+    if (key.tab) return setTab((value) => (value === 'agent' ? 'skill' : 'agent'));
     if (key.rightArrow || input === 'l') return setFocusColumn(1);
     if (key.leftArrow || input === 'h') return setFocusColumn(0);
     if (key.downArrow || input === 'j') {
-      if (focusColumn === 0)
-        setAgentIndex((value) => Math.min(Math.max(0, agents.length - 1), value + 1));
-      else setSkillIndex((value) => Math.min(Math.max(0, entries.length - 1), value + 1));
+      if (tab === 'agent') {
+        if (focusColumn === 0)
+          setAgentIndex((value) => Math.min(Math.max(0, agents.length - 1), value + 1));
+        else setSkillIndex((value) => Math.min(Math.max(0, entries.length - 1), value + 1));
+      } else if (focusColumn === 0) {
+        const next = rows[Math.min(rows.length - 1, instanceIndex + 1)];
+        if (next) setInstanceId(next.id);
+      } else {
+        setInstanceAgentIndex((value) => Math.min(Math.max(0, agents.length - 1), value + 1));
+      }
       return;
     }
     if (key.upArrow || input === 'k') {
-      if (focusColumn === 0) setAgentIndex((value) => Math.max(0, value - 1));
-      else setSkillIndex((value) => Math.max(0, value - 1));
+      if (tab === 'agent') {
+        if (focusColumn === 0) setAgentIndex((value) => Math.max(0, value - 1));
+        else setSkillIndex((value) => Math.max(0, value - 1));
+      } else if (focusColumn === 0) {
+        const next = rows[Math.max(0, instanceIndex - 1)];
+        if (next) setInstanceId(next.id);
+      } else {
+        setInstanceAgentIndex((value) => Math.max(0, value - 1));
+      }
       return;
     }
-    if (key.return && entry) setModal({entry, scroll: 0});
+    if (key.return) {
+      const row = tab === 'agent' ? entry?.row : instance;
+      if (row) setModal({row, scroll: 0});
+    }
   });
+
+  const columnName =
+    tab === 'agent'
+      ? focusColumn === 0
+        ? 'agents'
+        : 'relationships'
+      : focusColumn === 0
+        ? 'skills'
+        : 'agents';
 
   return h(
     Box,
     {flexDirection: 'column', width, height},
-    h(Text, null, h(Text, {inverse: true}, ' Agent ')),
+    h(
+      Text,
+      null,
+      h(Text, {inverse: tab === 'agent'}, ' Agent '),
+      ' ',
+      h(Text, {inverse: tab === 'skill'}, ' Skill '),
+    ),
     modal
       ? h(
           Box,
           {height: bodyHeight, paddingLeft: 2, paddingRight: 2, paddingTop: 1},
-          h(DetailModal, {entry: modal.entry, content: modalContent, scroll: modal.scroll, height}),
+          h(DetailModal, {row: modal.row, content: modalContent, scroll: modal.scroll, height}),
         )
-      : h(
-          Box,
-          {height: bodyHeight},
-          h(AgentList, {
-            agents,
-            selected: agentIndex,
-            focused: focusColumn === 0,
-            width: agentWidth,
-            height: listHeight,
-          }),
-          h(RelationshipList, {
-            entries,
-            selected: skill,
-            focused: focusColumn === 1,
-            height: listHeight,
-          }),
-          wide ? h(Summary, {entry, width: summaryWidth}) : null,
-        ),
+      : tab === 'agent'
+        ? h(
+            Box,
+            {height: bodyHeight},
+            h(AgentList, {
+              agents,
+              selected: agentIndex,
+              focused: focusColumn === 0,
+              width: agentWidth,
+              height: listHeight,
+            }),
+            h(RelationshipList, {
+              entries,
+              selected: skill,
+              focused: focusColumn === 1,
+              height: listHeight,
+            }),
+            wide ? h(Summary, {row: entry?.row, info: entry?.relationship.info, width: summaryWidth}) : null,
+          )
+        : h(
+            Box,
+            {height: bodyHeight},
+            h(InstanceList, {
+              rows,
+              selected: instanceIndex,
+              focused: focusColumn === 0,
+              width: instanceWidth,
+              height: listHeight,
+            }),
+            h(AgentStatusList, {
+              agents,
+              row: instance,
+              selected: instAgent,
+              focused: focusColumn === 1,
+              height: listHeight,
+            }),
+            wide
+              ? h(Summary, {
+                  row: instance,
+                  info: instance?.agents[agents[instAgent]?.name ?? ''],
+                  width: summaryWidth,
+                })
+              : null,
+          ),
     h(
       Text,
       {inverse: true, wrap: 'truncate-end'},
       modal
         ? ' ↑↓/jk scroll  PgUp/PgDn page  esc close '
-        : ' ←→/hl column  ↑↓/jk select  enter SKILL.md  q quit ',
+        : ` ${tab}:${columnName}  ←→/hl column  ↑↓/jk select  enter SKILL.md  tab switch  q quit `,
     ),
   );
 }
