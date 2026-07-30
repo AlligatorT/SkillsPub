@@ -198,6 +198,35 @@ test('skill tab lists every live instance/variant and per-agent states', async (
   t.unmount();
 });
 
+test('skill tab prioritizes long skill names over compact agent statuses', async () => {
+  const { home } = setup();
+  const name = 'long-skill-name-that-stays-fully-readable';
+  mkSkill(path.join(home.configDir, 'a-skills'), name);
+  const t = await renderApp(home);
+  await t.send('\t');
+
+  assert.match(t.stdout.frame(), new RegExp(name));
+  t.unmount();
+});
+
+test('TUI keeps multi-word agent names and statuses readable', async () => {
+  const { home } = setup();
+  const a = path.join(home.configDir, 'a-skills');
+  const b = path.join(home.configDir, 'b-skills');
+  fs.writeFileSync(
+    path.join(home.configDir, 'agents.conf'),
+    `claude code = ${a}\ncodex = ${b}\nHermes Agent = ${b}\n`,
+  );
+  const t = await renderApp(home);
+  assert.match(t.stdout.frame(), /› claude code/);
+  await t.send('\t');
+  for (let i = 0; i < 3; i++) await t.send('j'); // grilling
+  await t.send('l');
+
+  assert.match(t.stdout.frame(), /› claude code {2}\[ ON \] local/);
+  t.unmount();
+});
+
 test('skill tab: missing is distinct from off', async () => {
   const { home } = setup();
   const t = await renderApp(home);
@@ -272,6 +301,70 @@ test('skill tab: Enter opens the exact selected variant; Esc returns to tab and 
   // selection kept the exact variant: reopening shows the same content
   await t.send('\r');
   assert.match(t.stdout.frame(), /VARIANT-B/);
+  t.unmount();
+});
+
+test('Agent projection toggles the selected local relationship immediately', async () => {
+  const { home } = setup();
+  const t = await renderApp(home);
+  await t.send('l');
+  await t.send('j');
+  await t.send('j'); // grilling
+  await t.send(' ');
+
+  assert.ok(fs.existsSync(path.join(home.configDir, 'a-skills', '.off', 'grilling', 'SKILL.md')));
+  assert.match(t.stdout.frame(), /grilling @ a: off/);
+  assert.match(t.stdout.frame(), /\[ OFF \] local\s+grilling/);
+  t.unmount();
+});
+
+test('Skill projection confirms link and unlink before changing disk', async () => {
+  const { home } = setup();
+  const target = path.join(home.configDir, 'b-skills', 'grilling');
+  const t = await renderApp(home);
+  await t.send('\t');
+  for (let i = 0; i < 3; i++) await t.send('j'); // grilling
+  await t.send('l');
+  await t.send('j'); // agent b is missing
+
+  await t.send('i');
+  assert.match(t.stdout.frame(), /Link relationship\?/);
+  assert.match(t.stdout.frame(), /a-skills\/grilling/);
+  assert.match(t.stdout.frame(), /→/);
+  assert.match(t.stdout.frame(), /b-skills\/grilling/);
+  await t.send('n');
+  assert.throws(() => fs.lstatSync(target));
+  assert.match(t.stdout.frame(), /› b {2}missing/);
+
+  await t.send('i');
+  await t.send('y');
+  assert.ok(fs.lstatSync(target).isSymbolicLink());
+  assert.match(t.stdout.frame(), /Linked/);
+
+  await t.send('u');
+  assert.match(t.stdout.frame(), /Unlink relationship\?/);
+  await t.send('n');
+  assert.ok(fs.lstatSync(target).isSymbolicLink());
+  await t.send('u');
+  await t.send('y');
+  assert.throws(() => fs.lstatSync(target));
+  assert.ok(fs.existsSync(path.join(home.configDir, 'a-skills', 'grilling', 'SKILL.md')));
+  t.unmount();
+});
+
+test('unlinking the sole link keeps its surviving source available to re-link', async () => {
+  const { home } = setup();
+  const t = await renderApp(home);
+  await t.send('l');
+  for (let i = 0; i < 3; i++) await t.send('j'); // linked
+  await t.send('u');
+  await t.send('y');
+
+  assert.match(t.stdout.frame(), /linked/);
+  await t.send('\t');
+  assert.match(t.stdout.frame(), /linked/);
+  assert.match(t.stdout.frame(), /› a {2}missing/);
+  assert.match(t.stdout.frame(), /i link/);
   t.unmount();
 });
 

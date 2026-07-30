@@ -377,6 +377,41 @@ export function toggleSkill(agent: Agent, name: string): SetResult {
   );
 }
 
+/** Toggle one already-selected relationship without ever creating one. */
+export function toggleRelationship(agent: Agent, info: SkillInfo): SetResult {
+  const name = path.basename(info.path);
+  const expected = path.join(agent.dir, info.underOff ? '.off' : '', name);
+  if (path.resolve(info.path) !== path.resolve(expected))
+    throw new Error(`relationship is outside agent ${agent.name}'s skills directory`);
+  return setSkill(agent, name, info.underOff);
+}
+
+/** Link one explicit, existing skill instance into an otherwise missing relationship. */
+export function linkSkill(agent: Agent, name: string, source: string): void {
+  const live = path.join(agent.dir, name);
+  const parked = path.join(agent.dir, '.off', name);
+  if (lexists(live) || lexists(parked))
+    throw new Error(`cannot link ${name} for agent ${agent.name}: relationship already exists`);
+  if (!fs.existsSync(source) || !fs.statSync(source).isDirectory() || !fs.existsSync(path.join(source, 'SKILL.md')))
+    throw new Error(`cannot link ${source}: not a skill directory`);
+  fs.mkdirSync(agent.dir, {recursive: true});
+  fs.symlinkSync(source, live, 'dir');
+}
+
+/** Remove only the selected symlink; a local skill directory is never removed. */
+export function unlinkRelationship(agent: Agent, info: SkillInfo): string | undefined {
+  const name = path.basename(info.path);
+  const expected = path.join(agent.dir, info.underOff ? '.off' : '', name);
+  if (path.resolve(info.path) !== path.resolve(expected))
+    throw new Error(`relationship is outside agent ${agent.name}'s skills directory`);
+  const stat = fs.lstatSync(info.path);
+  if (!stat.isSymbolicLink())
+    throw new Error(`cannot unlink ${info.path}: local skill directories are never deleted`);
+  const target = fs.readlinkSync(info.path);
+  fs.unlinkSync(info.path);
+  return target;
+}
+
 // --- state file: metadata only (ADR-0001), tags read for ls --tag/未分类 ---
 
 export interface InventoryEntry {
