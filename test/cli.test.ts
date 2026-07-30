@@ -56,9 +56,13 @@ test('variants are listed distinctly and ambiguous mutations fail', () => {
     listing.split('\n').filter((line) => line.startsWith('grilling (')).length,
     2,
   );
-  const status = run(['status', 'grilling']);
-  assert.match(status, new RegExp(path.join(configDir, 'skills', 'grilling')));
-  assert.match(status, new RegExp(path.join(other, 'grilling')));
+  assert.throws(
+    () => run(['status', 'grilling']),
+    (error: unknown) => {
+      const stderr = String((error as {stderr?: string}).stderr);
+      return /ambiguous/.test(stderr) && /Use skillspub tui/.test(stderr);
+    },
+  );
   assert.throws(
     () => run(['off', 'grilling', 'a']),
     (error: unknown) => {

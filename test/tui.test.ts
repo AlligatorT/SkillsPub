@@ -111,7 +111,7 @@ test('initial projection: first agent selected, all relationship kinds shown, ab
   assert.match(frame, /\[ ON \] local\s+grilling/);
   assert.match(frame, /\[ ON \] link\s+linked/);
   assert.match(frame, /\[ OFF \] local\s+parked/);
-  assert.match(frame, /broken\s+broken ->/);
+  assert.match(frame, /\[ ON \] link broken\s+broken ->/);
   // same-name variants disambiguated, clean names stay clean
   assert.match(frame, /code-review \(/);
   assert.match(frame, /\[ ON \] local\s+grilling/);
@@ -130,11 +130,11 @@ test('horizontal navigation moves focus between actionable columns only', async 
   assert.match(t.stdout.frame(), /› a/);
   await t.send('l');
   // first entry in registry scan order is the broken symlink row
-  assert.match(t.stdout.frame(), /› broken broken/);
+  assert.match(t.stdout.frame(), /› \[ ON \] link broken broken/);
   assert.doesNotMatch(t.stdout.frame(), /› a/);
   // further right never lands on the passive summary; left returns to agents
   await t.send('l');
-  assert.match(t.stdout.frame(), /› broken broken/);
+  assert.match(t.stdout.frame(), /› \[ ON \] link broken broken/);
   await t.send('h');
   assert.match(t.stdout.frame(), /› a/);
   t.unmount();
@@ -159,7 +159,7 @@ test('narrow terminal hides only the passive summary', async () => {
 
 test('Enter opens a scrollable modal; Esc closes it and preserves selection', async () => {
   const { home } = setup();
-  const body = ['---', 'description: long', '---'];
+  const body = ['---', 'description: long', '---', `long-${'x'.repeat(120)}-TAIL`];
   for (let i = 1; i <= 40; i++) body.push(`line-${String(i).padStart(2, '0')}`);
   mkSkill(path.join(home.configDir, 'a-skills'), 'long-doc', body.join('\n'));
   const t = await renderApp(home, 100, 24);
@@ -169,7 +169,8 @@ test('Enter opens a scrollable modal; Esc closes it and preserves selection', as
   assert.match(t.stdout.frame(), /› \[ ON \] local\s+long-doc/);
   await t.send('\r');
   let frame = t.stdout.frame();
-  assert.match(frame, /SKILL\.md — long-doc\s+\[1\/43\]/);
+  assert.match(frame, /SKILL\.md — long-doc\s+\[1\/\d+\]/);
+  assert.match(frame, /TAIL/);
   assert.match(frame, /line-01/);
   assert.doesNotMatch(frame, /line-40/);
   // scroll down, then close with Esc
@@ -193,7 +194,7 @@ test('skill tab lists every live instance/variant and per-agent states', async (
   assert.equal((frame.match(/code-review \(/g) ?? []).length, 2);
   assert.match(frame, /only-b/);
   // first instance is the broken symlink: broken for a, missing for b (registry order)
-  assert.match(frame, /a {2}broken/);
+  assert.match(frame, /a {2}\[ ON \] link broken/);
   assert.match(frame, /b {2}missing/);
   t.unmount();
 });
@@ -247,10 +248,10 @@ test('skill tab: horizontal focus moves Skills ↔ Agents, never the summary', a
   await t.send('\t');
   assert.match(t.stdout.frame(), /› broken/);
   await t.send('l');
-  assert.match(t.stdout.frame(), /› a {2}broken/);
+  assert.match(t.stdout.frame(), /› a {2}\[ ON \] link broken/);
   // further right never lands on the passive summary; left returns to skills
   await t.send('l');
-  assert.match(t.stdout.frame(), /› a {2}broken/);
+  assert.match(t.stdout.frame(), /› a {2}\[ ON \] link broken/);
   await t.send('h');
   assert.match(t.stdout.frame(), /› broken/);
   t.unmount();
@@ -371,6 +372,16 @@ test('R reloads disk changes and preserves selected skill and agent identities',
   t.unmount();
 });
 
+test('broken relationships keep activation and resource form visible', async () => {
+  const { home } = setup();
+  const t = await renderApp(home);
+  await t.send('l');
+  assert.match(t.stdout.frame(), /› \[ ON \] link broken\s+broken ->/);
+  await t.send(' ');
+  assert.match(t.stdout.frame(), /› \[ OFF \] link broken\s+broken ->/);
+  t.unmount();
+});
+
 test('Agent projection toggles the selected local relationship immediately', async () => {
   const { home } = setup();
   const t = await renderApp(home);
@@ -385,10 +396,25 @@ test('Agent projection toggles the selected local relationship immediately', asy
   t.unmount();
 });
 
+test('Agent projection keeps aliases to one instance independently selectable', async () => {
+  const { home } = setup();
+  const a = path.join(home.configDir, 'a-skills');
+  fs.symlinkSync(path.join(a, 'linked'), path.join(a, 'linked-alias'));
+  const t = await renderApp(home);
+  await t.send('l');
+  for (let i = 0; i < 4; i++) await t.send('j');
+  assert.match(t.stdout.frame(), /› \[ ON \] link\s+linked-alias/);
+
+  await t.send(' ');
+  assert.ok(fs.lstatSync(path.join(a, 'linked')).isSymbolicLink());
+  assert.ok(fs.lstatSync(path.join(a, '.off', 'linked-alias')).isSymbolicLink());
+  t.unmount();
+});
+
 test('Skill projection confirms link and unlink before changing disk', async () => {
   const { home } = setup();
   const target = path.join(home.configDir, 'b-skills', 'grilling');
-  const t = await renderApp(home);
+  const t = await renderApp(home, 60);
   await t.send('\t');
   for (let i = 0; i < 3; i++) await t.send('j'); // grilling
   await t.send('l');
@@ -396,9 +422,10 @@ test('Skill projection confirms link and unlink before changing disk', async () 
 
   await t.send('i');
   assert.match(t.stdout.frame(), /Link relationship\?/);
-  assert.match(t.stdout.frame(), /a-skills\/grilling/);
+  assert.match(t.stdout.frame(), /a-skills/);
   assert.match(t.stdout.frame(), /→/);
-  assert.match(t.stdout.frame(), /b-skills\/grilling/);
+  assert.match(t.stdout.frame(), /b-skills/);
+  assert.equal((t.stdout.frame().match(/grilling/g) ?? []).length, 2);
   await t.send('n');
   assert.throws(() => fs.lstatSync(target));
   assert.match(t.stdout.frame(), /› b {2}missing/);
@@ -419,19 +446,20 @@ test('Skill projection confirms link and unlink before changing disk', async () 
   t.unmount();
 });
 
-test('unlinking the sole link keeps its surviving source available to re-link', async () => {
+test('unlinking the sole relationship drops out-of-registry sources from the fresh snapshot', async () => {
   const { home } = setup();
+  const source = path.join(home.configDir, 'shared', 'real-linked', 'SKILL.md');
   const t = await renderApp(home);
   await t.send('l');
   for (let i = 0; i < 3; i++) await t.send('j'); // linked
   await t.send('u');
   await t.send('y');
-
-  assert.match(t.stdout.frame(), /linked/);
   await t.send('\t');
-  assert.match(t.stdout.frame(), /linked/);
-  assert.match(t.stdout.frame(), /› a {2}missing/);
-  assert.match(t.stdout.frame(), /i link/);
+
+  assert.ok(fs.existsSync(source));
+  assert.doesNotMatch(t.stdout.frame(), /[│]›? ?linked(?:\s|$)/);
+  await t.send('R');
+  assert.doesNotMatch(t.stdout.frame(), /[│]›? ?linked(?:\s|$)/);
   t.unmount();
 });
 

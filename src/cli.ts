@@ -146,6 +146,7 @@ function cmdStatus(
     process.exitCode = 1;
     return;
   }
+  refuseAmbiguousName(matches, skill);
   for (const [index, instance] of matches.entries()) {
     if (matches.length > 1) {
       if (index > 0) console.log('');

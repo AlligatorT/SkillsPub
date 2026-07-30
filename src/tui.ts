@@ -2,6 +2,7 @@ import {createElement as h, useEffect, useMemo, useState} from 'react';
 import type {ReactNode} from 'react';
 import path from 'node:path';
 import {Box, Text, render, useApp, useInput, useStdout} from 'ink';
+import wrapAnsi from 'wrap-ansi';
 import {
   defaultHome,
   linkSkill,
@@ -54,9 +55,9 @@ function entriesFor(rows: Row[], agentName: string): RelEntry[] {
 }
 
 function statusText(info: SkillInfo): string {
-  if (info.presence === 'deadlink') return 'broken';
-  const state = info.presence === 'on' ? '[ ON ]' : '[ OFF ]';
-  return `${state} ${info.linked ? 'link' : 'local'}`;
+  const state = info.underOff ? '[ OFF ]' : '[ ON ]';
+  const form = info.linked ? 'link' : 'local';
+  return `${state} ${form}${info.presence === 'deadlink' ? ' broken' : ''}`;
 }
 
 function statusColor(info: SkillInfo): string {
@@ -183,7 +184,9 @@ function RelationshipList({
         {key: entry.key, active, focused},
         h(Text, {color: statusColor(info)}, statusText(info)),
         ' ',
-        entry.row.displayName,
+        entry.relationship.name === entry.row.name
+          ? entry.row.displayName
+          : `${entry.relationship.name} → ${entry.row.displayName}`,
         info.presence === 'deadlink' && info.target
           ? h(Text, {dimColor: true}, ` -> ${info.target}`)
           : null,
@@ -308,18 +311,21 @@ function ConfirmationModal({
   );
 }
 
+function detailLines(content: string, width: number): string[] {
+  return wrapAnsi(content, width, {hard: true, trim: false, wordWrap: false}).split('\n');
+}
+
 function DetailModal({
   row,
-  content,
+  lines,
   scroll,
   height,
 }: {
   row: Row;
-  content: string;
+  lines: string[];
   scroll: number;
   height: number;
 }): ReactNode {
-  const lines = content.split('\n');
   // header + footer + modal chrome/title leave this many content rows
   const viewHeight = Math.max(1, height - 8);
   const visible = lines.slice(scroll, scroll + viewHeight);
@@ -363,12 +369,10 @@ export function App({home}: {home: Home}): ReactNode {
   const {width, height} = size;
 
   const [snapshot, setSnapshot] = useState<TuiSnapshot>(() => tuiSnapshot(home));
-  // A just-unlinked source can live outside every agent root; keep it selectable this session.
-  const [retainedRows, setRetainedRows] = useState<Row[]>([]);
   const [tab, setTab] = useState<Tab>('agent');
   const [focusColumn, setFocusColumn] = useState<0 | 1>(0);
   const [agentIndex, setAgentIndex] = useState(0);
-  const [relationshipId, setRelationshipId] = useState<string>();
+  const [relationshipKey, setRelationshipKey] = useState<string>();
   // Skill-tab selection is tracked by instance id so tab switches keep identity.
   const [instanceId, setInstanceId] = useState<string>();
   const [instanceAgentIndex, setInstanceAgentIndex] = useState(0);
@@ -380,26 +384,22 @@ export function App({home}: {home: Home}): ReactNode {
   const [feedback, setFeedback] = useState('');
 
   const agents = snapshot.agents;
-  const availableRows = useMemo(() => {
-    const visible = new Set(snapshot.rows.map((row) => row.id));
-    return [...snapshot.rows, ...retainedRows.filter((row) => !visible.has(row.id))];
-  }, [snapshot.rows, retainedRows]);
   const agent = agents[Math.min(agentIndex, Math.max(0, agents.length - 1))];
   const instAgent = Math.min(instanceAgentIndex, Math.max(0, agents.length - 1));
   const instanceAgent = agents[instAgent];
   const rows = useMemo(
     () => sortRows(
-      searchRows(availableRows, query),
+      searchRows(snapshot.rows, query),
       sort,
       (row) => statusSortValue(row.agents[(tab === 'agent' ? agent : instanceAgent)?.name ?? '']),
     ),
-    [availableRows, query, sort, tab, agent, instanceAgent],
+    [snapshot.rows, query, sort, tab, agent, instanceAgent],
   );
   const entries = useMemo(
     () => (agent ? entriesFor(rows, agent.name) : []),
     [rows, agent],
   );
-  const relationshipFound = entries.findIndex((entry) => entry.row.id === relationshipId);
+  const relationshipFound = entries.findIndex((entry) => entry.key === relationshipKey);
   const relationshipIndex = relationshipFound === -1 ? 0 : relationshipFound;
   const entry = entries[relationshipIndex];
 
@@ -415,8 +415,8 @@ export function App({home}: {home: Home}): ReactNode {
     Math.min(32, Math.max(0, ...agents.map((a) => a.name.length)) + 6),
   );
   const agentStatusWidth = Math.max(
-    24,
-    Math.min(34, Math.max(0, ...agents.map((agent) => agent.name.length)) + 19),
+    28,
+    Math.min(40, Math.max(0, ...agents.map((agent) => agent.name.length)) + 24),
   );
   const summaryWidth = Math.max(24, Math.min(30, Math.floor(width * 0.26)));
   const instanceWidth = Math.max(
@@ -426,7 +426,7 @@ export function App({home}: {home: Home}): ReactNode {
   const modalContent = modal
     ? (skillDetail(home, agents, modal.row.id)?.content ?? 'SKILL.md unavailable')
     : '';
-  const modalLines = modal ? modalContent.split('\n').length : 0;
+  const modalLines = modal ? detailLines(modalContent, Math.max(1, width - 8)) : [];
   const modalPage = Math.max(1, height - 6);
 
   const selectedRow = tab === 'agent' ? entry?.row : instance;
@@ -435,16 +435,8 @@ export function App({home}: {home: Home}): ReactNode {
     ? entry?.relationship.info
     : selectedRow?.agents[selectedAgent?.name ?? ''];
   const actionable = focusColumn === 1 && selectedRow && selectedAgent;
-  const refresh = (row?: Row, retainSource = false) => {
-    const next = tuiSnapshot(home);
-    setSnapshot(next);
-    setRetainedRows((previous) => {
-      const kept = previous.filter((candidate) => candidate.id !== row?.id);
-      if (retainSource && row?.realPath)
-        kept.push({...row, relationships: [], agents: {}});
-      const visible = new Set(next.rows.map((candidate) => candidate.id));
-      return kept.filter((candidate) => !visible.has(candidate.id));
-    });
+  const refresh = (row?: Row) => {
+    setSnapshot(tuiSnapshot(home));
     if (row) setInstanceId(row.id);
   };
 
@@ -452,11 +444,11 @@ export function App({home}: {home: Home}): ReactNode {
     if (modal) {
       if (key.escape) return setModal(null);
       if (key.downArrow || input === 'j')
-        return setModal({...modal, scroll: Math.min(modalLines - 1, modal.scroll + 1)});
+        return setModal({...modal, scroll: Math.min(modalLines.length - 1, modal.scroll + 1)});
       if (key.upArrow || input === 'k')
         return setModal({...modal, scroll: Math.max(0, modal.scroll - 1)});
       if (key.pageDown || (key.ctrl && input === 'd'))
-        return setModal({...modal, scroll: Math.min(modalLines - 1, modal.scroll + modalPage)});
+        return setModal({...modal, scroll: Math.min(modalLines.length - 1, modal.scroll + modalPage)});
       if (key.pageUp || (key.ctrl && input === 'u'))
         return setModal({...modal, scroll: Math.max(0, modal.scroll - modalPage)});
       return;
@@ -479,7 +471,7 @@ export function App({home}: {home: Home}): ReactNode {
             linkSkill(confirmation.agent, confirmation.row.name, confirmation.source);
           else if (confirmation.info)
             unlinkRelationship(confirmation.agent, confirmation.info);
-          refresh(confirmation.row, confirmation.kind === 'unlink');
+          refresh(confirmation.row);
           setFeedback(`${confirmation.kind === 'link' ? 'Linked' : 'Unlinked'} ${confirmation.row.name} @ ${confirmation.agent.name}`);
         } catch (err) {
           setFeedback((err as Error).message);
@@ -511,7 +503,7 @@ export function App({home}: {home: Home}): ReactNode {
           setAgentIndex((value) => Math.min(Math.max(0, agents.length - 1), value + 1));
         else {
           const next = entries[Math.min(entries.length - 1, relationshipIndex + 1)];
-          if (next) setRelationshipId(next.row.id);
+          if (next) setRelationshipKey(next.key);
         }
       } else if (focusColumn === 0) {
         const next = rows[Math.min(rows.length - 1, instanceIndex + 1)];
@@ -526,7 +518,7 @@ export function App({home}: {home: Home}): ReactNode {
         if (focusColumn === 0) setAgentIndex((value) => Math.max(0, value - 1));
         else {
           const next = entries[Math.max(0, relationshipIndex - 1)];
-          if (next) setRelationshipId(next.row.id);
+          if (next) setRelationshipKey(next.key);
         }
       } else if (focusColumn === 0) {
         const next = rows[Math.max(0, instanceIndex - 1)];
@@ -603,7 +595,7 @@ export function App({home}: {home: Home}): ReactNode {
       ? h(
           Box,
           {height: bodyHeight, paddingLeft: 2, paddingRight: 2, paddingTop: 1},
-          h(DetailModal, {row: modal.row, content: modalContent, scroll: modal.scroll, height}),
+          h(DetailModal, {row: modal.row, lines: modalLines, scroll: modal.scroll, height}),
         )
       : confirmation
         ? h(
