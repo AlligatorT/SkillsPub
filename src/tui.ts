@@ -87,11 +87,11 @@ function SkillList({
       const active = start + visibleIndex === selected;
       return h(
         Box,
-        {key: row.name},
+        {key: row.id},
         h(
           Text,
           {inverse: active, bold: active, wrap: 'truncate-end'},
-          `${active ? '›' : ' '} ${row.name}`.padEnd(nameWidth),
+          `${active ? '›' : ' '} ${row.displayName}`.padEnd(nameWidth),
         ),
         ...agents.map((agent, index) =>
           h(
@@ -127,14 +127,14 @@ function DetailPane({
 }): ReactNode {
   if (!detail) return h(Text, {dimColor: true}, 'Select a skill');
   const content = (detail.content ?? 'SKILL.md unavailable').split('\n');
-  const metadataHeight = 9 + detail.realPaths.length + agents.length;
+  const metadataHeight = 10 + detail.realPaths.length + agents.length;
   const contentHeight = Math.max(3, height - metadataHeight);
   const visible = content.slice(scroll, scroll + contentHeight);
 
   return h(
     Box,
     {flexDirection: 'column', flexGrow: 1, paddingLeft: 1},
-    h(Text, {bold: true, color: 'cyan'}, detail.name),
+    h(Text, {bold: true, color: 'cyan'}, detail.displayName),
     h(
       Box,
       null,
@@ -145,7 +145,8 @@ function DetailPane({
         h(Text, {key: `${agent.name}-space`}, '  '),
       ]),
     ),
-    h(Text, null, h(Text, {bold: true}, 'Source / author: '), detail.source ?? 'unknown'),
+    h(Text, null, h(Text, {bold: true}, 'Description: '), detail.description ?? '—'),
+    h(Text, null, h(Text, {bold: true}, 'Source: '), detail.sourceLabel),
     h(Text, null, h(Text, {bold: true}, 'Bundles: '), detail.bundles.join(', ') || '—'),
     h(Text, null, h(Text, {bold: true}, 'Tags: '), detail.tags.join(', ') || '—'),
     h(Text, {bold: true}, 'Resolved install path(s):'),
@@ -188,11 +189,19 @@ function App({home}: {home: Home}): ReactNode {
 
   const rows = useMemo(() => {
     const needle = query.toLowerCase();
-    return snapshot.rows.filter((row) => row.name.toLowerCase().includes(needle));
+    return snapshot.rows.filter((row) =>
+      [
+        row.name,
+        row.description,
+        row.provenance.source,
+        row.provenance.sourceUrl,
+        row.provenance.skillPath,
+      ].some((value) => value?.toLowerCase().includes(needle)),
+    );
   }, [query, snapshot]);
   const row = rows[selected];
   const detail = useMemo(
-    () => row ? skillDetail(home, snapshot.agents, row.name) : undefined,
+    () => row ? skillDetail(home, snapshot.agents, row.id) : undefined,
     [home, row, snapshot.agents],
   );
   const leftWidth = Math.max(30, Math.floor(width * 0.43));
@@ -205,7 +214,7 @@ function App({home}: {home: Home}): ReactNode {
   useEffect(() => {
     if (selected >= rows.length) setSelected(Math.max(0, rows.length - 1));
   }, [rows.length, selected]);
-  useEffect(() => setScroll(0), [row?.name]);
+  useEffect(() => setScroll(0), [row?.id]);
   useEffect(() => {
     if (scroll >= contentLines) setScroll(Math.max(0, contentLines - 1));
   }, [contentLines, scroll]);
@@ -259,9 +268,19 @@ function App({home}: {home: Home}): ReactNode {
       const agent = snapshot.agents[selectedAgent];
       if (!agent) return;
       try {
-        const result = toggleSkill(agent, row.name);
+        const found = row.relationships.filter(
+          (relationship) => relationship.agent === agent.name,
+        );
+        if (found.length !== 1) {
+          throw new Error(
+            found.length === 0
+              ? `${row.displayName} has no relationship with ${agent.name}`
+              : `${row.displayName} has multiple relationships with ${agent.name}`,
+          );
+        }
+        const result = toggleSkill(agent, found[0].name);
         setSnapshot(tuiSnapshot(home));
-        setMessage(`${row.name} @ ${agent.name}: ${result}`);
+        setMessage(`${row.displayName} @ ${agent.name}: ${result}`);
       } catch (error) {
         setMessage((error as Error).message);
       }

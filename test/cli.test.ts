@@ -18,7 +18,7 @@ function setup() {
       env: { ...process.env, SKM_CONFIG_DIR: configDir },
       encoding: 'utf8',
     });
-  return { run, skills };
+  return { run, skills, configDir };
 }
 
 test('ls prints matrix, off moves skill, status shows per-agent state', () => {
@@ -30,6 +30,33 @@ test('ls prints matrix, off moves skill, status shows per-agent state', () => {
 
   assert.match(run(['status', 'grilling']), /a\s+off/);
   assert.match(run(['agents']), /a\t.*ok/);
+});
+
+test('variants are listed distinctly and ambiguous mutations fail', () => {
+  const {run, configDir} = setup();
+  const other = path.join(configDir, 'other');
+  fs.mkdirSync(path.join(other, 'grilling'), {recursive: true});
+  fs.writeFileSync(path.join(other, 'grilling', 'SKILL.md'), '# other');
+  fs.writeFileSync(
+    path.join(configDir, 'agents.conf'),
+    `a = ${path.join(configDir, 'skills')}\nb = ${other}\n`,
+  );
+
+  const listing = run(['ls']);
+  assert.equal(
+    listing.split('\n').filter((line) => line.startsWith('grilling (')).length,
+    2,
+  );
+  const status = run(['status', 'grilling']);
+  assert.match(status, new RegExp(path.join(configDir, 'skills', 'grilling')));
+  assert.match(status, new RegExp(path.join(other, 'grilling')));
+  assert.throws(
+    () => run(['off', 'grilling', 'a']),
+    (error: unknown) => {
+      const stderr = String((error as {stderr?: string}).stderr);
+      return /ambiguous/.test(stderr) && /Use skm tui/.test(stderr);
+    },
+  );
 });
 
 test('unknown command prints usage and exits 1', () => {

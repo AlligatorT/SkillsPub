@@ -80,12 +80,13 @@ test('scanAll builds skill × agent matrix, absent agents undefined', () => {
     { name: 'a', dir: dirA },
     { name: 'b', dir: dirB },
   ]);
-  const grilling = rows.find((r) => r.name === 'grilling')!;
-  assert.equal(grilling.agents.a?.presence, 'on');
-  assert.equal(grilling.agents.b?.presence, 'off');
+  const grilling = rows.filter((r) => r.name === 'grilling');
+  assert.equal(grilling.length, 2);
+  assert.equal(grilling.find((row) => row.agents.a)?.agents.a?.presence, 'on');
+  assert.equal(grilling.find((row) => row.agents.b)?.agents.b?.presence, 'off');
   const onlyB = rows.find((r) => r.name === 'only-b')!;
   assert.equal(onlyB.agents.a, undefined);
-  assert.deepEqual(rows.map((r) => r.name), ['grilling', 'only-b']);
+  assert.deepEqual(rows.map((r) => r.name), ['grilling', 'grilling', 'only-b']);
 });
 
 test('scanAgent: missing skills dir scans empty, does not throw', () => {
@@ -101,6 +102,7 @@ import {
   loadState,
   filterRows,
   untagged,
+  buildInventory,
   skillDetail,
   tuiSnapshot,
 } from '../src/core.ts';
@@ -195,7 +197,8 @@ test('skillDetail assembles live paths, agent state, metadata, and SKILL.md', ()
     { name: 'b', dir: b },
   ];
 
-  const detail = skillDetail(home, agents, 'grilling')!;
+  const id = buildInventory(home, agents).instances[0].id;
+  const detail = skillDetail(home, agents, id)!;
   assert.equal(detail.source, 'chef/skills');
   assert.deepEqual(detail.bundles, ['cooks']);
   assert.deepEqual(detail.tags, ['food']);
@@ -205,6 +208,105 @@ test('skillDetail assembles live paths, agent state, metadata, and SKILL.md', ()
   assert.equal(detail.agents.a?.underOff, false);
   assert.equal(detail.agents.b?.underOff, true);
   assert.equal(detail.contentPath, path.join(fs.realpathSync(shared), 'SKILL.md'));
+});
+
+test('inventory aggregates shared targets and preserves same-name variants', () => {
+  const home = tmpHome();
+  const shared = path.join(home.configDir, 'shared', 'same');
+  const a = path.join(home.configDir, 'a', 'skills');
+  const b = path.join(home.configDir, 'b', 'skills');
+  const c = path.join(home.configDir, 'c', 'skills');
+  mkSkill(path.dirname(shared), path.basename(shared));
+  mkSkill(a, 'same');
+  fs.writeFileSync(
+    path.join(a, 'same', 'SKILL.md'),
+    '---\ndescription: Local variant\n---\n# local',
+  );
+  fs.mkdirSync(b, {recursive: true});
+  fs.mkdirSync(c, {recursive: true});
+  fs.symlinkSync(shared, path.join(b, 'same'));
+  fs.symlinkSync(shared, path.join(c, 'same'));
+  fs.writeFileSync(
+    path.join(home.configDir, 'a', '.skill-lock.json'),
+    JSON.stringify({skills: {same: {
+      source: 'owner/local',
+      sourceUrl: 'https://example.test/local.git',
+      skillPath: 'skills/local/SKILL.md',
+    }}}),
+  );
+  fs.writeFileSync(
+    path.join(home.configDir, 'b', '.skill-lock.json'),
+    JSON.stringify({skills: {same: {
+      source: 'owner/shared',
+      sourceUrl: 'https://example.test/shared.git',
+      skillPath: 'skills/shared/SKILL.md',
+    }}}),
+  );
+  const agents = [
+    {name: 'a', dir: a},
+    {name: 'b', dir: b},
+    {name: 'c', dir: c},
+  ];
+
+  const instances = buildInventory(home, agents).instances;
+  assert.equal(instances.length, 2);
+  const local = instances.find((instance) => instance.realPath === fs.realpathSync(path.join(a, 'same')))!;
+  const linked = instances.find((instance) => instance.realPath === fs.realpathSync(shared))!;
+  assert.equal(local.relationships.length, 1);
+  assert.equal(linked.relationships.length, 2);
+  assert.equal(local.description, 'Local variant');
+  assert.equal(local.provenance.sourceUrl, 'https://example.test/local.git');
+  assert.equal(local.provenance.skillPath, 'skills/local/SKILL.md');
+  assert.equal(linked.provenance.sourceUrl, 'https://example.test/shared.git');
+  assert.match(local.displayName, /owner\/local/);
+  assert.match(linked.displayName, /owner\/shared/);
+});
+
+test('inventory preserves on/off same-name variants within one agent', () => {
+  const home = tmpHome();
+  const dir = path.join(home.configDir, 'skills');
+  mkSkill(dir, 'same');
+  mkSkill(path.join(dir, '.off'), 'same');
+  const instances = buildInventory(home, [{name: 'a', dir}]).instances;
+
+  assert.equal(instances.length, 2);
+  assert.deepEqual(
+    instances.map((instance) => instance.relationships[0].info.presence).sort(),
+    ['off', 'on'],
+  );
+});
+
+test('inventory keeps broken links separate and detail uses explicit identity', () => {
+  const home = tmpHome();
+  const a = path.join(home.configDir, 'a');
+  const b = path.join(home.configDir, 'b');
+  mkSkill(a, 'same');
+  mkSkill(b, 'same');
+  fs.writeFileSync(path.join(a, 'same', 'SKILL.md'), '# first');
+  fs.writeFileSync(path.join(b, 'same', 'SKILL.md'), '# second');
+  fs.symlinkSync('/missing/target', path.join(a, 'broken'));
+  const agents = [{name: 'a', dir: a}, {name: 'b', dir: b}];
+
+  const instances = buildInventory(home, agents).instances;
+  const broken = instances.find((instance) => instance.name === 'broken')!;
+  assert.equal(broken.realPath, undefined);
+  assert.equal(broken.relationships[0].info.target, '/missing/target');
+  assert.equal(broken.sourceLabel, 'Source unknown');
+
+  const second = instances.find((instance) => instance.realPath === fs.realpathSync(path.join(b, 'same')))!;
+  const detail = skillDetail(home, agents, second.id)!;
+  assert.equal(detail.content, '# second');
+  assert.equal(detail.sourceLabel, 'Source unknown');
+  assert.deepEqual(detail.realPaths, [fs.realpathSync(path.join(b, 'same'))]);
+  assert.equal(skillDetail(home, agents, 'same'), undefined);
+});
+
+test('unambiguous inventory labels do not gain a source suffix', () => {
+  const home = tmpHome();
+  const dir = path.join(home.configDir, 'skills');
+  mkSkill(dir, 'only');
+  const [instance] = buildInventory(home, [{name: 'a', dir}]).instances;
+  assert.equal(instance.displayName, 'only');
 });
 
 test('tuiSnapshot rescans disk instead of caching on/off state', () => {
