@@ -1,6 +1,8 @@
 # ADR-0001: 磁盘是唯一真相,off = 挪进 `.off/`
 
-状态: accepted (2026-07-27)
+状态: superseded by ADR-0007 (2026-08-01)
+
+ADR-0007 保留“磁盘是 Actual state 真相”，但将 `.off/` 移出 discovery root，并允许 state 保存 Base intent 与 Preset claims。
 
 ## 背景
 

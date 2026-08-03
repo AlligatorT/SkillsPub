@@ -1,6 +1,8 @@
 # ADR-0006: SkillsPub 采用 matrix-first TUI
 
-状态: accepted (2026-07-30)
+状态: extended by ADR-0007 (2026-08-01)
+
+Matrix-first 方向保留；ADR-0007 将目标从 Agent 扩展为 Agent/Shared Runtime，并增加 Project 继承只读投影。
 
 ## 背景
 

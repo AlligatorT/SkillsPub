@@ -1,6 +1,8 @@
 # ADR-0003: scan/doctor 显式同步,不做后台监听和 hook
 
-状态: accepted (2026-07-27)
+状态: partially superseded by ADR-0007 and ADR-0008 (2026-08-01)
+
+显式 scan/doctor、无后台监听的原则保留；Preset drift 由显式 reconcile 修复，`skills` CLI 包装进入正式范围。
 
 ## 背景
 
@@ -15,7 +17,7 @@
 - `skillspub ls` 顺带提示("有 3 个新 skill 未分类、1 个死链"),用户自己决定何时 scan/doctor。
 - 新 agent 不自动铺开 preset;`preset apply` 时提示。
 
-可选增强(后做):包装 `skills add` 的 shell alias,装完自动 `skillspub scan --quiet`(skilltags 的 auto-sync 思路)。
+ADR-0008 已将 `skills@1.5.21` 的 find/add/update/remove 包装纳入 Shared Runtime 正式范围；完成后显式重扫，不增加 shell hook 或后台同步。
 
 各事件的具体行为见 [docs/spec/cli.md](../spec/cli.md) 的同步规则表。
 

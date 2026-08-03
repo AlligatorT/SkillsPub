@@ -1,6 +1,8 @@
 # ADR-0004: 管理范围 = 自包含 SKILL.md 目录,不碰 plugin 和 MCP
 
-状态: accepted (2026-07-27)
+状态: partially superseded by ADR-0007 (2026-08-01)
+
+管理单元仍限于自包含 `SKILL.md` 目录；ADR-0007 将范围从 Agent 全局 roots 扩展到 Global/Project Agent 与 Shared Runtimes。
 
 ## 背景
 
@@ -8,7 +10,7 @@ agent 生态里"能力包"有多种形态:纯 skill 目录、CLI 耦合型 skill
 
 ## 决策
 
-**唯一管理单元 = 自包含的 SKILL.md 目录,位于各 agent 的全局 skills 根目录**(`~/.claude/skills/`、`~/.agents/skills/`、`~/.pi/agent/skills/` 等)。这是生态里唯一跨 agent 通用的原语。
+**唯一管理单元 = 自包含的 `SKILL.md` 目录**，可位于 Global/Project Agent Runtimes 或 Shared Runtimes（`~/.claude/skills/`、`~/.agents/skills/`、`<project>/.agents/skills/`、`~/.pi/agent/skills/` 等）。这是生态里唯一跨 Agent 通用的原语。
 
 明确不碰:
 
