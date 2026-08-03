@@ -7,8 +7,22 @@
 ### Global
 
 - `~/.config/skillspub/state.json`：全局 Bundle、Tag、Preset definitions，以及 Global Runtime targets 的 Base intent、Preset activations、claims 与 inventory metadata。
-- `~/.config/skillspub/agents.conf`：Agent/Runtime registry。
+- `~/.config/skillspub/runtimes.json`：Agent/Shared Runtime registry。每项声明稳定 `key`、`kind`、Global discovery/parking roots 与项目内相对 `projectPath`；Shared Runtime 可声明可靠 installer `lockFile`。首次读取会把旧 `agents.conf` 保守迁移为 JSON，旧文件不删除。
 - 磁盘始终是 Relationship、Activation 与 Resource form 的 Actual state；state 只保存 intent 和 metadata。
+
+```json
+{
+  "version": 1,
+  "runtimes": [{
+    "key": "shared",
+    "kind": "shared",
+    "discoveryRoot": "~/.agents/skills",
+    "parkingRoot": "~/.agents/.skillspub-off/skills",
+    "projectPath": ".agents/skills",
+    "lockFile": "~/.agents/.skill-lock.json"
+  }]
+}
+```
 
 首次运行时，SkillsPub 会把旧配置目录中目标位置尚不存在的文件复制到新目录；已有 SkillsPub 文件优先，旧文件不会被删除或覆盖。
 
@@ -68,11 +82,12 @@ Project view 显示完整继承链。只有当前精确目录可写；父级和 
 ```text
 skillspub                         # TTY 中打开 TUI
 skillspub tui                     # 显式打开同一 TUI
+skillspub scan                    # 显式扫描 Global Runtime inventory
 skillspub ls [--runtime R] [--tag T]
 skillspub on|off <selector> <runtime...>
 skillspub status <selector>
 skillspub runtimes
-skillspub project <path> <command...>
+skillspub project <path> <command...> # 包括显式 Project scan
 ```
 
 裸命令只在交互式 TTY 中启动 Ink。非 TTY 环境输出 CLI usage。`tui` 不接受额外参数。
