@@ -114,6 +114,8 @@ export interface DoctorRepair {
   path: string;
   from: string;
   to?: string;
+  targetResourceId?: string;
+  targetHash?: string;
   runtimeId: string;
   slot: string;
 }
@@ -801,15 +803,25 @@ function repairTemporaryPath(repair: DoctorRepair, index: number): string {
   return `${repair.path}.skillspub-repair-${process.pid}-${index}`;
 }
 
-function preflightDoctorRepair(repair: DoctorRepair, index: number): void {
-  assertBrokenLink(repair);
-  fs.accessSync(path.dirname(repair.path), fs.constants.W_OK | fs.constants.X_OK);
+function assertRetargetTarget(repair: DoctorRepair): void {
   if (repair.kind === 'remove-broken-link') return;
-  if (!repair.to) throw new Error(`retarget repair has no target: ${repair.path}`);
+  if (!repair.to || !repair.targetResourceId || !repair.targetHash)
+    throw new Error(`retarget repair has no verified target: ${repair.path}`);
   const target = path.resolve(path.dirname(repair.path), repair.to);
   const stat = fs.statSync(target);
   if (!stat.isDirectory() || !fs.existsSync(path.join(target, 'SKILL.md')))
     throw new Error(`retarget repair target is not a Skill resource: ${target}`);
+  if (fs.realpathSync(target) !== repair.targetResourceId)
+    throw new Error(`retarget repair target identity changed: ${target}`);
+  if (hashDirectory(target) !== repair.targetHash)
+    throw new Error(`retarget repair target content changed: ${target}`);
+}
+
+function preflightDoctorRepair(repair: DoctorRepair, index: number): void {
+  assertBrokenLink(repair);
+  fs.accessSync(path.dirname(repair.path), fs.constants.W_OK | fs.constants.X_OK);
+  if (repair.kind === 'remove-broken-link') return;
+  assertRetargetTarget(repair);
   const temporary = repairTemporaryPath(repair, index);
   try {
     fs.lstatSync(temporary);
@@ -825,6 +837,7 @@ function applyDoctorRepair(repair: DoctorRepair, index: number): void {
     fs.unlinkSync(repair.path);
     return;
   }
+  assertRetargetTarget(repair);
   if (!repair.to) throw new Error(`retarget repair has no target: ${repair.path}`);
   const temporary = repairTemporaryPath(repair, index);
   fs.symlinkSync(repair.to, temporary);
@@ -1116,6 +1129,21 @@ function previousResourceIds(
   return new Set(slot.resourceIds.filter((id): id is string => typeof id === 'string'));
 }
 
+function retargetDetails(
+  relationship: RuntimeRelationship,
+  report: InventoryScanReport,
+  state: Record<string, unknown>,
+): Pick<DoctorRepair, 'to' | 'targetResourceId' | 'targetHash'> | undefined {
+  const to = replacementTarget(relationship, report, state);
+  if (!to) return undefined;
+  const targetPath = path.resolve(path.dirname(relationship.path), to);
+  const targetResourceId = report.relationships
+    .find(({ path: entryPath }) => path.resolve(entryPath) === targetPath)?.realPath;
+  if (!targetResourceId) return undefined;
+  const targetHash = report.resources.find(({ id }) => id === targetResourceId)?.hash;
+  return targetHash ? { to, targetResourceId, targetHash } : undefined;
+}
+
 function doctorRepairs(
   report: InventoryScanReport,
   state: Record<string, unknown>,
@@ -1123,18 +1151,18 @@ function doctorRepairs(
   const conflicted = new Set(report.slots.flatMap(({ id, relationships }) =>
     relationships.length > 1 ? [id] : []));
   return report.relationships.flatMap((relationship) => {
+    const conflict = conflicted.has(runtimeSlotId(relationship.runtimeId, relationship.slot));
     if (relationship.form !== 'link' || relationship.realPath ||
-      relationship.inspectionError || relationship.readOnly || !relationship.target ||
-      conflicted.has(runtimeSlotId(relationship.runtimeId, relationship.slot)))
+      relationship.inspectionError || relationship.readOnly || !relationship.target || conflict)
       return [];
-    const to = replacementTarget(relationship, report, state);
-    const kind = to ? 'retarget-link' : 'remove-broken-link';
+    const retarget = retargetDetails(relationship, report, state);
+    const kind = retarget ? 'retarget-link' : 'remove-broken-link';
     return [{
       id: `${kind}:${relationship.path}`,
       kind,
       path: relationship.path,
       from: relationship.target,
-      ...(to ? { to } : {}),
+      ...retarget,
       runtimeId: relationship.runtimeId,
       slot: relationship.slot,
     }];

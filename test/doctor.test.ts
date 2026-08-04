@@ -211,17 +211,44 @@ test('Doctor previews and repairs a managed Link whose local source moved to par
 
   const report = doctorGlobalInventory(home, [consumer, source]);
 
-  assert.deepEqual(report.repairs, [{
-    id: `retarget-link:${link}`,
-    kind: 'retarget-link',
-    path: link,
-    from: oldTarget,
-    to: parked,
-    runtimeId: 'global:consumer',
-    slot: 'shared',
-  }]);
+  const [repair] = report.repairs;
+  assert.equal(repair.id, `retarget-link:${link}`);
+  assert.equal(repair.kind, 'retarget-link');
+  assert.equal(repair.from, oldTarget);
+  assert.equal(repair.to, parked);
+  assert.equal(repair.targetResourceId, fs.realpathSync(parked));
+  assert.equal(typeof repair.targetHash, 'string');
   assert.deepEqual(applyDoctorRepairs(report.repairs).completed, report.repairs);
   assert.equal(fs.realpathSync(link), fs.realpathSync(parked));
+});
+
+test('Doctor rejects a managed Link repair when the target changes after preview', () => {
+  const { home, runtime: consumer } = setup();
+  consumer.key = 'consumer';
+  const source: Runtime = {
+    key: 'source',
+    kind: 'agent',
+    discoveryRoot: path.join(home.configDir, 'source', 'skills'),
+    parkingRoot: path.join(home.configDir, 'source', '.skillspub-off', 'skills'),
+    projectPath: '.source/skills',
+  };
+  const oldTarget = path.join(source.discoveryRoot, 'shared');
+  fs.mkdirSync(oldTarget, { recursive: true });
+  fs.writeFileSync(path.join(oldTarget, 'SKILL.md'), '# original');
+  const link = path.join(consumer.discoveryRoot, 'shared');
+  fs.symlinkSync(oldTarget, link);
+  scanGlobalInventory(home, [consumer, source]);
+  const parked = path.join(source.parkingRoot, 'shared');
+  fs.mkdirSync(path.dirname(parked), { recursive: true });
+  fs.renameSync(oldTarget, parked);
+  const report = doctorGlobalInventory(home, [consumer, source]);
+  fs.rmSync(parked, { recursive: true });
+  fs.mkdirSync(parked);
+  fs.writeFileSync(path.join(parked, 'SKILL.md'), '# substituted after preview');
+
+  assert.throws(() => applyDoctorRepairs(report.repairs), /target .*changed/);
+  assert.equal(fs.lstatSync(link).isSymbolicLink(), true);
+  assert.equal(fs.readFileSync(path.join(parked, 'SKILL.md'), 'utf8'), '# substituted after preview');
 });
 
 test('Doctor does not retarget to a different resource placed in the matching parking Slot', () => {
