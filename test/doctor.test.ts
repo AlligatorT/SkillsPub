@@ -307,6 +307,7 @@ test('Doctor reports both sides of a known npx lock/file mismatch', () => {
   fs.writeFileSync(path.join(managed, 'SKILL.md'), '# managed');
   runtime.lockFile = path.join(home.configDir, '.skill-lock.json');
   fs.writeFileSync(runtime.lockFile, JSON.stringify({
+    version: 3,
     skills: { ghost: { source: 'owner/repo' } },
   }));
   const slotId = 'global:shared\0managed';

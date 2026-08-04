@@ -21,6 +21,13 @@ import {
   type Row,
 } from './core.ts';
 import {
+  sharedAdd,
+  sharedDescribe,
+  sharedFind,
+  sharedRemove,
+  sharedUpdate,
+} from './shared.ts';
+import {
   addBundleMembers,
   addResourceTags,
   applyActivationPlan,
@@ -43,9 +50,10 @@ const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the sour
   skillspub status <skill>             per-agent state of one skill
   skillspub bundle ls|show|create|add|rm ...
   skillspub tag add|rm|ls ...          manage global resource Tags
+  skillspub shared find|describe|add|update|remove ...  manage the Shared Runtime via skills@1.5.21
   skillspub scan                       explicitly scan Global Runtime inventory
   skillspub doctor [--repair --yes]    diagnose; explicitly confirm safe repairs
-  skillspub project <path> scan|doctor inspect the exact Project Runtime roots
+  skillspub project <path> scan|doctor|shared ...  operate on the exact Project Runtime roots
   skillspub runtimes                   Runtime registry (~/.config/skillspub/runtimes.json)
   skillspub agents                     legacy Agent registry view
   skillspub tui                        interactive full-screen skill browser
@@ -361,6 +369,62 @@ function cmdBundle(home: ReturnType<typeof defaultHome>, args: string[]): void {
   }
 }
 
+function cmdShared(
+  home: ReturnType<typeof defaultHome>,
+  args: string[],
+  projectPath?: string,
+): void {
+  const [action, ...rest] = args;
+  switch (action) {
+    case 'find':
+      sharedFind(home, rest, projectPath);
+      break;
+    case 'describe':
+      if (rest.length !== 1)
+        throw new Error('usage: skillspub shared describe <source>');
+      sharedDescribe(home, rest[0], projectPath);
+      break;
+    case 'add': {
+      const { values, positionals } = parseArgs({
+        args: rest,
+        options: {
+          skill: { type: 'string' },
+          replace: { type: 'boolean' },
+        },
+        allowPositionals: true,
+        strict: true,
+      });
+      if (positionals.length !== 1 || !values.skill)
+        throw new Error('usage: skillspub shared add <source> --skill <name> [--replace]');
+      const result = sharedAdd(home, positionals[0], values.skill, Boolean(values.replace), projectPath);
+      console.log(`Actual: ${result.actual}`);
+      console.log(`Remaining drift: ${result.drift.join(', ') || 'none'}`);
+      console.log('Running Agents must reload/restart to read the final Shared Runtime state.');
+      break;
+    }
+    case 'update': {
+      if (rest.some((arg) => arg.startsWith('-')))
+        throw new Error('usage: skillspub shared update [<managed-name>...]');
+      const result = sharedUpdate(home, rest, projectPath);
+      console.log(`Actual: ${result.actual}`);
+      console.log(`Remaining drift: ${result.drift.join(', ') || 'none'}`);
+      console.log('Running Agents must reload/restart to read the final Shared Runtime state.');
+      break;
+    }
+    case 'remove': {
+      if (rest.length === 0 || rest.some((arg) => arg.startsWith('-')))
+        throw new Error('usage: skillspub shared remove <managed-name...>');
+      const result = sharedRemove(home, rest, projectPath);
+      console.log(`Actual: ${result.actual}`);
+      console.log(`Remaining drift: ${result.drift.join(', ') || 'none'}`);
+      console.log('Running Agents must reload/restart to read the final Shared Runtime state.');
+      break;
+    }
+    default:
+      throw new Error('usage: skillspub shared find|describe|add|update|remove ...');
+  }
+}
+
 function printDoctor(report: DoctorReport): void {
   console.log(report.scope === 'project'
     ? `Project Doctor: ${report.projectPath}`
@@ -453,7 +517,12 @@ async function main(
   stdoutIsTty = Boolean(process.stdout.isTTY),
 ): Promise<void> {
   const [cmd, ...rest] = args;
-  const readOnly = cmd === 'doctor' || (cmd === 'project' && rest[1] === 'doctor');
+  const readOnlyShared = (command: string | undefined) =>
+    command === 'find' || command === 'describe';
+  const readOnly = cmd === 'doctor' ||
+    (cmd === 'shared' && readOnlyShared(rest[0])) ||
+    (cmd === 'project' && (rest[1] === 'doctor' ||
+      (rest[1] === 'shared' && readOnlyShared(rest[2]))));
   const home = defaultHome({ migrate: !readOnly });
   try {
     if (shouldRunTui(cmd, stdinIsTty, stdoutIsTty)) {
@@ -479,6 +548,9 @@ async function main(
       case 'tag':
         cmdTag(home, rest);
         break;
+      case 'shared':
+        cmdShared(home, rest);
+        break;
       case 'scan':
         if (rest.length > 0) throw new Error('usage: skillspub scan');
         printScan(scanGlobalInventory(home));
@@ -488,11 +560,12 @@ async function main(
         break;
       case 'project': {
         const [projectPath, projectCommand, ...projectArgs] = rest;
-        if (!projectPath) throw new Error('usage: skillspub project <path> scan|doctor');
+        if (!projectPath) throw new Error('usage: skillspub project <path> scan|doctor|shared');
         if (projectCommand === 'scan' && projectArgs.length === 0)
           printScan(scanProjectInventory(home, projectPath));
         else if (projectCommand === 'doctor') cmdDoctor(home, projectArgs, projectPath);
-        else throw new Error('usage: skillspub project <path> scan|doctor');
+        else if (projectCommand === 'shared') cmdShared(home, projectArgs, projectPath);
+        else throw new Error('usage: skillspub project <path> scan|doctor|shared');
         break;
       }
       case 'runtimes':
