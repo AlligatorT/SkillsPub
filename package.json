@@ -3,12 +3,14 @@
   "version": "0.1.0",
   "description": "SkillsPub multi-agent skills on/off manager — disk is the source of truth",
   "type": "module",
-  "files": ["src"],
+  "files": [
+    "src"
+  ],
   "bin": {
     "skillspub": "src/cli.ts"
   },
   "engines": {
-    "node": ">=22.18"
+    "node": ">=22.20"
   },
   "scripts": {
     "test": "node --test",
@@ -17,6 +19,7 @@
   "devDependencies": {
     "@types/node": "^22",
     "@types/react": "^19.2.17",
+    "skills": "1.5.21",
     "typescript": "^5.8"
   },
   "dependencies": {

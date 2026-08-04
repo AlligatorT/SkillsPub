@@ -87,6 +87,7 @@ test('normalized entry names compete for one Runtime Slot without merging Varian
   assert.doesNotThrow(() => mkSkill(parkingRoot, 'foo bar'));
   const lockFile = path.join(home.configDir, 'runtime', '.skill-lock.json');
   fs.writeFileSync(lockFile, JSON.stringify({
+    version: 3,
     skills: { Foo_Bar: { source: 'owner/repo' } },
   }));
 
@@ -150,7 +151,7 @@ test('scan separates structural anomalies, metadata flags, and external changes'
   mkSkill(discoveryRoot, 'collision', '# on');
   mkSkill(parkingRoot, 'collision', '# off');
   fs.symlinkSync('/missing/skill', path.join(discoveryRoot, 'broken'));
-  fs.writeFileSync(lockFile, JSON.stringify({ skills: {
+  fs.writeFileSync(lockFile, JSON.stringify({ version: 3, skills: {
     locked: {
       source: 'owner/repo',
       sourceUrl: 'https://github.com/owner/repo.git',
@@ -298,6 +299,7 @@ test('one resource keeps independent provenance for each occupied Runtime Slot',
     fs.symlinkSync(source, path.join(root, 'shared'));
     const lockFile = path.join(home.configDir, key, '.skill-lock.json');
     fs.writeFileSync(lockFile, JSON.stringify({
+      version: 3,
       skills: { shared: { source: `owner/${key}` } },
     }));
     return {
@@ -358,6 +360,7 @@ test('malformed installer lock is structural, not an external source replacement
   const lockFile = path.join(home.configDir, 'shared', '.skill-lock.json');
   mkSkill(discoveryRoot, 'example');
   fs.writeFileSync(lockFile, JSON.stringify({
+    version: 3,
     skills: { example: { source: 'owner/repo' } },
   }));
   const runtime: Runtime = {
@@ -391,6 +394,7 @@ test('malformed installer lock is structural, not an external source replacement
   );
 
   fs.writeFileSync(lockFile, JSON.stringify({
+    version: 3,
     skills: { example: { source: 'owner/repo' } },
   }));
   const restored = scanGlobalInventory(home, [runtime], {
@@ -398,7 +402,7 @@ test('malformed installer lock is structural, not an external source replacement
   });
   assert.equal(restored.findings.some(({ code }) => code === 'source-changed'), false);
 
-  fs.writeFileSync(lockFile, JSON.stringify({ skills: [] }));
+  fs.writeFileSync(lockFile, JSON.stringify({ version: 3, skills: [] }));
   const invalidSchema = scanGlobalInventory(home, [runtime], {
     now: '2026-08-06T00:00:00.000Z',
   });
@@ -409,6 +413,7 @@ test('malformed installer lock is structural, not an external source replacement
   assert.equal(invalidSchema.findings.some(({ code }) => code === 'source-changed'), false);
 
   fs.writeFileSync(lockFile, JSON.stringify({
+    version: 3,
     skills: { example: { source: 7 } },
   }));
   const invalidField = scanGlobalInventory(home, [runtime], {
