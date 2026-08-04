@@ -38,10 +38,12 @@ test('global scan records Runtime Relationships without moving disk state', () =
   const source = mkSkill(path.join(home.configDir, 'sources'), 'linked');
   const sourceOn = mkSkill(path.join(home.configDir, 'sources'), 'linked-on');
   fs.mkdirSync(discoveryRoot, { recursive: true });
-  fs.symlinkSync(sourceOn, path.join(discoveryRoot, 'linked-on'));
+  assert.doesNotThrow(() =>
+    fs.symlinkSync(sourceOn, path.join(discoveryRoot, 'linked-on')));
   mkSkill(discoveryRoot, 'local');
   fs.mkdirSync(parkingRoot, { recursive: true });
-  fs.symlinkSync(source, path.join(parkingRoot, 'linked'));
+  assert.doesNotThrow(() =>
+    fs.symlinkSync(source, path.join(parkingRoot, 'linked')));
   mkSkill(parkingRoot, 'local-off');
   const runtimes: Runtime[] = [{
     key: 'shared',
@@ -70,7 +72,8 @@ test('global scan records Runtime Relationships without moving disk state', () =
   assert.equal(state.runtimeInventory.version, 1);
   assert.equal(Object.keys(state.runtimeInventory.resources).length, 4);
   const resourceId = fs.realpathSync(path.join(discoveryRoot, 'local'));
-  scanGlobalInventory(home, runtimes, { now: '2026-08-04T00:00:00.000Z' });
+  assert.doesNotThrow(() =>
+    scanGlobalInventory(home, runtimes, { now: '2026-08-04T00:00:00.000Z' }));
   const repeated = JSON.parse(fs.readFileSync(path.join(home.configDir, 'state.json'), 'utf8'));
   assert.equal(repeated.runtimeInventory.resources[resourceId].firstSeenAt, '2026-08-03T00:00:00.000Z');
   assert.equal(repeated.runtimeInventory.resources[resourceId].lastSeenAt, '2026-08-04T00:00:00.000Z');
@@ -80,8 +83,12 @@ test('normalized entry names compete for one Runtime Slot without merging Varian
   const home = tmpHome();
   const discoveryRoot = path.join(home.configDir, 'runtime', 'skills');
   const parkingRoot = path.join(home.configDir, 'runtime', '.skillspub-off', 'skills');
-  mkSkill(discoveryRoot, 'Foo_Bar');
-  mkSkill(parkingRoot, 'foo bar');
+  assert.doesNotThrow(() => mkSkill(discoveryRoot, 'Foo_Bar'));
+  assert.doesNotThrow(() => mkSkill(parkingRoot, 'foo bar'));
+  const lockFile = path.join(home.configDir, 'runtime', '.skill-lock.json');
+  fs.writeFileSync(lockFile, JSON.stringify({
+    skills: { Foo_Bar: { source: 'owner/repo' } },
+  }));
 
   const report = scanGlobalInventory(home, [{
     key: 'agent',
@@ -89,6 +96,7 @@ test('normalized entry names compete for one Runtime Slot without merging Varian
     discoveryRoot,
     parkingRoot,
     projectPath: '.agent/skills',
+    lockFile,
   }], { now: '2026-08-03T00:00:00.000Z' });
 
   assert.equal(normalizeSlotName(' Foo_Bar '), 'foo-bar');
@@ -103,6 +111,8 @@ test('normalized entry names compete for one Runtime Slot without merging Varian
       { code: 'slot-conflict', slot: 'foo-bar' },
     ],
   );
+  const state = readJson(report.stateFile) as { bundles: Record<string, string[]> };
+  assert.equal(state.bundles['repo:owner/repo'], undefined);
 });
 
 test('resource hash frames paths and bytes so distinct directory states differ', () => {

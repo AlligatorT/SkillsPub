@@ -190,3 +190,254 @@ test('project <path> scan writes state inside the exact Project', () => {
   assert.ok(fs.existsSync(path.join(realProject, '.skillspub', 'state.json')));
   assert.equal(fs.existsSync(path.join(configDir, 'state.json')), false);
 });
+
+test('bundle commands persist explicit resource members and show stale references', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-bundle-'));
+  const discoveryRoot = path.join(configDir, 'shared', 'skills');
+  const parkingRoot = path.join(configDir, 'shared', '.skillspub-off', 'skills');
+  const skill = path.join(discoveryRoot, 'example');
+  fs.mkdirSync(skill, { recursive: true });
+  fs.writeFileSync(path.join(skill, 'SKILL.md'), '# example');
+  fs.writeFileSync(path.join(configDir, 'runtimes.json'), JSON.stringify({
+    version: 1,
+    runtimes: [{
+      key: 'shared',
+      kind: 'shared',
+      discoveryRoot,
+      parkingRoot,
+      projectPath: '.agents/skills',
+    }],
+  }));
+  const run = (args: string[]) => execFileSync('node', [CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+  assert.match(run(['scan']), /Global scan/);
+  const resourceId = fs.realpathSync(skill);
+
+  assert.match(run(['bundle', 'create', 'tools', 'skill:example']), /created bundle tools/);
+  assert.match(run(['bundle', 'ls']), /tools\t1/);
+  assert.match(run(['bundle', 'show', 'tools']), new RegExp(resourceId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+
+  fs.rmSync(skill, { recursive: true });
+  assert.match(run(['scan']), /Global scan/);
+  assert.match(run(['bundle', 'show', 'tools']), /stale/);
+  assert.match(run(['bundle', 'rm', 'tools', `skill:${resourceId}`]), /removed 1 member/);
+  assert.match(run(['bundle', 'rm', 'tools']), /removed bundle tools/);
+  const state = JSON.parse(fs.readFileSync(path.join(configDir, 'state.json'), 'utf8'));
+  assert.equal(state.bundles.tools, undefined);
+});
+
+test('bundle membership never merges same-name resource variants', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-bundle-variants-'));
+  const runtimes = ['one', 'two'].map((key) => {
+    const discoveryRoot = path.join(configDir, key, 'skills');
+    const skill = path.join(discoveryRoot, 'same');
+    fs.mkdirSync(skill, { recursive: true });
+    fs.writeFileSync(path.join(skill, 'SKILL.md'), `# ${key}`);
+    return {
+      key,
+      kind: 'shared',
+      discoveryRoot,
+      parkingRoot: path.join(configDir, key, '.skillspub-off', 'skills'),
+      projectPath: `.agents/${key}/skills`,
+      skill,
+    };
+  });
+  fs.writeFileSync(path.join(configDir, 'runtimes.json'), JSON.stringify({
+    version: 1,
+    runtimes: runtimes.map(({ skill: _, ...runtime }) => runtime),
+  }));
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+  assert.equal(run(['scan']).status, 0);
+  const ambiguous = run(['bundle', 'create', 'tools', 'skill:same']);
+  assert.equal(ambiguous.status, 1);
+  assert.match(ambiguous.stderr, /ambiguous/);
+  for (const runtime of runtimes) {
+    assert.match(ambiguous.stderr, new RegExp(`skill:${fs.realpathSync(runtime.skill).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  }
+  const stateAfterFailure = JSON.parse(fs.readFileSync(path.join(configDir, 'state.json'), 'utf8'));
+  assert.equal(stateAfterFailure.bundles.tools, undefined);
+
+  const first = `skill:${fs.realpathSync(runtimes[0].skill)}`;
+  const second = `skill:${fs.realpathSync(runtimes[1].skill)}`;
+  assert.equal(run(['bundle', 'create', 'tools', first]).status, 0);
+  assert.equal(run(['bundle', 'add', 'tools', second]).status, 0);
+  assert.match(run(['bundle', 'show', 'tools']).stdout, /same[\s\S]*same/);
+});
+
+test('bundle selectors preview Runtime Slots, move relationships, and update Base intent', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-bundle-toggle-'));
+  const discoveryRoot = path.join(configDir, 'shared', 'skills');
+  const parkingRoot = path.join(configDir, 'shared', '.skillspub-off', 'skills');
+  for (const name of ['one', 'two']) {
+    fs.mkdirSync(path.join(discoveryRoot, name), { recursive: true });
+    fs.writeFileSync(path.join(discoveryRoot, name, 'SKILL.md'), `# ${name}`);
+  }
+  fs.writeFileSync(path.join(configDir, 'runtimes.json'), JSON.stringify({
+    version: 1,
+    runtimes: [{
+      key: 'shared',
+      kind: 'shared',
+      discoveryRoot,
+      parkingRoot,
+      projectPath: '.agents/skills',
+    }],
+  }));
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+  assert.equal(run(['scan']).status, 0);
+  assert.equal(
+    run(['bundle', 'create', 'tools', 'skill:one', 'skill:two']).status,
+    0,
+  );
+
+  const disabled = run(['off', 'bundle:tools', 'shared']);
+  assert.equal(disabled.status, 0, disabled.stderr);
+  assert.match(disabled.stdout, /Plan:/);
+  assert.match(disabled.stdout, /global:shared\/one\s+on -> off/);
+  assert.match(disabled.stdout, /global:shared\/two\s+on -> off/);
+  assert.ok(fs.existsSync(path.join(parkingRoot, 'one', 'SKILL.md')));
+  assert.ok(fs.existsSync(path.join(parkingRoot, 'two', 'SKILL.md')));
+  const state = JSON.parse(fs.readFileSync(path.join(configDir, 'state.json'), 'utf8'));
+  assert.equal(state.baseIntent['global:shared\0one'], 'off');
+  assert.equal(state.baseIntent['global:shared\0two'], 'off');
+
+  const repeated = run(['off', 'bundle:tools', 'shared']);
+  assert.equal(repeated.status, 0, repeated.stderr);
+  assert.match(repeated.stdout, /off -> off/);
+
+  const enabled = run(['on', 'bundle:tools', 'shared']);
+  assert.equal(enabled.status, 0, enabled.stderr);
+  assert.match(enabled.stdout, /global:shared\/one\s+off -> on/);
+  assert.ok(fs.existsSync(path.join(discoveryRoot, 'one', 'SKILL.md')));
+  assert.ok(fs.existsSync(path.join(discoveryRoot, 'two', 'SKILL.md')));
+});
+
+test('bundle activation preflight rejects same-Slot variants without changing state or disk', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-bundle-conflict-'));
+  const runtimes = ['one', 'two'].map((key) => {
+    const discoveryRoot = path.join(configDir, key, 'skills');
+    const skill = path.join(discoveryRoot, 'same');
+    fs.mkdirSync(skill, { recursive: true });
+    fs.writeFileSync(path.join(skill, 'SKILL.md'), `# ${key}`);
+    return {
+      key,
+      kind: 'shared',
+      discoveryRoot,
+      parkingRoot: path.join(configDir, key, '.skillspub-off', 'skills'),
+      projectPath: `.agents/${key}/skills`,
+      skill,
+    };
+  });
+  fs.writeFileSync(path.join(configDir, 'runtimes.json'), JSON.stringify({
+    version: 1,
+    runtimes: runtimes.map(({ skill: _, ...runtime }) => runtime),
+  }));
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+  assert.equal(run(['scan']).status, 0);
+  const selectors = runtimes.map(({ skill }) => `skill:${fs.realpathSync(skill)}`);
+  assert.equal(run(['bundle', 'create', 'conflict', ...selectors]).status, 0);
+  const stateFile = path.join(configDir, 'state.json');
+  const before = fs.readFileSync(stateFile, 'utf8');
+
+  const result = run(['off', 'bundle:conflict', 'one']);
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Runtime Slot global:one\/same is ambiguous or occupied/);
+  for (const selector of selectors) {
+    assert.match(result.stderr, new RegExp(selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+  assert.equal(fs.readFileSync(stateFile, 'utf8'), before);
+  assert.ok(fs.existsSync(path.join(runtimes[0].skill, 'SKILL.md')));
+  assert.ok(fs.existsSync(path.join(runtimes[1].skill, 'SKILL.md')));
+});
+
+test('bundle activation fails safely when a member is stale', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-bundle-stale-'));
+  const discoveryRoot = path.join(configDir, 'shared', 'skills');
+  const parkingRoot = path.join(configDir, 'shared', '.skillspub-off', 'skills');
+  const skill = path.join(discoveryRoot, 'example');
+  fs.mkdirSync(skill, { recursive: true });
+  fs.writeFileSync(path.join(skill, 'SKILL.md'), '# example');
+  fs.writeFileSync(path.join(configDir, 'runtimes.json'), JSON.stringify({
+    version: 1,
+    runtimes: [{
+      key: 'shared',
+      kind: 'shared',
+      discoveryRoot,
+      parkingRoot,
+      projectPath: '.agents/skills',
+    }],
+  }));
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+  assert.equal(run(['scan']).status, 0);
+  assert.equal(run(['bundle', 'create', 'tools', 'skill:example']).status, 0);
+  fs.rmSync(skill, { recursive: true });
+  assert.equal(run(['scan']).status, 0);
+  const stateFile = path.join(configDir, 'state.json');
+  const before = fs.readFileSync(stateFile, 'utf8');
+
+  const result = run(['off', 'bundle:tools', 'shared']);
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /stale Bundle member/);
+  assert.equal(fs.readFileSync(stateFile, 'utf8'), before);
+});
+
+test('creating a missing Relationship requires explicit confirmation', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-bundle-link-'));
+  const sourceRoot = path.join(configDir, 'source', 'skills');
+  const targetRoot = path.join(configDir, 'target', 'skills');
+  const skill = path.join(sourceRoot, 'example');
+  fs.mkdirSync(skill, { recursive: true });
+  fs.writeFileSync(path.join(skill, 'SKILL.md'), '# example');
+  const runtimes = [
+    {
+      key: 'source',
+      kind: 'shared',
+      discoveryRoot: sourceRoot,
+      parkingRoot: path.join(configDir, 'source', '.skillspub-off', 'skills'),
+      projectPath: '.agents/source/skills',
+    },
+    {
+      key: 'target',
+      kind: 'shared',
+      discoveryRoot: targetRoot,
+      parkingRoot: path.join(configDir, 'target', '.skillspub-off', 'skills'),
+      projectPath: '.agents/target/skills',
+    },
+  ];
+  fs.writeFileSync(path.join(configDir, 'runtimes.json'), JSON.stringify({ version: 1, runtimes }));
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+  assert.equal(run(['scan']).status, 0);
+  assert.equal(run(['bundle', 'create', 'tools', 'skill:example']).status, 0);
+  const stateFile = path.join(configDir, 'state.json');
+  const before = fs.readFileSync(stateFile, 'utf8');
+
+  const refused = run(['on', 'bundle:tools', 'target']);
+
+  assert.equal(refused.status, 1);
+  assert.match(refused.stdout, /global:target\/example\s+missing -> on/);
+  assert.match(refused.stderr, /requires --yes/);
+  assert.equal(fs.readFileSync(stateFile, 'utf8'), before);
+  assert.equal(fs.existsSync(path.join(targetRoot, 'example')), false);
+
+  const confirmed = run(['on', 'bundle:tools', 'target', '--yes']);
+  assert.equal(confirmed.status, 0, confirmed.stderr);
+  assert.equal(fs.realpathSync(path.join(targetRoot, 'example')), fs.realpathSync(skill));
+});
