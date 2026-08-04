@@ -1173,7 +1173,6 @@ function globalInventory(
   home: Home,
   runtimes: Runtime[],
   options: ScanOptions,
-  persist: boolean,
 ): InventoryScanReport {
   const stateFile = path.join(home.configDir, 'state.json');
   return scanInventory({
@@ -1186,7 +1185,7 @@ function globalInventory(
       scope: 'global',
       writable: true,
     })),
-    options: { ...options, persist },
+    options,
   });
 }
 
@@ -1195,7 +1194,7 @@ export function scanGlobalInventory(
   runtimes: Runtime[] = loadRuntimes(home),
   options: ScanOptions = {},
 ): InventoryScanReport {
-  return globalInventory(home, runtimes, options, true);
+  return globalInventory(home, runtimes, options);
 }
 
 function rootIdentity(root: string): string {
@@ -1231,7 +1230,7 @@ export function doctorGlobalInventory(
   runtimes: Runtime[] = loadRuntimes(home, { persist: false }),
 ): DoctorReport {
   const stateFile = path.join(home.configDir, 'state.json');
-  const report = globalInventory(home, runtimes, {}, false);
+  const report = globalInventory(home, runtimes, { persist: false });
   const state = readStateFile(stateFile);
   return doctorReport(report, state, state);
 }
@@ -1241,13 +1240,11 @@ function projectInventory({
   selectedPath,
   runtimes,
   options,
-  persist,
 }: {
   home: Home;
   selectedPath: string;
   runtimes: Runtime[];
   options: ScanOptions;
-  persist: boolean;
 }): InventoryScanReport {
   const projectPath = fs.realpathSync(selectedPath);
   if (!fs.statSync(projectPath).isDirectory())
@@ -1281,7 +1278,7 @@ function projectInventory({
     stateFile: path.join(projectPath, '.skillspub', 'state.json'),
     catalogStateFile: path.join(home.configDir, 'state.json'),
     runtimes: scanned,
-    options: { ...options, persist },
+    options,
     projectPath,
   });
 }
@@ -1292,7 +1289,7 @@ export function scanProjectInventory(
   runtimes: Runtime[] = loadRuntimes(home),
   options: ScanOptions = {},
 ): InventoryScanReport {
-  return projectInventory({ home, selectedPath, runtimes, options, persist: true });
+  return projectInventory({ home, selectedPath, runtimes, options });
 }
 
 export function doctorProjectInventory(
@@ -1304,8 +1301,7 @@ export function doctorProjectInventory(
     home,
     selectedPath,
     runtimes,
-    options: {},
-    persist: false,
+    options: { persist: false },
   });
   return doctorReport(
     report,
