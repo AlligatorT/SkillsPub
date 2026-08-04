@@ -799,16 +799,24 @@ function assertBrokenLink(repair: DoctorRepair): void {
 
 export function applyDoctorRepairs(repairs: DoctorRepair[]): DoctorApplyResult {
   const paths = new Set<string>();
-  for (const repair of repairs) {
+  for (const [index, repair] of repairs.entries()) {
     if (paths.has(repair.path)) throw new Error(`duplicate repair path: ${repair.path}`);
     paths.add(repair.path);
     assertBrokenLink(repair);
+    fs.accessSync(path.dirname(repair.path), fs.constants.W_OK);
     if (repair.kind === 'retarget-link') {
       if (!repair.to) throw new Error(`retarget repair has no target: ${repair.path}`);
       const target = path.resolve(path.dirname(repair.path), repair.to);
       const stat = fs.statSync(target);
       if (!stat.isDirectory() || !fs.existsSync(path.join(target, 'SKILL.md')))
         throw new Error(`retarget repair target is not a Skill resource: ${target}`);
+      const temporary = `${repair.path}.skillspub-repair-${process.pid}-${index}`;
+      try {
+        fs.lstatSync(temporary);
+        throw new Error(`temporary repair path already exists: ${temporary}`);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
     }
   }
 
@@ -848,6 +856,7 @@ export function applyDoctorRepairs(repairs: DoctorRepair[]): DoctorApplyResult {
 function replacementTarget(
   relationship: RuntimeRelationship,
   report: InventoryScanReport,
+  priorResourceIds: Set<string>,
 ): string | undefined {
   const rawTarget = relationship.target;
   if (!rawTarget) return undefined;
@@ -863,7 +872,9 @@ function replacementTarget(
       const relative = path.relative(path.resolve(root), target);
       if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
       const candidate = path.resolve(counterpart, relative);
-      if (occupants.has(candidate)) candidates.add(candidate);
+      const priorResourceId = path.resolve(rootIdentity(root), relative);
+      if (occupants.has(candidate) && priorResourceIds.has(priorResourceId))
+        candidates.add(candidate);
     }
   }
   if (candidates.size !== 1) return undefined;
@@ -871,6 +882,16 @@ function replacementTarget(
   return path.isAbsolute(rawTarget)
     ? candidate
     : path.relative(path.dirname(relationship.path), candidate);
+}
+
+function resourceExists(resources: Set<string>, resourceId: string): boolean {
+  if (resources.has(resourceId)) return true;
+  try {
+    return fs.statSync(resourceId).isDirectory() &&
+      fs.statSync(path.join(resourceId, 'SKILL.md')).isFile();
+  } catch {
+    return false;
+  }
 }
 
 function staleBundleReferences(
@@ -882,7 +903,7 @@ function staleBundleReferences(
   for (const [bundle, members] of Object.entries(value)) {
     if (!Array.isArray(members)) continue;
     for (const member of members)
-      if (typeof member === 'string' && !resources.has(member))
+      if (typeof member === 'string' && !resourceExists(resources, member))
         stale.push([`Bundle ${bundle}:${member}`, member]);
   }
   return stale;
@@ -894,7 +915,7 @@ function staleTagReferences(
 ): Array<[string, string]> {
   if (!isRecord(value)) return [];
   return Object.keys(value).flatMap((resourceId) =>
-    resources.has(resourceId) ? [] : [[`Tag:${resourceId}`, resourceId]]);
+    resourceExists(resources, resourceId) ? [] : [[`Tag:${resourceId}`, resourceId]]);
 }
 
 function stalePresetReferences(
@@ -904,7 +925,7 @@ function stalePresetReferences(
 ): Array<[string, string]> {
   if (typeof value === 'string' && value.startsWith('skill:')) {
     const resourceId = value.slice('skill:'.length);
-    if (!resources.has(resourceId)) stale.push([`Preset:${value}`, resourceId]);
+    if (!resourceExists(resources, resourceId)) stale.push([`Preset:${value}`, resourceId]);
   } else if (Array.isArray(value)) {
     for (const item of value) stalePresetReferences(item, resources, stale);
   } else if (isRecord(value)) {
@@ -932,7 +953,7 @@ function staleReferenceFindings(
 }
 
 function activePresetNames(state: Record<string, unknown>): string[] {
-  const value = state.presetActivations ?? state.activePresets;
+  const value = state.presetActivations;
   if (Array.isArray(value)) return value.filter((item): item is string => typeof item === 'string');
   return isRecord(value) ? Object.keys(value) : [];
 }
@@ -954,25 +975,33 @@ function orphanedPresetFindings(
 function baseIntents(state: Record<string, unknown>): Map<string, Activation> {
   const intents = new Map<string, Activation>();
   if (!isRecord(state.baseIntent)) return intents;
-  for (const [key, value] of Object.entries(state.baseIntent)) {
+  for (const [key, value] of Object.entries(state.baseIntent))
     if (value === 'on' || value === 'off') intents.set(key, value);
-    else if (isRecord(value)) {
-      for (const [slot, activation] of Object.entries(value))
-        if (activation === 'on' || activation === 'off')
-          intents.set(runtimeSlotId(key, normalizeSlotName(slot)), activation);
-    }
-  }
   return intents;
+}
+
+function collectClaimedSlots(value: unknown, slots: Set<string>): void {
+  if (typeof value === 'string' && value.includes('\0')) slots.add(value);
+  else if (Array.isArray(value))
+    for (const item of value) collectClaimedSlots(item, slots);
+  else if (isRecord(value))
+    for (const item of Object.values(value)) collectClaimedSlots(item, slots);
 }
 
 function parkingFindings(
   report: InventoryScanReport,
   state: Record<string, unknown>,
 ): ScanFinding[] {
-  const slots = new Map(report.slots.map((slot) => [slot.id, slot]));
+  const currentSlots = new Set(report.slots.map(({ id }) => id));
+  const previousSlots = isRecord(state.runtimeInventory) && isRecord(state.runtimeInventory.slots)
+    ? state.runtimeInventory.slots
+    : {};
+  const claimedSlots = new Set<string>();
+  collectClaimedSlots(state.claims, claimedSlots);
+  collectClaimedSlots(state.lastClaims, claimedSlots);
   return [...baseIntents(state)].flatMap(([id, intent]) => {
-    if (intent !== 'off' || slots.get(id)?.relationships.some(({ activation }) => activation === 'off'))
-      return [];
+    if (intent !== 'off' || currentSlots.has(id) || claimedSlots.has(id) ||
+      !isRecord(previousSlots[id])) return [];
     const separator = id.indexOf('\0');
     return [{
       category: 'structural',
@@ -1024,11 +1053,27 @@ function doctorReport(
   return {
     ...report,
     findings: [...report.findings, ...doctorFindings(report, state, catalog)],
-    repairs: doctorRepairs(report),
+    repairs: doctorRepairs(report, state),
   };
 }
 
-function doctorRepairs(report: InventoryScanReport): DoctorRepair[] {
+function previousResourceIds(
+  state: Record<string, unknown>,
+  relationship: RuntimeRelationship,
+): Set<string> {
+  if (!isRecord(state.runtimeInventory) || !isRecord(state.runtimeInventory.slots))
+    return new Set();
+  const slot = state.runtimeInventory.slots[
+    runtimeSlotId(relationship.runtimeId, relationship.slot)
+  ];
+  if (!isRecord(slot) || !Array.isArray(slot.resourceIds)) return new Set();
+  return new Set(slot.resourceIds.filter((id): id is string => typeof id === 'string'));
+}
+
+function doctorRepairs(
+  report: InventoryScanReport,
+  state: Record<string, unknown>,
+): DoctorRepair[] {
   const conflicted = new Set(report.slots.flatMap(({ id, relationships }) =>
     relationships.length > 1 ? [id] : []));
   return report.relationships.flatMap((relationship) => {
@@ -1036,7 +1081,7 @@ function doctorRepairs(report: InventoryScanReport): DoctorRepair[] {
       relationship.inspectionError || relationship.readOnly || !relationship.target ||
       conflicted.has(runtimeSlotId(relationship.runtimeId, relationship.slot)))
       return [];
-    const to = replacementTarget(relationship, report);
+    const to = replacementTarget(relationship, report, previousResourceIds(state, relationship));
     const kind = to ? 'retarget-link' : 'remove-broken-link';
     return [{
       id: `${kind}:${relationship.path}`,
@@ -1050,10 +1095,11 @@ function doctorRepairs(report: InventoryScanReport): DoctorRepair[] {
   });
 }
 
-export function scanGlobalInventory(
+function globalInventory(
   home: Home,
-  runtimes: Runtime[] = loadRuntimes(home),
-  options: ScanOptions = {},
+  runtimes: Runtime[],
+  options: ScanOptions,
+  persist: boolean,
 ): InventoryScanReport {
   const stateFile = path.join(home.configDir, 'state.json');
   return scanInventory({
@@ -1066,8 +1112,16 @@ export function scanGlobalInventory(
       scope: 'global',
       writable: true,
     })),
-    options,
+    options: { ...options, persist },
   });
+}
+
+export function scanGlobalInventory(
+  home: Home,
+  runtimes: Runtime[] = loadRuntimes(home),
+  options: ScanOptions = {},
+): InventoryScanReport {
+  return globalInventory(home, runtimes, options, true);
 }
 
 function rootIdentity(root: string): string {
@@ -1103,18 +1157,7 @@ export function doctorGlobalInventory(
   runtimes: Runtime[] = loadRuntimes(home, { persist: false }),
 ): DoctorReport {
   const stateFile = path.join(home.configDir, 'state.json');
-  const report = scanInventory({
-    scope: 'global',
-    stateFile,
-    catalogStateFile: stateFile,
-    runtimes: runtimes.map((runtime) => ({
-      ...runtime,
-      id: `global:${runtime.key}`,
-      scope: 'global',
-      writable: true,
-    })),
-    options: { persist: false },
-  });
+  const report = globalInventory(home, runtimes, {}, false);
   const state = readStateFile(stateFile);
   return doctorReport(report, state, state);
 }

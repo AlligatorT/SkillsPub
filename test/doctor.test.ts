@@ -8,6 +8,7 @@ import {
   doctorGlobalInventory,
   doctorProjectInventory,
   loadRuntimes,
+  scanGlobalInventory,
   type Home,
   type Runtime,
 } from '../src/core.ts';
@@ -107,6 +108,30 @@ test('Doctor preflights every repair before changing any path', () => {
   assert.equal(fs.readFileSync(path.join(stale, 'SKILL.md'), 'utf8'), '# valuable local resource');
 });
 
+test('Doctor preflights write permissions before the first repair', () => {
+  const { home, runtime } = setup();
+  const first = path.join(runtime.discoveryRoot, 'a-first');
+  const second = path.join(runtime.discoveryRoot, 'b-second');
+  fs.symlinkSync('/missing/first', first);
+  fs.symlinkSync('/missing/second', second);
+  const repairs = doctorGlobalInventory(home, [runtime]).repairs;
+  const access = fs.accessSync;
+  let calls = 0;
+  fs.accessSync = ((entry: fs.PathLike, mode?: number) => {
+    calls += 1;
+    if (calls === 2) throw new Error('simulated unwritable directory');
+    return access(entry, mode);
+  }) as typeof fs.accessSync;
+
+  try {
+    assert.throws(() => applyDoctorRepairs(repairs), /unwritable/);
+  } finally {
+    fs.accessSync = access;
+  }
+  assert.equal(fs.lstatSync(first).isSymbolicLink(), true);
+  assert.equal(fs.lstatSync(second).isSymbolicLink(), true);
+});
+
 test('Doctor preserves completed work and reports the remaining repair after unexpected I/O failure', () => {
   const { home, runtime } = setup();
   const first = path.join(runtime.discoveryRoot, 'a-first');
@@ -174,12 +199,15 @@ test('Doctor previews and repairs a managed Link whose local source moved to par
     parkingRoot: path.join(home.configDir, 'source', '.skillspub-off', 'skills'),
     projectPath: '.source/skills',
   };
-  const parked = path.join(source.parkingRoot, 'shared');
-  fs.mkdirSync(parked, { recursive: true });
-  fs.writeFileSync(path.join(parked, 'SKILL.md'), '# shared');
   const oldTarget = path.join(source.discoveryRoot, 'shared');
+  fs.mkdirSync(oldTarget, { recursive: true });
+  fs.writeFileSync(path.join(oldTarget, 'SKILL.md'), '# shared');
   const link = path.join(consumer.discoveryRoot, 'shared');
   fs.symlinkSync(oldTarget, link);
+  scanGlobalInventory(home, [consumer, source]);
+  const parked = path.join(source.parkingRoot, 'shared');
+  fs.mkdirSync(path.dirname(parked), { recursive: true });
+  fs.renameSync(oldTarget, parked);
 
   const report = doctorGlobalInventory(home, [consumer, source]);
 
@@ -194,6 +222,28 @@ test('Doctor previews and repairs a managed Link whose local source moved to par
   }]);
   assert.deepEqual(applyDoctorRepairs(report.repairs).completed, report.repairs);
   assert.equal(fs.realpathSync(link), fs.realpathSync(parked));
+});
+
+test('Doctor does not retarget an untracked external Link', () => {
+  const { home, runtime: consumer } = setup();
+  consumer.key = 'consumer';
+  const source: Runtime = {
+    key: 'source',
+    kind: 'agent',
+    discoveryRoot: path.join(home.configDir, 'source', 'skills'),
+    parkingRoot: path.join(home.configDir, 'source', '.skillspub-off', 'skills'),
+    projectPath: '.source/skills',
+  };
+  const parked = path.join(source.parkingRoot, 'shared');
+  fs.mkdirSync(parked, { recursive: true });
+  fs.writeFileSync(path.join(parked, 'SKILL.md'), '# shared');
+  const link = path.join(consumer.discoveryRoot, 'shared');
+  fs.symlinkSync(path.join(source.discoveryRoot, 'shared'), link);
+
+  const [repair] = doctorGlobalInventory(home, [consumer, source]).repairs;
+
+  assert.equal(repair.kind, 'remove-broken-link');
+  assert.equal(repair.to, undefined);
 });
 
 test('Doctor reports both sides of a known npx lock/file mismatch', () => {
@@ -222,17 +272,23 @@ test('Project Doctor reports stale references, missing parking, and Orphaned Pre
   const { home, runtime } = setup();
   const project = path.join(home.configDir, 'project');
   const projectStateFile = path.join(project, '.skillspub', 'state.json');
+  const unlinked = path.join(home.configDir, 'unlinked-resource');
   fs.mkdirSync(path.dirname(projectStateFile), { recursive: true });
+  fs.mkdirSync(unlinked);
+  fs.writeFileSync(path.join(unlinked, 'SKILL.md'), '# valid but unlinked');
   fs.writeFileSync(path.join(home.configDir, 'state.json'), JSON.stringify({
-    bundles: { manual: ['/missing/bundle-resource'] },
-    tags: { '/missing/tag-resource': ['stale'] },
-    presets: { kept: { selectors: ['skill:/missing/preset-resource'] } },
+    bundles: { manual: ['/missing/bundle-resource', unlinked] },
+    tags: { '/missing/tag-resource': ['stale'], [unlinked]: ['kept'] },
+    presets: { kept: { selectors: ['skill:/missing/preset-resource', `skill:${unlinked}`] } },
   }));
   const runtimeId = `project:${fs.realpathSync(project)}:${runtime.key}`;
+  const parkedId = `${runtimeId}\0parked`;
+  const claimedId = `${runtimeId}\0claimed`;
   const projectState = JSON.stringify({
-    baseIntent: { [`${runtimeId}\0parked`]: 'off' },
+    baseIntent: { [parkedId]: 'off', [claimedId]: 'off' },
     presetActivations: ['deleted'],
-    lastClaims: { deleted: [`${runtimeId}\0parked`] },
+    lastClaims: { deleted: [claimedId] },
+    runtimeInventory: { slots: { [parkedId]: { resourceIds: ['/missing/parked'] } } },
   });
   fs.writeFileSync(projectStateFile, projectState);
 
@@ -241,6 +297,14 @@ test('Project Doctor reports stale references, missing parking, and Orphaned Pre
   assert.deepEqual(
     [...new Set(report.findings.map(({ code }) => code))].sort(),
     ['orphaned-preset-activation', 'parking-entry-missing', 'stale-reference'],
+  );
+  assert.deepEqual(
+    report.findings.filter(({ code }) => code === 'parking-entry-missing').map(({ slot }) => slot),
+    ['parked'],
+  );
+  assert.equal(
+    report.findings.some(({ code, resourceId }) => code === 'stale-reference' && resourceId === unlinked),
+    false,
   );
   assert.equal(fs.readFileSync(projectStateFile, 'utf8'), projectState);
 });
