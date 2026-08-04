@@ -422,54 +422,14 @@ interface ScanInventoryInput {
   projectPath?: string;
 }
 
-function scanInventory({
-  scope,
-  stateFile,
-  catalogStateFile,
-  runtimes,
-  options,
-  projectPath,
-}: ScanInventoryInput): InventoryScanReport {
-  const now = options.now ?? new Date().toISOString();
-  const relationships = runtimes.flatMap((runtime) => {
-    assertExternalParking(runtime);
-    return [
-      ...scanRoot(runtime, runtime.discoveryRoot, 'on'),
-      ...scanRoot(runtime, runtime.parkingRoot, 'off'),
-    ];
-  });
-  const grouped = new Map<string, InventoryResource>();
-  for (const relationship of relationships) {
-    if (!relationship.realPath) continue;
-    let resource = grouped.get(relationship.realPath);
-    if (!resource) {
-      resource = {
-        id: relationship.realPath,
-        name: relationship.name,
-        realPath: relationship.realPath,
-        hash: hashDirectory(relationship.realPath),
-        cliCoupled: isCliCoupled(relationship.realPath),
-        relationships: [],
-      };
-      grouped.set(resource.id, resource);
-    }
-    resource.relationships.push(relationship);
-  }
-  const resources = [...grouped.values()].sort((a, b) =>
-    a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-  const missing = resources.flatMap((resource) => runtimes
-    .filter((runtime) => !resource.relationships.some((relationship) =>
-      relationship.runtimeId === runtime.id && relationship.slot === normalizeSlotName(resource.name)))
-    .map((runtime) => ({
-      resourceId: resource.id,
-      runtimeId: runtime.id,
-      slot: normalizeSlotName(resource.name),
-    })));
+type RelationshipsBySlot = Map<string, RuntimeRelationship[]>;
 
-  const state = readStateForUpdate(stateFile);
-  const previous = state.runtimeInventory as RuntimeInventoryMetadata | undefined;
+function groupRuntimeSlots(relationships: RuntimeRelationship[]): {
+  bySlot: RelationshipsBySlot;
+  findings: ScanFinding[];
+} {
+  const bySlot: RelationshipsBySlot = new Map();
   const findings: ScanFinding[] = [];
-  const bySlot = new Map<string, RuntimeRelationship[]>();
   for (const relationship of relationships) {
     const key = runtimeSlotId(relationship.runtimeId, relationship.slot);
     const groupedRelationships = bySlot.get(key) ?? [];
@@ -483,9 +443,21 @@ function scanInventory({
       slot: relationship.slot,
     });
   }
+  return { bySlot, findings };
+}
 
+function scanSlotProvenance(
+  runtimes: ScannedRuntime[],
+  bySlot: RelationshipsBySlot,
+  previous: RuntimeInventoryMetadata | undefined,
+): {
+  provenanceBySlot: Map<string, SkillProvenance>;
+  invalidLockRuntimes: Set<string>;
+  findings: ScanFinding[];
+} {
   const provenanceBySlot = new Map<string, SkillProvenance>();
   const invalidLockRuntimes = new Set<string>();
+  const findings: ScanFinding[] = [];
   for (const runtime of runtimes) {
     const lock = readProvenance(runtime.lockFile);
     if (lock.error) {
@@ -516,7 +488,16 @@ function scanInventory({
       provenanceBySlot.set(key, provenance);
     }
   }
+  return { provenanceBySlot, invalidLockRuntimes, findings };
+}
 
+function findRuntimeSlotIssues(
+  bySlot: RelationshipsBySlot,
+  provenanceBySlot: Map<string, SkillProvenance>,
+  invalidLockRuntimes: Set<string>,
+  previous: RuntimeInventoryMetadata | undefined,
+): ScanFinding[] {
+  const findings: ScanFinding[] = [];
   for (const [key, occupants] of bySlot) {
     const oldSlot = previous?.slots?.[key];
     if (oldSlot && !invalidLockRuntimes.has(occupants[0].runtimeId) &&
@@ -544,13 +525,80 @@ function scanInventory({
       slot: occupants[0].slot,
     });
   }
+  return findings;
+}
 
-  const catalogState = catalogStateFile === stateFile
-    ? state
-    : readStateForUpdate(catalogStateFile);
-  const tags = (catalogState.tags && typeof catalogState.tags === 'object' && !Array.isArray(catalogState.tags))
-    ? catalogState.tags as Record<string, string[]>
-    : {};
+function scanRuntimeSlots(
+  relationships: RuntimeRelationship[],
+  runtimes: ScannedRuntime[],
+  previous: RuntimeInventoryMetadata | undefined,
+): { slots: InventorySlot[]; findings: ScanFinding[] } {
+  const grouped = groupRuntimeSlots(relationships);
+  const provenance = scanSlotProvenance(runtimes, grouped.bySlot, previous);
+  const slots: InventorySlot[] = [...grouped.bySlot].map(([id, occupants]) => ({
+    id,
+    runtimeId: occupants[0].runtimeId,
+    runtimeKey: occupants[0].runtimeKey,
+    name: occupants[0].slot,
+    relationships: occupants,
+    provenance: provenance.provenanceBySlot.get(id),
+  }));
+  return {
+    slots,
+    findings: [
+      ...grouped.findings,
+      ...provenance.findings,
+      ...findRuntimeSlotIssues(
+        grouped.bySlot,
+        provenance.provenanceBySlot,
+        provenance.invalidLockRuntimes,
+        previous,
+      ),
+    ],
+  };
+}
+
+function scanInventoryResources(
+  relationships: RuntimeRelationship[],
+  runtimes: ScannedRuntime[],
+): { resources: InventoryResource[]; missing: MissingRelationship[] } {
+  const grouped = new Map<string, InventoryResource>();
+  for (const relationship of relationships) {
+    if (!relationship.realPath) continue;
+    let resource = grouped.get(relationship.realPath);
+    if (!resource) {
+      resource = {
+        id: relationship.realPath,
+        name: relationship.name,
+        realPath: relationship.realPath,
+        hash: hashDirectory(relationship.realPath),
+        cliCoupled: isCliCoupled(relationship.realPath),
+        relationships: [],
+      };
+      grouped.set(resource.id, resource);
+    }
+    resource.relationships.push(relationship);
+  }
+  const resources = [...grouped.values()].sort((a, b) =>
+    a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+  const missing = resources.flatMap((resource) => runtimes
+    .filter((runtime) => !resource.relationships.some((relationship) =>
+      relationship.runtimeId === runtime.id && relationship.slot === normalizeSlotName(resource.name)))
+    .map((runtime) => ({
+      resourceId: resource.id,
+      runtimeId: runtime.id,
+      slot: normalizeSlotName(resource.name),
+    })));
+  return { resources, missing };
+}
+
+function findResourceIssues(
+  resources: InventoryResource[],
+  previous: RuntimeInventoryMetadata | undefined,
+  tags: Record<string, string[]>,
+): ScanFinding[] {
+  const findings: ScanFinding[] = [];
+  const currentResourceIds = new Set(resources.map(({ id }) => id));
   for (const resource of resources) {
     const old = previous?.resources?.[resource.id];
     if (!old) findings.push({
@@ -579,23 +627,23 @@ function scanInventory({
     });
   }
   for (const [resourceId, old] of Object.entries(previous?.resources ?? {})) {
-    if (!grouped.has(resourceId)) findings.push({
+    if (!currentResourceIds.has(resourceId)) findings.push({
       category: 'change',
       code: 'removed-resource',
       message: `resource removed: ${old.name} (${resourceId})`,
       resourceId,
     });
   }
+  return findings;
+}
 
-  const slots: InventorySlot[] = [...bySlot].map(([id, occupants]) => ({
-    id,
-    runtimeId: occupants[0].runtimeId,
-    runtimeKey: occupants[0].runtimeKey,
-    name: occupants[0].slot,
-    relationships: occupants,
-    provenance: provenanceBySlot.get(id),
-  }));
-  const metadata: RuntimeInventoryMetadata = {
+function buildInventoryMetadata(
+  resources: InventoryResource[],
+  slots: InventorySlot[],
+  previous: RuntimeInventoryMetadata | undefined,
+  now: string,
+): RuntimeInventoryMetadata {
+  return {
     version: 1,
     resources: Object.fromEntries(resources.map((resource) => [resource.id, {
       name: resource.name,
@@ -613,9 +661,14 @@ function scanInventory({
       },
     ])),
   };
-  const bundles = (catalogState.bundles && typeof catalogState.bundles === 'object' && !Array.isArray(catalogState.bundles))
-    ? catalogState.bundles as Record<string, string[]>
-    : {};
+}
+
+function buildRepoBundles(
+  value: unknown,
+  resources: InventoryResource[],
+  slots: InventorySlot[],
+): Record<string, string[]> {
+  const bundles = isRecord(value) ? value as Record<string, string[]> : {};
   const nextBundles = Object.fromEntries(
     Object.entries(bundles).map(([name, members]) => [name, [...members]]),
   ) as Record<string, string[]>;
@@ -634,6 +687,42 @@ function scanInventory({
     nextBundles[name] = [...new Set([...(nextBundles[name] ?? []), ...resourceIds])]
       .sort((a, b) => a.localeCompare(b));
   }
+  return nextBundles;
+}
+
+function scanInventory({
+  scope,
+  stateFile,
+  catalogStateFile,
+  runtimes,
+  options,
+  projectPath,
+}: ScanInventoryInput): InventoryScanReport {
+  const now = options.now ?? new Date().toISOString();
+  const relationships = runtimes.flatMap((runtime) => {
+    assertExternalParking(runtime);
+    return [
+      ...scanRoot(runtime, runtime.discoveryRoot, 'on'),
+      ...scanRoot(runtime, runtime.parkingRoot, 'off'),
+    ];
+  });
+  const { resources, missing } = scanInventoryResources(relationships, runtimes);
+  const state = readStateForUpdate(stateFile);
+  const previous = state.runtimeInventory as RuntimeInventoryMetadata | undefined;
+  const slotScan = scanRuntimeSlots(relationships, runtimes, previous);
+
+  const catalogState = catalogStateFile === stateFile
+    ? state
+    : readStateForUpdate(catalogStateFile);
+  const tags = isRecord(catalogState.tags)
+    ? catalogState.tags as Record<string, string[]>
+    : {};
+  const findings = [
+    ...slotScan.findings,
+    ...findResourceIssues(resources, previous, tags),
+  ];
+  const metadata = buildInventoryMetadata(resources, slotScan.slots, previous, now);
+  const nextBundles = buildRepoBundles(catalogState.bundles, resources, slotScan.slots);
   writeState(stateFile, scope === 'global'
     ? { ...state, bundles: nextBundles, tags, runtimeInventory: metadata }
     : { ...state, runtimeInventory: metadata });
@@ -643,7 +732,7 @@ function scanInventory({
     projectPath,
     runtimes,
     resources,
-    slots,
+    slots: slotScan.slots,
     relationships,
     missing,
     findings,
