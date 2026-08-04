@@ -256,7 +256,7 @@ test('skillDetail assembles live paths, agent state, metadata, and SKILL.md', ()
     path.join(home.configDir, 'state.json'),
     JSON.stringify({
       bundles: { cooks: ['grilling'], unrelated: ['other'] },
-      tags: { grilling: ['food'] },
+      tags: { [fs.realpathSync(shared)]: ['food'] },
       inventory: { grilling: { source: 'chef/skills' } },
     }),
   );
@@ -438,9 +438,11 @@ test('filterRows --agent/--tag; untagged lists skills with no tags', () => {
     { name: 'a', dir: dirA },
     { name: 'b', dir: dirB },
   ]);
-  const tags = { 'code-review': ['review'] };
+  const codeReview = rows.find((row) => row.name === 'code-review')!;
+  const tags = { [codeReview.id]: ['review'] };
 
   assert.deepEqual(filterRows(rows, { tag: 'review' }, tags).map((r) => r.name), ['code-review']);
+  assert.deepEqual(filterRows(rows, { tag: 'review' }, { 'code-review': ['review'] }), []);
   assert.deepEqual(filterRows(rows, { agent: 'a' }, tags).map((r) => r.name), ['grilling']);
   assert.deepEqual(untagged(rows, tags), ['grilling', 'only-b']);
 });

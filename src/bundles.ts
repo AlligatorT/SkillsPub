@@ -70,6 +70,15 @@ function readBundles(state: CatalogState): Record<string, string[]> {
   return value;
 }
 
+function readTags(state: CatalogState): Record<string, string[]> {
+  const value = state.tags ?? {};
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+    Object.values(value).some((tags) =>
+      !Array.isArray(tags) || tags.some((tag) => typeof tag !== 'string')))
+    throw new Error('invalid state tags');
+  return value as Record<string, string[]>;
+}
+
 function resources(state: CatalogState): Record<string, ResourceMetadata> {
   return state.runtimeInventory?.resources ?? {};
 }
@@ -173,6 +182,75 @@ export function removeBundleMembers(
   return current.length - next.length;
 }
 
+export interface TagSummary {
+  name: string;
+  resources: number;
+}
+
+export interface ResourceTags {
+  id: string;
+  name?: string;
+  tags: string[];
+  stale: boolean;
+}
+
+function assertTagNames(tags: string[]): void {
+  if (tags.length === 0 || tags.some((tag) => !tag))
+    throw new Error('at least one non-empty tag is required');
+}
+
+export function addResourceTags(home: Home, selector: string, names: string[]): number {
+  assertTagNames(names);
+  const state = readState(home);
+  const tags = readTags(state);
+  const id = resourceId(selector, state);
+  const current = tags[id] ?? [];
+  const next = [...new Set([...current, ...names])].sort((a, b) => a.localeCompare(b));
+  state.tags = { ...tags, [id]: next };
+  writeState(home, state);
+  return next.length - current.length;
+}
+
+export function removeResourceTags(
+  home: Home,
+  selector: string,
+  names?: string[],
+): number {
+  const state = readState(home);
+  const tags = readTags(state);
+  const id = resourceId(selector, state, Object.keys(tags));
+  const current = tags[id] ?? [];
+  if (names && names.some((tag) => !tag)) throw new Error('tags must be non-empty');
+  const removed = names?.length
+    ? new Set(names)
+    : new Set(current);
+  const next = current.filter((tag) => !removed.has(tag));
+  const { [id]: _, ...remaining } = tags;
+  state.tags = next.length > 0 ? { ...remaining, [id]: next } : remaining;
+  writeState(home, state);
+  return current.length - next.length;
+}
+
+export function listTags(home: Home): TagSummary[] {
+  const counts = new Map<string, number>();
+  for (const names of Object.values(readTags(readState(home))))
+    for (const name of names) counts.set(name, (counts.get(name) ?? 0) + 1);
+  return [...counts].map(([name, resources]) => ({ name, resources }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function tagsForResource(home: Home, selector: string): ResourceTags {
+  const state = readState(home);
+  const tags = readTags(state);
+  const id = resourceId(selector, state, Object.keys(tags));
+  return {
+    id,
+    name: resources(state)[id]?.name,
+    tags: tags[id] ?? [],
+    stale: resources(state)[id] === undefined,
+  };
+}
+
 export function expandSelector(
   home: Home,
   selector: string,
@@ -185,6 +263,13 @@ export function expandSelector(
     const members = readBundles(state)[name];
     if (!members) throw new Error(`unknown bundle: ${name}`);
     resourceIds = members;
+  } else if (selector.startsWith('tag:')) {
+    const name = selector.slice('tag:'.length);
+    if (!name) throw new Error(`invalid Tag selector: ${selector}`);
+    resourceIds = Object.entries(readTags(state))
+      .filter(([, tags]) => tags.includes(name))
+      .map(([id]) => id);
+    if (resourceIds.length === 0) throw new Error(`unknown Tag: ${name}`);
   } else {
     resourceIds = [resourceId(selector, state)];
   }
@@ -398,7 +483,8 @@ export function planActivation(
   const claims = readClaims(state);
   const { resourceIds, staleResourceIds } = expandSelector(home, selector, report);
   if (staleResourceIds.length > 0) {
-    throw new Error(`stale Bundle member${staleResourceIds.length === 1 ? '' : 's'}:\n${staleResourceIds
+    const kind = selector.startsWith('tag:') ? 'Tag' : 'Bundle';
+    throw new Error(`stale ${kind} member${staleResourceIds.length === 1 ? '' : 's'}:\n${staleResourceIds
       .map((id) => `  - skill:${id}`)
       .join('\n')}`);
   }
@@ -459,7 +545,7 @@ function moveRelationships(home: Home, plan: ActivationPlan): {
     if (relationship.form === 'local') {
       const moved = fs.realpathSync(destination);
       movedLocals.set(target.resourceId, moved);
-      preserveMovedBundleMember(home, target.resourceId, moved);
+      preserveMovedResourceReferences(home, target.resourceId, moved);
     } else {
       movedLinks.set(relationship.path, destination);
       const movedTarget = movedLocals.get(target.resourceId);
@@ -506,7 +592,7 @@ function retargetMovedLinks(
   }
 }
 
-function preserveMovedBundleMember(home: Home, previous: string, moved: string): void {
+function preserveMovedResourceReferences(home: Home, previous: string, moved: string): void {
   const state = readState(home);
   state.bundles = Object.fromEntries(
     Object.entries(readBundles(state)).map(([name, members]) => [
@@ -515,6 +601,15 @@ function preserveMovedBundleMember(home: Home, previous: string, moved: string):
         .sort((a, b) => a.localeCompare(b)),
     ]),
   );
+  const tags = readTags(state);
+  if (tags[previous]) {
+    const { [previous]: previousTags, ...remaining } = tags;
+    state.tags = {
+      ...remaining,
+      [moved]: [...new Set([...(remaining[moved] ?? []), ...previousTags])]
+        .sort((a, b) => a.localeCompare(b)),
+    };
+  }
   writeState(home, state);
 }
 

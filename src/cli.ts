@@ -22,13 +22,18 @@ import {
 } from './core.ts';
 import {
   addBundleMembers,
+  addResourceTags,
   applyActivationPlan,
   createBundle,
+  expandSelector,
   listBundles,
+  listTags,
   planActivation,
   remainingDrift,
   removeBundleMembers,
+  removeResourceTags,
   showBundle,
+  tagsForResource,
 } from './bundles.ts';
 
 const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the source of truth)
@@ -37,6 +42,7 @@ const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the sour
   skillspub on|off <selector> <target...> [--yes]  update Agent or Runtime relationships
   skillspub status <skill>             per-agent state of one skill
   skillspub bundle ls|show|create|add|rm ...
+  skillspub tag add|rm|ls ...          manage global resource Tags
   skillspub scan                       explicitly scan Global Runtime inventory
   skillspub doctor [--repair --yes]    diagnose; explicitly confirm safe repairs
   skillspub project <path> scan|doctor inspect the exact Project Runtime roots
@@ -106,6 +112,37 @@ function cmdLs(home: ReturnType<typeof defaultHome>, args: string[]): void {
     args,
     options: { agent: { type: 'string' }, tag: { type: 'string' } },
   });
+  if (values.tag && !values.agent) {
+    const report = scanGlobalInventory(home, undefined, { persist: false });
+    let selected: Set<string>;
+    try {
+      selected = new Set(expandSelector(home, `tag:${values.tag}`, report).resourceIds);
+    } catch (error) {
+      if ((error as Error).message === `unknown Tag: ${values.tag}`) {
+        console.log('no skills found');
+        return;
+      }
+      throw error;
+    }
+    const counts = new Map<string, number>();
+    for (const resource of report.resources)
+      counts.set(resource.name, (counts.get(resource.name) ?? 0) + 1);
+    const resources = report.resources.filter(({ id }) => selected.has(id));
+    if (resources.length === 0) {
+      console.log('no skills found');
+      return;
+    }
+    for (const resource of resources) {
+      const name = counts.get(resource.name) === 1
+        ? resource.name
+        : `${resource.name} (${resource.id})`;
+      const relationships = resource.relationships
+        .map(({ runtimeId, slot, activation }) => `${runtimeId}/${slot}:${activation}`)
+        .join(', ');
+      console.log(`${name}\tskill:${resource.id}\t${relationships}`);
+    }
+    return;
+  }
   const agents = loadAgents(home);
   if (values.agent && !agents.some((a) => a.name === values.agent))
     throw new Error(`unknown agent: ${values.agent}`);
@@ -142,7 +179,7 @@ function cmdOnOff(
     throw new Error(
       `usage: skillspub ${on ? 'on' : 'off'} <skill> <agent...>`,
     );
-  if (skill.startsWith('bundle:') || skill.startsWith('skill:')) {
+  if (skill.startsWith('bundle:') || skill.startsWith('tag:') || skill.startsWith('skill:')) {
     const confirmed = names.includes('--yes');
     const runtimes = names.filter((name) => name !== '--yes');
     const plan = planActivation(home, skill, runtimes, on ? 'on' : 'off');
@@ -236,6 +273,44 @@ function cmdRuntimes(home: ReturnType<typeof defaultHome>): void {
       runtime.discoveryRoot,
       runtime.parkingRoot,
     ].join('\t'));
+  }
+}
+
+function cmdTag(home: ReturnType<typeof defaultHome>, args: string[]): void {
+  const [action, resource, ...names] = args;
+  switch (action) {
+    case 'add': {
+      if (!resource || names.length === 0)
+        throw new Error('usage: skillspub tag add <resource> <tag...>');
+      const added = addResourceTags(home, resource, names);
+      console.log(`added ${added} tag${added === 1 ? '' : 's'} to ${resource}`);
+      break;
+    }
+    case 'rm': {
+      if (!resource) throw new Error('usage: skillspub tag rm <resource> [<tag...>]');
+      const removed = removeResourceTags(home, resource, names);
+      console.log(`removed ${removed} tag${removed === 1 ? '' : 's'} from ${resource}`);
+      break;
+    }
+    case 'ls': {
+      const { values } = parseArgs({
+        args: args.slice(1),
+        options: { skill: { type: 'string' } },
+      });
+      if (values.skill) {
+        const resourceTags = tagsForResource(home, values.skill);
+        console.log(`${resourceTags.name ?? resourceTags.id}\tskill:${resourceTags.id}${resourceTags.stale ? '\tstale' : ''}`);
+        if (resourceTags.tags.length === 0) console.log('  no tags');
+        else for (const tag of resourceTags.tags) console.log(`  ${tag}`);
+      } else {
+        const tags = listTags(home);
+        if (tags.length === 0) console.log('no tags found');
+        else for (const tag of tags) console.log(`${tag.name}\t${tag.resources}`);
+      }
+      break;
+    }
+    default:
+      throw new Error('usage: skillspub tag add|rm|ls ...');
   }
 }
 
@@ -400,6 +475,9 @@ async function main(
         break;
       case 'bundle':
         cmdBundle(home, rest);
+        break;
+      case 'tag':
+        cmdTag(home, rest);
         break;
       case 'scan':
         if (rest.length > 0) throw new Error('usage: skillspub scan');

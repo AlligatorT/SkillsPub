@@ -566,7 +566,7 @@ export function skillDetail(
         (unambiguousName && members.includes(instance.name)))
       .map(([bundle]) => bundle)
       .sort((a, b) => a.localeCompare(b)),
-    tags: state.tags[instance.name] ?? [],
+    tags: state.tags[instance.id] ?? [],
     content: contentPath ? fs.readFileSync(contentPath, 'utf8') : undefined,
     contentPath,
   };
@@ -580,7 +580,7 @@ export function filterRows(
   return rows.filter((r) => {
     if (filter.agent !== undefined && r.agents[filter.agent] === undefined)
       return false;
-    if (filter.tag !== undefined && !(tags[r.name] ?? []).includes(filter.tag))
+    if (filter.tag !== undefined && !(tags[r.id] ?? []).includes(filter.tag))
       return false;
     return true;
   });
@@ -588,7 +588,7 @@ export function filterRows(
 
 export function untagged(rows: Row[], tags: Record<string, string[]>): string[] {
   return rows
-    .filter((row) => (tags[row.name] ?? []).length === 0)
+    .filter((row) => (tags[row.id] ?? []).length === 0)
     .map((row) => row.displayName);
 }
 

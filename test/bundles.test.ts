@@ -5,12 +5,14 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   addBundleMembers,
+  addResourceTags,
   applyActivationPlan,
   createBundle,
   expandSelector,
   planActivation,
   remainingDrift,
   removeBundleMembers,
+  removeResourceTags,
 } from '../src/bundles.ts';
 import { scanGlobalInventory, type Runtime } from '../src/inventory.ts';
 
@@ -52,6 +54,36 @@ test('selector expansion reads current Bundle membership every time', () => {
 
   assert.doesNotThrow(() => removeBundleMembers(home, 'tools', ['skill:one']));
   assert.deepEqual(expandSelector(home, 'bundle:tools', report).resourceIds, [ids.two]);
+});
+
+test('Tag selectors expand current resource membership and retain stale references', () => {
+  const { home, runtime } = setup();
+  const report = scanGlobalInventory(home, [runtime]);
+  const ids = Object.fromEntries(report.resources.map(({ name, id }) => [name, id]));
+
+  let changed = 0;
+  assert.doesNotThrow(() => {
+    changed = addResourceTags(home, 'skill:one', ['backend']);
+  });
+  assert.equal(changed, 1);
+  assert.deepEqual(expandSelector(home, 'tag:backend', report).resourceIds, [ids.one]);
+  assert.doesNotThrow(() => {
+    changed = addResourceTags(home, 'skill:two', ['backend']);
+  });
+  assert.equal(changed, 1);
+  assert.deepEqual(
+    expandSelector(home, 'tag:backend', report).resourceIds.sort((a, b) => a.localeCompare(b)),
+    [ids.one, ids.two].sort((a, b) => a.localeCompare(b)),
+  );
+
+  fs.rmSync(ids.one, { recursive: true });
+  const rescanned = scanGlobalInventory(home, [runtime]);
+  assert.deepEqual(expandSelector(home, 'tag:backend', rescanned).staleResourceIds, [ids.one]);
+  assert.doesNotThrow(() => {
+    changed = removeResourceTags(home, `skill:${ids.one}`, ['backend']);
+  });
+  assert.equal(changed, 1);
+  assert.deepEqual(expandSelector(home, 'tag:backend', rescanned).resourceIds, [ids.two]);
 });
 
 test('OFF intent stays latent while an active Preset claim requires ON', () => {
