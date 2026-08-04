@@ -441,3 +441,45 @@ test('creating a missing Relationship requires explicit confirmation', () => {
   assert.equal(confirmed.status, 0, confirmed.stderr);
   assert.equal(fs.realpathSync(path.join(targetRoot, 'example')), fs.realpathSync(skill));
 });
+
+test('doctor is read-only by default and repairs only with explicit confirmation', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-doctor-'));
+  const discoveryRoot = path.join(configDir, 'shared', 'skills');
+  const parkingRoot = path.join(configDir, 'shared', '.skillspub-off', 'skills');
+  const broken = path.join(discoveryRoot, 'broken');
+  fs.mkdirSync(discoveryRoot, { recursive: true });
+  fs.symlinkSync('/missing/skill', broken);
+  fs.writeFileSync(path.join(configDir, 'runtimes.json'), JSON.stringify({
+    version: 1,
+    runtimes: [{
+      key: 'shared',
+      kind: 'shared',
+      discoveryRoot,
+      parkingRoot,
+      projectPath: '.agents/skills',
+    }],
+  }));
+  const stateFile = path.join(configDir, 'state.json');
+  fs.writeFileSync(stateFile, '{"bundles":{}}\n');
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+
+  const diagnosis = run(['doctor']);
+  assert.equal(diagnosis.status, 0, diagnosis.stderr);
+  assert.match(diagnosis.stdout, /broken link:/);
+  assert.match(diagnosis.stdout, /Safe repair plan:/);
+  assert.equal(fs.lstatSync(broken).isSymbolicLink(), true);
+  assert.equal(fs.readFileSync(stateFile, 'utf8'), '{"bundles":{}}\n');
+
+  const unconfirmed = run(['doctor', '--repair']);
+  assert.equal(unconfirmed.status, 1);
+  assert.match(unconfirmed.stderr, /rerun with --repair --yes/);
+  assert.equal(fs.lstatSync(broken).isSymbolicLink(), true);
+
+  const repaired = run(['doctor', '--repair', '--yes']);
+  assert.equal(repaired.status, 0, repaired.stderr);
+  assert.match(repaired.stdout, /Applied repairs: 1/);
+  assert.throws(() => fs.lstatSync(broken), /ENOENT/);
+});

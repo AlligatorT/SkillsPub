@@ -36,6 +36,7 @@ export interface RuntimeRelationship {
   target?: string;
   realPath?: string;
   resourceId?: string;
+  inspectionError?: string;
   readOnly: boolean;
 }
 
@@ -105,6 +106,27 @@ export interface InventoryScanReport {
   missing: MissingRelationship[];
   findings: ScanFinding[];
   stateFile: string;
+}
+
+export interface DoctorRepair {
+  id: string;
+  kind: 'remove-broken-link' | 'retarget-link';
+  path: string;
+  from: string;
+  to?: string;
+  targetResourceId?: string;
+  targetHash?: string;
+  runtimeId: string;
+  slot: string;
+}
+
+export interface DoctorReport extends InventoryScanReport {
+  repairs: DoctorRepair[];
+}
+
+export interface DoctorApplyResult {
+  completed: DoctorRepair[];
+  failed?: { repair: DoctorRepair; error: string };
 }
 
 export interface ScanOptions {
@@ -186,11 +208,15 @@ function writeJson(file: string, value: unknown): void {
   fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
 }
 
-export function loadRuntimes(home: Home): Runtime[] {
+export function loadRuntimes(
+  home: Home,
+  options: { persist?: boolean } = {},
+): Runtime[] {
   const file = path.join(home.configDir, 'runtimes.json');
   if (!fs.existsSync(file)) {
     const runtimes = legacyRuntimes(path.join(home.configDir, 'agents.conf')) ?? defaultRuntimes();
-    writeJson(file, { version: 1, runtimes } satisfies RuntimeRegistryFile);
+    if (options.persist !== false)
+      writeJson(file, { version: 1, runtimes } satisfies RuntimeRegistryFile);
     return runtimes;
   }
 
@@ -266,12 +292,16 @@ function scanRoot(
     const entryPath = path.join(root, entry.name);
     const form: ResourceForm = entry.isSymbolicLink() ? 'link' : 'local';
     let realPath: string | undefined;
+    let inspectionError: string | undefined;
     try {
       const stat = fs.statSync(entryPath);
       if (!stat.isDirectory() || !fs.existsSync(path.join(entryPath, 'SKILL.md'))) continue;
       realPath = fs.realpathSync(entryPath);
     } catch (error) {
       if (form !== 'link') throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR')
+        inspectionError = `${code ?? 'I/O'}: ${(error as Error).message}`;
     }
     relationships.push({
       runtimeId: runtime.id,
@@ -284,6 +314,7 @@ function scanRoot(
       target: form === 'link' ? targetOf(entryPath) : undefined,
       realPath,
       resourceId: realPath,
+      inspectionError,
       readOnly: !runtime.writable,
     });
   }
@@ -438,8 +469,10 @@ function groupRuntimeSlots(relationships: RuntimeRelationship[]): {
     bySlot.set(key, groupedRelationships);
     if (!relationship.realPath) findings.push({
       category: 'structural',
-      code: 'broken-link',
-      message: `broken link: ${relationship.path} -> ${relationship.target ?? '?'}`,
+      code: relationship.inspectionError ? 'unreadable-link' : 'broken-link',
+      message: relationship.inspectionError
+        ? `cannot inspect link: ${relationship.path}: ${relationship.inspectionError}`
+        : `broken link: ${relationship.path} -> ${relationship.target ?? '?'}`,
       runtimeId: relationship.runtimeId,
       slot: relationship.slot,
     });
@@ -723,9 +756,9 @@ function scanInventory({
     ...slotScan.findings,
     ...findResourceIssues(resources, previous, tags),
   ];
-  const metadata = buildInventoryMetadata(resources, slotScan.slots, previous, now);
-  const nextBundles = buildRepoBundles(catalogState.bundles, resources, slotScan.slots);
   if (options.persist !== false) {
+    const metadata = buildInventoryMetadata(resources, slotScan.slots, previous, now);
+    const nextBundles = buildRepoBundles(catalogState.bundles, resources, slotScan.slots);
     writeStateFile(stateFile, scope === 'global'
       ? { ...state, bundles: nextBundles, tags, runtimeInventory: metadata }
       : { ...state, runtimeInventory: metadata });
@@ -744,10 +777,402 @@ function scanInventory({
   };
 }
 
-export function scanGlobalInventory(
+function assertBrokenLink(repair: DoctorRepair): void {
+  let entry: fs.Stats;
+  try {
+    entry = fs.lstatSync(repair.path);
+  } catch (error) {
+    throw new Error(`repair path is missing: ${repair.path}: ${(error as Error).message}`);
+  }
+  if (!entry.isSymbolicLink())
+    throw new Error(`repair path is no longer a symlink: ${repair.path}`);
+  const target = fs.readlinkSync(repair.path);
+  if (target !== repair.from)
+    throw new Error(`repair target changed: ${repair.path}: ${target}`);
+  try {
+    fs.statSync(path.resolve(path.dirname(repair.path), target));
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return;
+    throw new Error(`cannot verify repair target: ${repair.path}: ${(error as Error).message}`);
+  }
+  throw new Error(`repair target is no longer broken: ${repair.path}`);
+}
+
+function repairTemporaryPath(repair: DoctorRepair, index: number): string {
+  return `${repair.path}.skillspub-repair-${process.pid}-${index}`;
+}
+
+function assertRetargetTarget(repair: DoctorRepair): void {
+  if (repair.kind === 'remove-broken-link') return;
+  if (!repair.to || !repair.targetResourceId || !repair.targetHash)
+    throw new Error(`retarget repair has no verified target: ${repair.path}`);
+  const target = path.resolve(path.dirname(repair.path), repair.to);
+  const stat = fs.statSync(target);
+  if (!stat.isDirectory() || !fs.existsSync(path.join(target, 'SKILL.md')))
+    throw new Error(`retarget repair target is not a Skill resource: ${target}`);
+  if (fs.realpathSync(target) !== repair.targetResourceId)
+    throw new Error(`retarget repair target identity changed: ${target}`);
+  if (hashDirectory(target) !== repair.targetHash)
+    throw new Error(`retarget repair target content changed: ${target}`);
+}
+
+function preflightDoctorRepair(repair: DoctorRepair, index: number): void {
+  assertBrokenLink(repair);
+  fs.accessSync(path.dirname(repair.path), fs.constants.W_OK | fs.constants.X_OK);
+  if (repair.kind === 'remove-broken-link') return;
+  assertRetargetTarget(repair);
+  const temporary = repairTemporaryPath(repair, index);
+  try {
+    fs.lstatSync(temporary);
+    throw new Error(`temporary repair path already exists: ${temporary}`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
+
+function applyDoctorRepair(repair: DoctorRepair, index: number): void {
+  assertBrokenLink(repair);
+  if (repair.kind === 'remove-broken-link') {
+    fs.unlinkSync(repair.path);
+    return;
+  }
+  assertRetargetTarget(repair);
+  if (!repair.to) throw new Error(`retarget repair has no target: ${repair.path}`);
+  const temporary = repairTemporaryPath(repair, index);
+  fs.symlinkSync(repair.to, temporary);
+  try {
+    fs.renameSync(temporary, repair.path);
+  } catch (error) {
+    try {
+      fs.unlinkSync(temporary);
+    } catch (cleanupError) {
+      throw new Error(
+        `${(error as Error).message}; temporary link remains at ${temporary}: ` +
+        (cleanupError as Error).message,
+      );
+    }
+    throw error;
+  }
+}
+
+export function applyDoctorRepairs(repairs: DoctorRepair[]): DoctorApplyResult {
+  const paths = new Set<string>();
+  for (const [index, repair] of repairs.entries()) {
+    if (paths.has(repair.path)) throw new Error(`duplicate repair path: ${repair.path}`);
+    paths.add(repair.path);
+    preflightDoctorRepair(repair, index);
+  }
+
+  const completed: DoctorRepair[] = [];
+  for (const [index, repair] of repairs.entries()) {
+    try {
+      applyDoctorRepair(repair, index);
+      completed.push(repair);
+    } catch (error) {
+      return {
+        completed,
+        failed: { repair, error: (error as Error).message },
+      };
+    }
+  }
+  return { completed };
+}
+
+interface RetargetEvidence {
+  occupants: Map<string, string>;
+  currentHashes: Map<string, string>;
+  priorResourceIds: Set<string>;
+  priorResources: Record<string, unknown>;
+}
+
+function matchingCounterpart(
+  target: string,
+  root: string,
+  counterpart: string,
+  evidence: RetargetEvidence,
+): string | undefined {
+  const relative = path.relative(path.resolve(root), target);
+  if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
+    return undefined;
+  const candidate = path.resolve(counterpart, relative);
+  const candidateResourceId = evidence.occupants.get(candidate);
+  const priorResourceId = path.resolve(rootIdentity(root), relative);
+  const priorResource = evidence.priorResources[priorResourceId];
+  if (!candidateResourceId || !evidence.priorResourceIds.has(priorResourceId) ||
+    !isRecord(priorResource) || typeof priorResource.hash !== 'string' ||
+    evidence.currentHashes.get(candidateResourceId) !== priorResource.hash)
+    return undefined;
+  return candidate;
+}
+
+function replacementTarget(
+  relationship: RuntimeRelationship,
+  report: InventoryScanReport,
+  state: Record<string, unknown>,
+): string | undefined {
+  const rawTarget = relationship.target;
+  if (!rawTarget) return undefined;
+  const target = path.resolve(path.dirname(relationship.path), rawTarget);
+  const evidence: RetargetEvidence = {
+    occupants: new Map(report.relationships.flatMap(({ path: entryPath, realPath }) =>
+      realPath ? [[path.resolve(entryPath), realPath] as const] : [])),
+    currentHashes: new Map(report.resources.map(({ id, hash }) => [id, hash])),
+    priorResourceIds: previousResourceIds(state, relationship),
+    priorResources: isRecord(state.runtimeInventory) && isRecord(state.runtimeInventory.resources)
+      ? state.runtimeInventory.resources
+      : {},
+  };
+  const candidates = new Set<string>();
+  for (const runtime of report.runtimes) {
+    for (const [root, counterpart] of [
+      [runtime.discoveryRoot, runtime.parkingRoot],
+      [runtime.parkingRoot, runtime.discoveryRoot],
+    ]) {
+      const candidate = matchingCounterpart(target, root, counterpart, evidence);
+      if (candidate) candidates.add(candidate);
+    }
+  }
+  if (candidates.size !== 1) return undefined;
+  const candidate = [...candidates][0];
+  return path.isAbsolute(rawTarget)
+    ? candidate
+    : path.relative(path.dirname(relationship.path), candidate);
+}
+
+function resourceExists(resources: Set<string>, resourceId: string): boolean {
+  if (resources.has(resourceId)) return true;
+  try {
+    return fs.statSync(resourceId).isDirectory() &&
+      fs.statSync(path.join(resourceId, 'SKILL.md')).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function staleBundleReferences(
+  value: unknown,
+  resources: Set<string>,
+): Array<[string, string]> {
+  if (!isRecord(value)) return [];
+  const stale: Array<[string, string]> = [];
+  for (const [bundle, members] of Object.entries(value)) {
+    if (!Array.isArray(members)) continue;
+    for (const member of members)
+      if (typeof member === 'string' && !resourceExists(resources, member))
+        stale.push([`Bundle ${bundle}:${member}`, member]);
+  }
+  return stale;
+}
+
+function staleTagReferences(
+  value: unknown,
+  resources: Set<string>,
+): Array<[string, string]> {
+  if (!isRecord(value)) return [];
+  return Object.keys(value).flatMap((resourceId) =>
+    resourceExists(resources, resourceId) ? [] : [[`Tag:${resourceId}`, resourceId]]);
+}
+
+function stalePresetReferences(
+  value: unknown,
+  resources: Set<string>,
+): Array<[string, string]> {
+  if (!isRecord(value)) return [];
+  const stale: Array<[string, string]> = [];
+  for (const preset of Object.values(value)) {
+    if (!isRecord(preset) || !Array.isArray(preset.selectors)) continue;
+    for (const selector of preset.selectors) {
+      if (typeof selector !== 'string' || !selector.startsWith('skill:')) continue;
+      const resourceId = selector.slice('skill:'.length);
+      if (!resourceExists(resources, resourceId))
+        stale.push([`Preset:${selector}`, resourceId]);
+    }
+  }
+  return stale;
+}
+
+function staleReferenceFindings(
+  report: InventoryScanReport,
+  catalog: Record<string, unknown>,
+): ScanFinding[] {
+  const resources = new Set(report.resources.map(({ id }) => id));
+  const stale = new Map([
+    ...staleBundleReferences(catalog.bundles, resources),
+    ...staleTagReferences(catalog.tags, resources),
+    ...stalePresetReferences(catalog.presets, resources),
+  ]);
+  return [...stale].map(([reference, resourceId]) => ({
+    category: 'structural',
+    code: 'stale-reference',
+    message: `stale reference preserved: ${reference}`,
+    resourceId,
+  }));
+}
+
+function activePresetNames(state: Record<string, unknown>): string[] {
+  const value = state.presetActivations;
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === 'string');
+  return isRecord(value) ? Object.keys(value) : [];
+}
+
+function orphanedPresetFindings(
+  report: InventoryScanReport,
+  state: Record<string, unknown>,
+  catalog: Record<string, unknown>,
+): ScanFinding[] {
+  if (report.scope !== 'project') return [];
+  const definitions = new Set(isRecord(catalog.presets) ? Object.keys(catalog.presets) : []);
+  return activePresetNames(state).flatMap((preset) => definitions.has(preset) ? [] : [{
+    category: 'structural',
+    code: 'orphaned-preset-activation',
+    message: `Orphaned Preset Activation: ${preset}; lastClaims frozen`,
+  }]);
+}
+
+function baseIntents(state: Record<string, unknown>): Map<string, Activation> {
+  const intents = new Map<string, Activation>();
+  if (!isRecord(state.baseIntent)) return intents;
+  for (const [key, value] of Object.entries(state.baseIntent))
+    if (value === 'on' || value === 'off') intents.set(key, value);
+  return intents;
+}
+
+function collectClaimedSlots(value: unknown, slots: Set<string>): void {
+  let lists: unknown[][] = [];
+  if (Array.isArray(value)) lists = [value];
+  else if (isRecord(value)) lists = Object.values(value).filter(Array.isArray);
+  for (const list of lists)
+    for (const item of list)
+      if (typeof item === 'string' && item.includes('\0')) slots.add(item);
+}
+
+function parkingFindings(
+  report: InventoryScanReport,
+  state: Record<string, unknown>,
+): ScanFinding[] {
+  const currentSlots = new Set(report.slots.map(({ id }) => id));
+  const previousSlots = isRecord(state.runtimeInventory) && isRecord(state.runtimeInventory.slots)
+    ? state.runtimeInventory.slots
+    : {};
+  const claimedSlots = new Set<string>();
+  collectClaimedSlots(state.claims, claimedSlots);
+  collectClaimedSlots(state.lastClaims, claimedSlots);
+  return [...baseIntents(state)].flatMap(([id, intent]) => {
+    if (intent !== 'off' || currentSlots.has(id) || claimedSlots.has(id) ||
+      !isRecord(previousSlots[id])) return [];
+    const separator = id.indexOf('\0');
+    return [{
+      category: 'structural',
+      code: 'parking-entry-missing',
+      message: `parking entry missing: ${displayRuntimeSlot(id)}`,
+      runtimeId: separator < 0 ? undefined : id.slice(0, separator),
+      slot: separator < 0 ? id : id.slice(separator + 1),
+    }];
+  });
+}
+
+function lockMismatchFindings(
+  report: InventoryScanReport,
+  state: Record<string, unknown>,
+): ScanFinding[] {
+  const previous = isRecord(state.runtimeInventory) && isRecord(state.runtimeInventory.slots)
+    ? state.runtimeInventory.slots
+    : {};
+  return report.slots.flatMap((slot) => {
+    const old = previous[slot.id];
+    return isRecord(old) && isRecord(old.provenance) && !slot.provenance ? [{
+      category: 'structural',
+      code: 'lock-file-mismatch',
+      message: `npx-managed Runtime Slot has a file but no lock entry: ${slot.runtimeKey}/${slot.name}`,
+      runtimeId: slot.runtimeId,
+      slot: slot.name,
+    }] : [];
+  });
+}
+
+function doctorFindings(
+  report: InventoryScanReport,
+  state: Record<string, unknown>,
+  catalog: Record<string, unknown>,
+): ScanFinding[] {
+  return [
+    ...staleReferenceFindings(report, catalog),
+    ...orphanedPresetFindings(report, state, catalog),
+    ...parkingFindings(report, state),
+    ...lockMismatchFindings(report, state),
+  ];
+}
+
+function doctorReport(
+  report: InventoryScanReport,
+  state: Record<string, unknown>,
+  catalog: Record<string, unknown>,
+): DoctorReport {
+  return {
+    ...report,
+    findings: [...report.findings, ...doctorFindings(report, state, catalog)],
+    repairs: doctorRepairs(report, state),
+  };
+}
+
+function previousResourceIds(
+  state: Record<string, unknown>,
+  relationship: RuntimeRelationship,
+): Set<string> {
+  if (!isRecord(state.runtimeInventory) || !isRecord(state.runtimeInventory.slots))
+    return new Set();
+  const slot = state.runtimeInventory.slots[
+    runtimeSlotId(relationship.runtimeId, relationship.slot)
+  ];
+  if (!isRecord(slot) || !Array.isArray(slot.resourceIds)) return new Set();
+  return new Set(slot.resourceIds.filter((id): id is string => typeof id === 'string'));
+}
+
+function retargetDetails(
+  relationship: RuntimeRelationship,
+  report: InventoryScanReport,
+  state: Record<string, unknown>,
+): Pick<DoctorRepair, 'to' | 'targetResourceId' | 'targetHash'> | undefined {
+  const to = replacementTarget(relationship, report, state);
+  if (!to) return undefined;
+  const targetPath = path.resolve(path.dirname(relationship.path), to);
+  const targetResourceId = report.relationships
+    .find(({ path: entryPath }) => path.resolve(entryPath) === targetPath)?.realPath;
+  if (!targetResourceId) return undefined;
+  const targetHash = report.resources.find(({ id }) => id === targetResourceId)?.hash;
+  return targetHash ? { to, targetResourceId, targetHash } : undefined;
+}
+
+function doctorRepairs(
+  report: InventoryScanReport,
+  state: Record<string, unknown>,
+): DoctorRepair[] {
+  const conflicted = new Set(report.slots.flatMap(({ id, relationships }) =>
+    relationships.length > 1 ? [id] : []));
+  return report.relationships.flatMap((relationship) => {
+    const conflict = conflicted.has(runtimeSlotId(relationship.runtimeId, relationship.slot));
+    if (relationship.form !== 'link' || relationship.realPath ||
+      relationship.inspectionError || relationship.readOnly || !relationship.target || conflict)
+      return [];
+    const retarget = retargetDetails(relationship, report, state);
+    const kind = retarget ? 'retarget-link' : 'remove-broken-link';
+    return [{
+      id: `${kind}:${relationship.path}`,
+      kind,
+      path: relationship.path,
+      from: relationship.target,
+      ...retarget,
+      runtimeId: relationship.runtimeId,
+      slot: relationship.slot,
+    }];
+  });
+}
+
+function globalInventory(
   home: Home,
-  runtimes: Runtime[] = loadRuntimes(home),
-  options: ScanOptions = {},
+  runtimes: Runtime[],
+  options: ScanOptions,
 ): InventoryScanReport {
   const stateFile = path.join(home.configDir, 'state.json');
   return scanInventory({
@@ -762,6 +1187,14 @@ export function scanGlobalInventory(
     })),
     options,
   });
+}
+
+export function scanGlobalInventory(
+  home: Home,
+  runtimes: Runtime[] = loadRuntimes(home),
+  options: ScanOptions = {},
+): InventoryScanReport {
+  return globalInventory(home, runtimes, options);
 }
 
 function rootIdentity(root: string): string {
@@ -792,12 +1225,27 @@ function projectRuntime(
   };
 }
 
-export function scanProjectInventory(
+export function doctorGlobalInventory(
   home: Home,
-  selectedPath: string,
-  runtimes: Runtime[] = loadRuntimes(home),
-  options: ScanOptions = {},
-): InventoryScanReport {
+  runtimes: Runtime[] = loadRuntimes(home, { persist: false }),
+): DoctorReport {
+  const stateFile = path.join(home.configDir, 'state.json');
+  const report = globalInventory(home, runtimes, { persist: false });
+  const state = readStateFile(stateFile);
+  return doctorReport(report, state, state);
+}
+
+function projectInventory({
+  home,
+  selectedPath,
+  runtimes,
+  options,
+}: {
+  home: Home;
+  selectedPath: string;
+  runtimes: Runtime[];
+  options: ScanOptions;
+}): InventoryScanReport {
   const projectPath = fs.realpathSync(selectedPath);
   if (!fs.statSync(projectPath).isDirectory())
     throw new Error(`Project path is not a directory: ${selectedPath}`);
@@ -833,4 +1281,31 @@ export function scanProjectInventory(
     options,
     projectPath,
   });
+}
+
+export function scanProjectInventory(
+  home: Home,
+  selectedPath: string,
+  runtimes: Runtime[] = loadRuntimes(home),
+  options: ScanOptions = {},
+): InventoryScanReport {
+  return projectInventory({ home, selectedPath, runtimes, options });
+}
+
+export function doctorProjectInventory(
+  home: Home,
+  selectedPath: string,
+  runtimes: Runtime[] = loadRuntimes(home, { persist: false }),
+): DoctorReport {
+  const report = projectInventory({
+    home,
+    selectedPath,
+    runtimes,
+    options: { persist: false },
+  });
+  return doctorReport(
+    report,
+    readStateFile(report.stateFile),
+    readStateFile(path.join(home.configDir, 'state.json')),
+  );
 }

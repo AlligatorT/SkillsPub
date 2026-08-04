@@ -16,12 +16,13 @@ export function migrateLegacyConfig(configDir: string, legacyDir: string): void 
   }
 }
 
-export function defaultHome(): Home {
+export function defaultHome(options: { migrate?: boolean } = {}): Home {
   const configDir =
     process.env.SKILLSPUB_CONFIG_DIR ??
     path.join(os.homedir(), '.config', 'skillspub');
   // Migration-only: legacy data is copied into canonical config, never used directly.
-  if (process.env.SKM_CONFIG_DIR || !process.env.SKILLSPUB_CONFIG_DIR)
+  if (options.migrate !== false &&
+    (process.env.SKM_CONFIG_DIR || !process.env.SKILLSPUB_CONFIG_DIR))
     migrateLegacyConfig(
       configDir,
       process.env.SKM_CONFIG_DIR ?? path.join(os.homedir(), '.config', 'skm'),
@@ -596,6 +597,12 @@ export {
   normalizeSlotName,
   scanGlobalInventory,
   scanProjectInventory,
+  applyDoctorRepairs,
+  doctorGlobalInventory,
+  doctorProjectInventory,
+  type DoctorApplyResult,
+  type DoctorRepair,
+  type DoctorReport,
   type InventoryScanReport,
   type Runtime,
   type RuntimeRelationship,
