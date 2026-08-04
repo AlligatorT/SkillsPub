@@ -83,11 +83,12 @@ Project view 显示完整继承链。只有当前精确目录可写；父级和 
 skillspub                         # TTY 中打开 TUI
 skillspub tui                     # 显式打开同一 TUI
 skillspub scan                    # 显式扫描 Global Runtime inventory
+skillspub doctor [--repair --yes] # 只读诊断；确认后执行安全修复计划
 skillspub ls [--runtime R] [--tag T]
 skillspub on|off <selector> <runtime...>
 skillspub status <selector>
 skillspub runtimes
-skillspub project <path> <command...> # 包括显式 Project scan
+skillspub project <path> <command...> # 包括显式 Project scan/doctor
 ```
 
 裸命令只在交互式 TTY 中启动 Ink。非 TTY 环境输出 CLI usage。`tui` 不接受额外参数。

@@ -7,12 +7,16 @@ import {
   loadAgents,
   loadRuntimes,
   buildInventory,
+  applyDoctorRepairs,
+  doctorGlobalInventory,
+  doctorProjectInventory,
   scanGlobalInventory,
   scanProjectInventory,
   setSkill,
   loadState,
   filterRows,
   untagged,
+  type DoctorReport,
   type InventoryScanReport,
   type Row,
 } from './core.ts';
@@ -34,7 +38,8 @@ const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the sour
   skillspub status <skill>             per-agent state of one skill
   skillspub bundle ls|show|create|add|rm ...
   skillspub scan                       explicitly scan Global Runtime inventory
-  skillspub project <path> scan        scan exact Project + inherited Runtime roots
+  skillspub doctor [--repair --yes]    diagnose; explicitly confirm safe repairs
+  skillspub project <path> scan|doctor inspect the exact Project Runtime roots
   skillspub runtimes                   Runtime registry (~/.config/skillspub/runtimes.json)
   skillspub agents                     legacy Agent registry view
   skillspub tui                        interactive full-screen skill browser
@@ -281,6 +286,56 @@ function cmdBundle(home: ReturnType<typeof defaultHome>, args: string[]): void {
   }
 }
 
+function printDoctor(report: DoctorReport): void {
+  console.log(report.scope === 'project'
+    ? `Project Doctor: ${report.projectPath}`
+    : 'Global Doctor');
+  console.log('Structural anomalies:');
+  const findings = report.findings.filter(({ category }) => category === 'structural');
+  if (findings.length === 0) console.log('  none');
+  else for (const finding of findings) console.log(`  - ${finding.message}`);
+  console.log('Safe repair plan:');
+  if (report.repairs.length === 0) console.log('  none');
+  for (const repair of report.repairs) {
+    const action = repair.kind === 'retarget-link' ? 'retarget Link' : 'remove broken link';
+    console.log(`  - ${action}: ${repair.path}: ${repair.from}${repair.to ? ` -> ${repair.to}` : ''}`);
+  }
+}
+
+function cmdDoctor(
+  home: ReturnType<typeof defaultHome>,
+  args: string[],
+  projectPath?: string,
+): void {
+  const { values } = parseArgs({
+    args,
+    options: {
+      repair: { type: 'boolean' },
+      yes: { type: 'boolean' },
+    },
+    strict: true,
+  });
+  if (values.yes && !values.repair)
+    throw new Error('usage: skillspub doctor [--repair --yes]');
+  const diagnose = (): DoctorReport => projectPath
+    ? doctorProjectInventory(home, projectPath)
+    : doctorGlobalInventory(home);
+  const report = diagnose();
+  printDoctor(report);
+  if (!values.repair || report.repairs.length === 0) return;
+  if (!values.yes)
+    throw new Error('repairs require confirmation; rerun with --repair --yes');
+
+  const result = applyDoctorRepairs(report.repairs);
+  console.log(`Applied repairs: ${result.completed.length}`);
+  if (result.failed) {
+    console.error(`Repair failed: ${result.failed.repair.path}: ${result.failed.error}`);
+    printDoctor(diagnose());
+    throw new Error('repair stopped; remaining anomalies are shown above');
+  }
+  printDoctor(diagnose());
+}
+
 function printScan(report: InventoryScanReport): void {
   console.log(report.scope === 'project'
     ? `Project scan: ${report.projectPath}`
@@ -322,8 +377,9 @@ async function main(
   stdinIsTty = Boolean(process.stdin.isTTY),
   stdoutIsTty = Boolean(process.stdout.isTTY),
 ): Promise<void> {
-  const home = defaultHome();
   const [cmd, ...rest] = args;
+  const readOnly = cmd === 'doctor' || (cmd === 'project' && rest[1] === 'doctor');
+  const home = defaultHome({ migrate: !readOnly });
   try {
     if (shouldRunTui(cmd, stdinIsTty, stdoutIsTty)) {
       if (cmd === 'tui' && rest.length > 0)
@@ -349,11 +405,16 @@ async function main(
         if (rest.length > 0) throw new Error('usage: skillspub scan');
         printScan(scanGlobalInventory(home));
         break;
+      case 'doctor':
+        cmdDoctor(home, rest);
+        break;
       case 'project': {
         const [projectPath, projectCommand, ...projectArgs] = rest;
-        if (!projectPath || projectCommand !== 'scan' || projectArgs.length > 0)
-          throw new Error('usage: skillspub project <path> scan');
-        printScan(scanProjectInventory(home, projectPath));
+        if (!projectPath) throw new Error('usage: skillspub project <path> scan|doctor');
+        if (projectCommand === 'scan' && projectArgs.length === 0)
+          printScan(scanProjectInventory(home, projectPath));
+        else if (projectCommand === 'doctor') cmdDoctor(home, projectArgs, projectPath);
+        else throw new Error('usage: skillspub project <path> scan|doctor');
         break;
       }
       case 'runtimes':

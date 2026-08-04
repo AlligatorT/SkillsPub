@@ -36,6 +36,7 @@ export interface RuntimeRelationship {
   target?: string;
   realPath?: string;
   resourceId?: string;
+  inspectionError?: string;
   readOnly: boolean;
 }
 
@@ -105,6 +106,25 @@ export interface InventoryScanReport {
   missing: MissingRelationship[];
   findings: ScanFinding[];
   stateFile: string;
+}
+
+export interface DoctorRepair {
+  id: string;
+  kind: 'remove-broken-link' | 'retarget-link';
+  path: string;
+  from: string;
+  to?: string;
+  runtimeId: string;
+  slot: string;
+}
+
+export interface DoctorReport extends InventoryScanReport {
+  repairs: DoctorRepair[];
+}
+
+export interface DoctorApplyResult {
+  completed: DoctorRepair[];
+  failed?: { repair: DoctorRepair; error: string };
 }
 
 export interface ScanOptions {
@@ -186,11 +206,15 @@ function writeJson(file: string, value: unknown): void {
   fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
 }
 
-export function loadRuntimes(home: Home): Runtime[] {
+export function loadRuntimes(
+  home: Home,
+  options: { persist?: boolean } = {},
+): Runtime[] {
   const file = path.join(home.configDir, 'runtimes.json');
   if (!fs.existsSync(file)) {
     const runtimes = legacyRuntimes(path.join(home.configDir, 'agents.conf')) ?? defaultRuntimes();
-    writeJson(file, { version: 1, runtimes } satisfies RuntimeRegistryFile);
+    if (options.persist !== false)
+      writeJson(file, { version: 1, runtimes } satisfies RuntimeRegistryFile);
     return runtimes;
   }
 
@@ -266,12 +290,16 @@ function scanRoot(
     const entryPath = path.join(root, entry.name);
     const form: ResourceForm = entry.isSymbolicLink() ? 'link' : 'local';
     let realPath: string | undefined;
+    let inspectionError: string | undefined;
     try {
       const stat = fs.statSync(entryPath);
       if (!stat.isDirectory() || !fs.existsSync(path.join(entryPath, 'SKILL.md'))) continue;
       realPath = fs.realpathSync(entryPath);
     } catch (error) {
       if (form !== 'link') throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR')
+        inspectionError = `${code ?? 'I/O'}: ${(error as Error).message}`;
     }
     relationships.push({
       runtimeId: runtime.id,
@@ -284,6 +312,7 @@ function scanRoot(
       target: form === 'link' ? targetOf(entryPath) : undefined,
       realPath,
       resourceId: realPath,
+      inspectionError,
       readOnly: !runtime.writable,
     });
   }
@@ -438,8 +467,10 @@ function groupRuntimeSlots(relationships: RuntimeRelationship[]): {
     bySlot.set(key, groupedRelationships);
     if (!relationship.realPath) findings.push({
       category: 'structural',
-      code: 'broken-link',
-      message: `broken link: ${relationship.path} -> ${relationship.target ?? '?'}`,
+      code: relationship.inspectionError ? 'unreadable-link' : 'broken-link',
+      message: relationship.inspectionError
+        ? `cannot inspect link: ${relationship.path}: ${relationship.inspectionError}`
+        : `broken link: ${relationship.path} -> ${relationship.target ?? '?'}`,
       runtimeId: relationship.runtimeId,
       slot: relationship.slot,
     });
@@ -723,9 +754,9 @@ function scanInventory({
     ...slotScan.findings,
     ...findResourceIssues(resources, previous, tags),
   ];
-  const metadata = buildInventoryMetadata(resources, slotScan.slots, previous, now);
-  const nextBundles = buildRepoBundles(catalogState.bundles, resources, slotScan.slots);
   if (options.persist !== false) {
+    const metadata = buildInventoryMetadata(resources, slotScan.slots, previous, now);
+    const nextBundles = buildRepoBundles(catalogState.bundles, resources, slotScan.slots);
     writeStateFile(stateFile, scope === 'global'
       ? { ...state, bundles: nextBundles, tags, runtimeInventory: metadata }
       : { ...state, runtimeInventory: metadata });
@@ -742,6 +773,281 @@ function scanInventory({
     findings,
     stateFile,
   };
+}
+
+function assertBrokenLink(repair: DoctorRepair): void {
+  let entry: fs.Stats;
+  try {
+    entry = fs.lstatSync(repair.path);
+  } catch (error) {
+    throw new Error(`repair path is missing: ${repair.path}: ${(error as Error).message}`);
+  }
+  if (!entry.isSymbolicLink())
+    throw new Error(`repair path is no longer a symlink: ${repair.path}`);
+  const target = fs.readlinkSync(repair.path);
+  if (target !== repair.from)
+    throw new Error(`repair target changed: ${repair.path}: ${target}`);
+  try {
+    fs.statSync(path.resolve(path.dirname(repair.path), target));
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return;
+    throw new Error(`cannot verify repair target: ${repair.path}: ${(error as Error).message}`);
+  }
+  throw new Error(`repair target is no longer broken: ${repair.path}`);
+}
+
+export function applyDoctorRepairs(repairs: DoctorRepair[]): DoctorApplyResult {
+  const paths = new Set<string>();
+  for (const repair of repairs) {
+    if (paths.has(repair.path)) throw new Error(`duplicate repair path: ${repair.path}`);
+    paths.add(repair.path);
+    assertBrokenLink(repair);
+    if (repair.kind === 'retarget-link') {
+      if (!repair.to) throw new Error(`retarget repair has no target: ${repair.path}`);
+      const target = path.resolve(path.dirname(repair.path), repair.to);
+      const stat = fs.statSync(target);
+      if (!stat.isDirectory() || !fs.existsSync(path.join(target, 'SKILL.md')))
+        throw new Error(`retarget repair target is not a Skill resource: ${target}`);
+    }
+  }
+
+  const completed: DoctorRepair[] = [];
+  for (const [index, repair] of repairs.entries()) {
+    const temporary = `${repair.path}.skillspub-repair-${process.pid}-${index}`;
+    let temporaryCreated = false;
+    try {
+      assertBrokenLink(repair);
+      if (repair.kind === 'remove-broken-link') fs.unlinkSync(repair.path);
+      else {
+        if (!repair.to) throw new Error(`retarget repair has no target: ${repair.path}`);
+        fs.symlinkSync(repair.to, temporary);
+        temporaryCreated = true;
+        fs.renameSync(temporary, repair.path);
+        temporaryCreated = false;
+      }
+      completed.push(repair);
+    } catch (error) {
+      let message = (error as Error).message;
+      if (temporaryCreated) {
+        try {
+          fs.unlinkSync(temporary);
+        } catch (cleanupError) {
+          message += `; temporary link remains at ${temporary}: ${(cleanupError as Error).message}`;
+        }
+      }
+      return {
+        completed,
+        failed: { repair, error: message },
+      };
+    }
+  }
+  return { completed };
+}
+
+function replacementTarget(
+  relationship: RuntimeRelationship,
+  report: InventoryScanReport,
+): string | undefined {
+  const rawTarget = relationship.target;
+  if (!rawTarget) return undefined;
+  const target = path.resolve(path.dirname(relationship.path), rawTarget);
+  const occupants = new Set(report.relationships.flatMap(({ path: entryPath, realPath }) =>
+    realPath ? [path.resolve(entryPath)] : []));
+  const candidates = new Set<string>();
+  for (const runtime of report.runtimes) {
+    for (const [root, counterpart] of [
+      [runtime.discoveryRoot, runtime.parkingRoot],
+      [runtime.parkingRoot, runtime.discoveryRoot],
+    ]) {
+      const relative = path.relative(path.resolve(root), target);
+      if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
+      const candidate = path.resolve(counterpart, relative);
+      if (occupants.has(candidate)) candidates.add(candidate);
+    }
+  }
+  if (candidates.size !== 1) return undefined;
+  const candidate = [...candidates][0];
+  return path.isAbsolute(rawTarget)
+    ? candidate
+    : path.relative(path.dirname(relationship.path), candidate);
+}
+
+function staleBundleReferences(
+  value: unknown,
+  resources: Set<string>,
+): Array<[string, string]> {
+  if (!isRecord(value)) return [];
+  const stale: Array<[string, string]> = [];
+  for (const [bundle, members] of Object.entries(value)) {
+    if (!Array.isArray(members)) continue;
+    for (const member of members)
+      if (typeof member === 'string' && !resources.has(member))
+        stale.push([`Bundle ${bundle}:${member}`, member]);
+  }
+  return stale;
+}
+
+function staleTagReferences(
+  value: unknown,
+  resources: Set<string>,
+): Array<[string, string]> {
+  if (!isRecord(value)) return [];
+  return Object.keys(value).flatMap((resourceId) =>
+    resources.has(resourceId) ? [] : [[`Tag:${resourceId}`, resourceId]]);
+}
+
+function stalePresetReferences(
+  value: unknown,
+  resources: Set<string>,
+  stale: Array<[string, string]> = [],
+): Array<[string, string]> {
+  if (typeof value === 'string' && value.startsWith('skill:')) {
+    const resourceId = value.slice('skill:'.length);
+    if (!resources.has(resourceId)) stale.push([`Preset:${value}`, resourceId]);
+  } else if (Array.isArray(value)) {
+    for (const item of value) stalePresetReferences(item, resources, stale);
+  } else if (isRecord(value)) {
+    for (const item of Object.values(value)) stalePresetReferences(item, resources, stale);
+  }
+  return stale;
+}
+
+function staleReferenceFindings(
+  report: InventoryScanReport,
+  catalog: Record<string, unknown>,
+): ScanFinding[] {
+  const resources = new Set(report.resources.map(({ id }) => id));
+  const stale = new Map([
+    ...staleBundleReferences(catalog.bundles, resources),
+    ...staleTagReferences(catalog.tags, resources),
+    ...stalePresetReferences(catalog.presets, resources),
+  ]);
+  return [...stale].map(([reference, resourceId]) => ({
+    category: 'structural',
+    code: 'stale-reference',
+    message: `stale reference preserved: ${reference}`,
+    resourceId,
+  }));
+}
+
+function activePresetNames(state: Record<string, unknown>): string[] {
+  const value = state.presetActivations ?? state.activePresets;
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === 'string');
+  return isRecord(value) ? Object.keys(value) : [];
+}
+
+function orphanedPresetFindings(
+  report: InventoryScanReport,
+  state: Record<string, unknown>,
+  catalog: Record<string, unknown>,
+): ScanFinding[] {
+  if (report.scope !== 'project') return [];
+  const definitions = new Set(isRecord(catalog.presets) ? Object.keys(catalog.presets) : []);
+  return activePresetNames(state).flatMap((preset) => definitions.has(preset) ? [] : [{
+    category: 'structural',
+    code: 'orphaned-preset-activation',
+    message: `Orphaned Preset Activation: ${preset}; lastClaims frozen`,
+  }]);
+}
+
+function baseIntents(state: Record<string, unknown>): Map<string, Activation> {
+  const intents = new Map<string, Activation>();
+  if (!isRecord(state.baseIntent)) return intents;
+  for (const [key, value] of Object.entries(state.baseIntent)) {
+    if (value === 'on' || value === 'off') intents.set(key, value);
+    else if (isRecord(value)) {
+      for (const [slot, activation] of Object.entries(value))
+        if (activation === 'on' || activation === 'off')
+          intents.set(runtimeSlotId(key, normalizeSlotName(slot)), activation);
+    }
+  }
+  return intents;
+}
+
+function parkingFindings(
+  report: InventoryScanReport,
+  state: Record<string, unknown>,
+): ScanFinding[] {
+  const slots = new Map(report.slots.map((slot) => [slot.id, slot]));
+  return [...baseIntents(state)].flatMap(([id, intent]) => {
+    if (intent !== 'off' || slots.get(id)?.relationships.some(({ activation }) => activation === 'off'))
+      return [];
+    const separator = id.indexOf('\0');
+    return [{
+      category: 'structural',
+      code: 'parking-entry-missing',
+      message: `parking entry missing: ${displayRuntimeSlot(id)}`,
+      runtimeId: separator < 0 ? undefined : id.slice(0, separator),
+      slot: separator < 0 ? id : id.slice(separator + 1),
+    }];
+  });
+}
+
+function lockMismatchFindings(
+  report: InventoryScanReport,
+  state: Record<string, unknown>,
+): ScanFinding[] {
+  const previous = isRecord(state.runtimeInventory) && isRecord(state.runtimeInventory.slots)
+    ? state.runtimeInventory.slots
+    : {};
+  return report.slots.flatMap((slot) => {
+    const old = previous[slot.id];
+    return isRecord(old) && isRecord(old.provenance) && !slot.provenance ? [{
+      category: 'structural',
+      code: 'lock-file-mismatch',
+      message: `npx-managed Runtime Slot has a file but no lock entry: ${slot.runtimeKey}/${slot.name}`,
+      runtimeId: slot.runtimeId,
+      slot: slot.name,
+    }] : [];
+  });
+}
+
+function doctorFindings(
+  report: InventoryScanReport,
+  state: Record<string, unknown>,
+  catalog: Record<string, unknown>,
+): ScanFinding[] {
+  return [
+    ...staleReferenceFindings(report, catalog),
+    ...orphanedPresetFindings(report, state, catalog),
+    ...parkingFindings(report, state),
+    ...lockMismatchFindings(report, state),
+  ];
+}
+
+function doctorReport(
+  report: InventoryScanReport,
+  state: Record<string, unknown>,
+  catalog: Record<string, unknown>,
+): DoctorReport {
+  return {
+    ...report,
+    findings: [...report.findings, ...doctorFindings(report, state, catalog)],
+    repairs: doctorRepairs(report),
+  };
+}
+
+function doctorRepairs(report: InventoryScanReport): DoctorRepair[] {
+  const conflicted = new Set(report.slots.flatMap(({ id, relationships }) =>
+    relationships.length > 1 ? [id] : []));
+  return report.relationships.flatMap((relationship) => {
+    if (relationship.form !== 'link' || relationship.realPath ||
+      relationship.inspectionError || relationship.readOnly || !relationship.target ||
+      conflicted.has(runtimeSlotId(relationship.runtimeId, relationship.slot)))
+      return [];
+    const to = replacementTarget(relationship, report);
+    const kind = to ? 'retarget-link' : 'remove-broken-link';
+    return [{
+      id: `${kind}:${relationship.path}`,
+      kind,
+      path: relationship.path,
+      from: relationship.target,
+      ...(to ? { to } : {}),
+      runtimeId: relationship.runtimeId,
+      slot: relationship.slot,
+    }];
+  });
 }
 
 export function scanGlobalInventory(
@@ -792,12 +1098,40 @@ function projectRuntime(
   };
 }
 
-export function scanProjectInventory(
+export function doctorGlobalInventory(
   home: Home,
-  selectedPath: string,
-  runtimes: Runtime[] = loadRuntimes(home),
-  options: ScanOptions = {},
-): InventoryScanReport {
+  runtimes: Runtime[] = loadRuntimes(home, { persist: false }),
+): DoctorReport {
+  const stateFile = path.join(home.configDir, 'state.json');
+  const report = scanInventory({
+    scope: 'global',
+    stateFile,
+    catalogStateFile: stateFile,
+    runtimes: runtimes.map((runtime) => ({
+      ...runtime,
+      id: `global:${runtime.key}`,
+      scope: 'global',
+      writable: true,
+    })),
+    options: { persist: false },
+  });
+  const state = readStateFile(stateFile);
+  return doctorReport(report, state, state);
+}
+
+function projectInventory({
+  home,
+  selectedPath,
+  runtimes,
+  options,
+  persist,
+}: {
+  home: Home;
+  selectedPath: string;
+  runtimes: Runtime[];
+  options: ScanOptions;
+  persist: boolean;
+}): InventoryScanReport {
   const projectPath = fs.realpathSync(selectedPath);
   if (!fs.statSync(projectPath).isDirectory())
     throw new Error(`Project path is not a directory: ${selectedPath}`);
@@ -830,7 +1164,35 @@ export function scanProjectInventory(
     stateFile: path.join(projectPath, '.skillspub', 'state.json'),
     catalogStateFile: path.join(home.configDir, 'state.json'),
     runtimes: scanned,
-    options,
+    options: { ...options, persist },
     projectPath,
   });
+}
+
+export function scanProjectInventory(
+  home: Home,
+  selectedPath: string,
+  runtimes: Runtime[] = loadRuntimes(home),
+  options: ScanOptions = {},
+): InventoryScanReport {
+  return projectInventory({ home, selectedPath, runtimes, options, persist: true });
+}
+
+export function doctorProjectInventory(
+  home: Home,
+  selectedPath: string,
+  runtimes: Runtime[] = loadRuntimes(home, { persist: false }),
+): DoctorReport {
+  const report = projectInventory({
+    home,
+    selectedPath,
+    runtimes,
+    options: {},
+    persist: false,
+  });
+  return doctorReport(
+    report,
+    readStateFile(report.stateFile),
+    readStateFile(path.join(home.configDir, 'state.json')),
+  );
 }
