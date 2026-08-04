@@ -584,3 +584,14 @@ export function untagged(rows: Row[], tags: Record<string, string[]>): string[] 
     .filter((row) => (tags[row.name] ?? []).length === 0)
     .map((row) => row.displayName);
 }
+
+export {
+  loadRuntimes,
+  normalizeSlotName,
+  scanGlobalInventory,
+  scanProjectInventory,
+  type InventoryScanReport,
+  type Runtime,
+  type RuntimeRelationship,
+  type ScanFinding,
+} from './inventory.ts';

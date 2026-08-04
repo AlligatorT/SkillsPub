@@ -5,11 +5,15 @@ import { fileURLToPath } from 'node:url';
 import {
   defaultHome,
   loadAgents,
+  loadRuntimes,
   buildInventory,
+  scanGlobalInventory,
+  scanProjectInventory,
   setSkill,
   loadState,
   filterRows,
   untagged,
+  type InventoryScanReport,
   type Row,
 } from './core.ts';
 
@@ -18,7 +22,10 @@ const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the sour
   skillspub ls [--agent A] [--tag T]   skill × agent matrix (+ untagged/deadlink hints)
   skillspub on|off <skill> <agent...>  move skill between skills/ and skills/.off/
   skillspub status <skill>             per-agent state of one skill
-  skillspub agents                     agent registry (~/.config/skillspub/agents.conf)
+  skillspub scan                       explicitly scan Global Runtime inventory
+  skillspub project <path> scan        scan exact Project + inherited Runtime roots
+  skillspub runtimes                   Runtime registry (~/.config/skillspub/runtimes.json)
+  skillspub agents                     legacy Agent registry view
   skillspub tui                        interactive full-screen skill browser
 `;
 
@@ -172,6 +179,53 @@ function cmdAgents(home: ReturnType<typeof defaultHome>): void {
   }
 }
 
+function cmdRuntimes(home: ReturnType<typeof defaultHome>): void {
+  for (const runtime of loadRuntimes(home)) {
+    console.log([
+      runtime.key,
+      runtime.kind,
+      runtime.discoveryRoot,
+      runtime.parkingRoot,
+    ].join('\t'));
+  }
+}
+
+function printScan(report: InventoryScanReport): void {
+  console.log(report.scope === 'project'
+    ? `Project scan: ${report.projectPath}`
+    : 'Global scan');
+  console.log('Runtime roots:');
+  for (const runtime of report.runtimes) {
+    const source = runtime.scope === 'global' ? 'Global' : runtime.sourceDirectory;
+    const access = runtime.writable ? 'writable' : `read-only from ${source}`;
+    console.log(`  - ${runtime.id} [${access}] ${runtime.discoveryRoot} | OFF ${runtime.parkingRoot}`);
+  }
+  console.log('Relationships:');
+  if (report.relationships.length === 0) console.log('  none');
+  for (const relationship of report.relationships) {
+    const runtime = report.runtimes.find(({ id }) => id === relationship.runtimeId);
+    const source = runtime?.scope === 'global' ? 'Global' : runtime?.sourceDirectory;
+    const access = relationship.readOnly ? `read-only from ${source}` : 'writable';
+    const target = relationship.target ? ` -> ${relationship.target}` : '';
+    console.log(
+      `  - ${relationship.name} @ ${relationship.runtimeId}: ` +
+      `${relationship.activation} ${relationship.form} [${access}] ${relationship.path}${target}`,
+    );
+  }
+  console.log(`Missing relationships: ${report.missing.length}`);
+  const sections = [
+    ['Structural anomalies', 'structural'],
+    ['Uncategorized metadata', 'metadata'],
+    ['External changes', 'change'],
+  ] as const;
+  for (const [title, category] of sections) {
+    console.log(`${title}:`);
+    const findings = report.findings.filter((finding) => finding.category === category);
+    if (findings.length === 0) console.log('  none');
+    else for (const finding of findings) console.log(`  - ${finding.message}`);
+  }
+}
+
 async function main(
   args: string[] = process.argv.slice(2),
   stdinIsTty = Boolean(process.stdin.isTTY),
@@ -196,6 +250,21 @@ async function main(
         break;
       case 'status':
         cmdStatus(home, rest);
+        break;
+      case 'scan':
+        if (rest.length > 0) throw new Error('usage: skillspub scan');
+        printScan(scanGlobalInventory(home));
+        break;
+      case 'project': {
+        const [projectPath, projectCommand, ...projectArgs] = rest;
+        if (!projectPath || projectCommand !== 'scan' || projectArgs.length > 0)
+          throw new Error('usage: skillspub project <path> scan');
+        printScan(scanProjectInventory(home, projectPath));
+        break;
+      }
+      case 'runtimes':
+        if (rest.length > 0) throw new Error('usage: skillspub runtimes');
+        cmdRuntimes(home);
         break;
       case 'agents':
         cmdAgents(home);
