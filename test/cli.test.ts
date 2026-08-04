@@ -442,6 +442,64 @@ test('creating a missing Relationship requires explicit confirmation', () => {
   assert.equal(fs.realpathSync(path.join(targetRoot, 'example')), fs.realpathSync(skill));
 });
 
+test('Tag commands use resource identity for filtering and planned Runtime mutations', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-tags-'));
+  const runtimes = ['one', 'two'].map((key) => {
+    const discoveryRoot = path.join(configDir, key, 'skills');
+    const skill = path.join(discoveryRoot, 'same');
+    fs.mkdirSync(skill, { recursive: true });
+    fs.writeFileSync(path.join(skill, 'SKILL.md'), `# ${key}`);
+    return {
+      key,
+      kind: 'shared',
+      discoveryRoot,
+      parkingRoot: path.join(configDir, key, 'off'),
+      projectPath: `.agents/${key}/skills`,
+      skill,
+    };
+  });
+  fs.writeFileSync(path.join(configDir, 'runtimes.json'), JSON.stringify({
+    version: 1,
+    runtimes: runtimes.map(({ skill: _, ...runtime }) => runtime),
+  }));
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+  assert.equal(run(['scan']).status, 0);
+  const selected = fs.realpathSync(runtimes[0].skill);
+  const other = fs.realpathSync(runtimes[1].skill);
+
+  const ambiguous = run(['tag', 'add', 'same', 'backend']);
+  assert.equal(ambiguous.status, 1);
+  assert.match(ambiguous.stderr, /ambiguous/);
+
+  const added = run(['tag', 'add', `skill:${selected}`, 'tools', 'backend']);
+  assert.equal(added.status, 0, added.stderr);
+  assert.match(run(['tag', 'ls']).stdout, /backend\t1[\s\S]*tools\t1/);
+  assert.match(run(['tag', 'ls', '--skill', `skill:${selected}`]).stdout, /backend[\s\S]*tools/);
+  const filtered = run(['ls', '--tag', 'backend']);
+  assert.equal(filtered.status, 0, filtered.stderr);
+  assert.match(filtered.stdout, new RegExp(selected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.doesNotMatch(filtered.stdout, new RegExp(other.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+
+  const disabled = run(['off', 'tag:backend', 'one']);
+  assert.equal(disabled.status, 0, disabled.stderr);
+  assert.match(disabled.stdout, /Plan:[\s\S]*global:one\/same\s+on -> off/);
+  const parked = fs.realpathSync(path.join(runtimes[0].parkingRoot, 'same'));
+  let state = JSON.parse(fs.readFileSync(path.join(configDir, 'state.json'), 'utf8'));
+  assert.deepEqual(state.tags[parked], ['backend', 'tools']);
+  assert.equal(state.tags[selected], undefined);
+  assert.equal(state.baseIntent['global:one\0same'], 'off');
+
+  const enabled = run(['on', 'tag:backend', 'one']);
+  assert.equal(enabled.status, 0, enabled.stderr);
+  state = JSON.parse(fs.readFileSync(path.join(configDir, 'state.json'), 'utf8'));
+  assert.deepEqual(state.tags[selected], ['backend', 'tools']);
+  assert.match(run(['tag', 'rm', `skill:${selected}`, 'tools']).stdout, /removed 1 tag/);
+  assert.match(run(['tag', 'rm', `skill:${selected}`]).stdout, /removed 1 tag/);
+});
+
 test('doctor is read-only by default and repairs only with explicit confirmation', () => {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-doctor-'));
   const discoveryRoot = path.join(configDir, 'shared', 'skills');
