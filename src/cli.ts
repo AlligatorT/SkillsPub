@@ -16,12 +16,23 @@ import {
   type InventoryScanReport,
   type Row,
 } from './core.ts';
+import {
+  addBundleMembers,
+  applyActivationPlan,
+  createBundle,
+  listBundles,
+  planActivation,
+  remainingDrift,
+  removeBundleMembers,
+  showBundle,
+} from './bundles.ts';
 
 const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the source of truth)
 
   skillspub ls [--agent A] [--tag T]   skill × agent matrix (+ untagged/deadlink hints)
-  skillspub on|off <skill> <agent...>  move skill between skills/ and skills/.off/
+  skillspub on|off <selector> <target...> [--yes]  update Agent or Runtime relationships
   skillspub status <skill>             per-agent state of one skill
+  skillspub bundle ls|show|create|add|rm ...
   skillspub scan                       explicitly scan Global Runtime inventory
   skillspub project <path> scan        scan exact Project + inherited Runtime roots
   skillspub runtimes                   Runtime registry (~/.config/skillspub/runtimes.json)
@@ -126,6 +137,39 @@ function cmdOnOff(
     throw new Error(
       `usage: skillspub ${on ? 'on' : 'off'} <skill> <agent...>`,
     );
+  if (skill.startsWith('bundle:') || skill.startsWith('skill:')) {
+    const confirmed = names.includes('--yes');
+    const runtimes = names.filter((name) => name !== '--yes');
+    const plan = planActivation(home, skill, runtimes, on ? 'on' : 'off');
+    console.log('Plan:');
+    if (plan.targets.length === 0) console.log('  no current Runtime Slots');
+    else for (const target of plan.targets) {
+      const intent = target.intent === target.to
+        ? ''
+        : ` (Base intent ${target.intent}; claimed ${target.to})`;
+      console.log(
+        `  ${target.runtimeId}/${target.slot}\t${target.from} -> ${target.to}${intent}`,
+      );
+    }
+    if (!confirmed && plan.targets.some((target) =>
+      target.from === 'missing' && target.to === 'on')) {
+      throw new Error('creating missing Relationships requires --yes');
+    }
+    try {
+      applyActivationPlan(home, plan);
+    } catch (error) {
+      let drift: string;
+      try {
+        const remaining = remainingDrift(plan, scanGlobalInventory(home));
+        drift = remaining.length > 0 ? remaining.join(', ') : 'none';
+      } catch (scanError) {
+        drift = `could not rescan: ${(scanError as Error).message}`;
+      }
+      throw new Error(`${(error as Error).message}\nRemaining drift: ${drift}`);
+    }
+    scanGlobalInventory(home);
+    return;
+  }
   const agents = loadAgents(home);
   refuseAmbiguousName(buildInventory(home, agents).instances, skill);
   for (const name of names) {
@@ -190,6 +234,53 @@ function cmdRuntimes(home: ReturnType<typeof defaultHome>): void {
   }
 }
 
+function cmdBundle(home: ReturnType<typeof defaultHome>, args: string[]): void {
+  const [action, name, ...selectors] = args;
+  switch (action) {
+    case 'ls': {
+      if (name) throw new Error('usage: skillspub bundle ls');
+      const bundles = listBundles(home);
+      if (bundles.length === 0) console.log('no bundles found');
+      else for (const bundle of bundles) console.log(`${bundle.name}\t${bundle.members}`);
+      break;
+    }
+    case 'show': {
+      if (!name || selectors.length > 0)
+        throw new Error('usage: skillspub bundle show <name>');
+      console.log(name);
+      const members = showBundle(home, name);
+      if (members.length === 0) console.log('  no members');
+      else for (const member of members) {
+        console.log(`  ${member.name ?? member.id}\tskill:${member.id}${member.stale ? '\tstale' : ''}`);
+      }
+      break;
+    }
+    case 'create': {
+      if (!name) throw new Error('usage: skillspub bundle create <name> [<skill>...]');
+      const count = createBundle(home, name, selectors);
+      console.log(`created bundle ${name} with ${count} member${count === 1 ? '' : 's'}`);
+      break;
+    }
+    case 'add': {
+      if (!name || selectors.length === 0)
+        throw new Error('usage: skillspub bundle add <name> <skill...>');
+      const added = addBundleMembers(home, name, selectors);
+      console.log(`added ${added} member${added === 1 ? '' : 's'} to ${name}`);
+      break;
+    }
+    case 'rm': {
+      if (!name) throw new Error('usage: skillspub bundle rm <name> [<skill>...]');
+      const removed = removeBundleMembers(home, name, selectors);
+      console.log(removed === undefined
+        ? `removed bundle ${name}`
+        : `removed ${removed} member${removed === 1 ? '' : 's'} from ${name}`);
+      break;
+    }
+    default:
+      throw new Error('usage: skillspub bundle ls|show|create|add|rm ...');
+  }
+}
+
 function printScan(report: InventoryScanReport): void {
   console.log(report.scope === 'project'
     ? `Project scan: ${report.projectPath}`
@@ -250,6 +341,9 @@ async function main(
         break;
       case 'status':
         cmdStatus(home, rest);
+        break;
+      case 'bundle':
+        cmdBundle(home, rest);
         break;
       case 'scan':
         if (rest.length > 0) throw new Error('usage: skillspub scan');

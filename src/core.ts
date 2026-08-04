@@ -533,12 +533,16 @@ export function skillDetail(
   agents: Agent[],
   instanceId: string,
 ): SkillDetail | undefined {
-  const instance = buildInventory(home, agents).instances.find(
+  const inventory = buildInventory(home, agents);
+  const instance = inventory.instances.find(
     (candidate) => candidate.id === instanceId,
   );
   if (!instance) return undefined;
 
   const state = loadState(home);
+  const unambiguousName = inventory.instances.filter(
+    (candidate) => candidate.name === instance.name,
+  ).length === 1;
   const contentPath = instance.realPath
     ? path.join(instance.realPath, 'SKILL.md')
     : undefined;
@@ -556,9 +560,11 @@ export function skillDetail(
     sourceLabel: instance.sourceLabel,
     skillPath: instance.provenance.skillPath,
     bundles: Object.entries(state.bundles)
-      .filter(([, members]) => members.includes(instance.name))
+      .filter(([, members]) =>
+        members.includes(instance.id) ||
+        (unambiguousName && members.includes(instance.name)))
       .map(([bundle]) => bundle)
-      .sort(),
+      .sort((a, b) => a.localeCompare(b)),
     tags: state.tags[instance.name] ?? [],
     content: contentPath ? fs.readFileSync(contentPath, 'utf8') : undefined,
     contentPath,

@@ -362,10 +362,15 @@ test('inventory keeps broken links separate and detail uses explicit identity', 
   assert.equal(broken.sourceLabel, 'Source unknown');
 
   const second = instances.find((instance) => instance.realPath === fs.realpathSync(path.join(b, 'same')))!;
+  fs.writeFileSync(path.join(home.configDir, 'state.json'), JSON.stringify({
+    bundles: { selected: [second.id], legacy: ['same'] },
+    tags: {},
+  }));
   const detail = skillDetail(home, agents, second.id)!;
   assert.equal(detail.content, '# second');
   assert.equal(detail.sourceLabel, 'Source unknown');
   assert.deepEqual(detail.realPaths, [fs.realpathSync(path.join(b, 'same'))]);
+  assert.deepEqual(detail.bundles, ['selected']);
   assert.equal(skillDetail(home, agents, 'same'), undefined);
 });
 

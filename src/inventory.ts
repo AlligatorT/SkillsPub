@@ -109,6 +109,7 @@ export interface InventoryScanReport {
 
 export interface ScanOptions {
   now?: string;
+  persist?: boolean;
 }
 
 interface RuntimeRegistryFile {
@@ -394,7 +395,7 @@ function hashDirectory(root: string): string {
   return hash.digest('hex');
 }
 
-function readStateForUpdate(file: string): Record<string, unknown> {
+export function readStateFile(file: string): Record<string, unknown> {
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
@@ -406,7 +407,7 @@ function readStateForUpdate(file: string): Record<string, unknown> {
   }
 }
 
-function writeState(file: string, state: Record<string, unknown>): void {
+export function writeStateFile(file: string, state: Record<string, unknown>): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const temporary = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(temporary, JSON.stringify(state, null, 2) + '\n');
@@ -681,10 +682,11 @@ function buildRepoBundles(
   for (const slot of slots) {
     const repo = slot.provenance ? repoName(slot.provenance) : undefined;
     if (!repo) continue;
+    const resourceIds = [...new Set(slot.relationships.flatMap(({ resourceId }) =>
+      resourceId ? [resourceId] : []))];
+    if (resourceIds.length !== 1) continue;
     const name = `repo:${repo}`;
-    const resourceIds = slot.relationships.flatMap(({ resourceId }) =>
-      resourceId ? [resourceId] : []);
-    nextBundles[name] = [...new Set([...(nextBundles[name] ?? []), ...resourceIds])]
+    nextBundles[name] = [...new Set([...(nextBundles[name] ?? []), resourceIds[0]])]
       .sort((a, b) => a.localeCompare(b));
   }
   return nextBundles;
@@ -707,13 +709,13 @@ function scanInventory({
     ];
   });
   const { resources, missing } = scanInventoryResources(relationships, runtimes);
-  const state = readStateForUpdate(stateFile);
+  const state = readStateFile(stateFile);
   const previous = state.runtimeInventory as RuntimeInventoryMetadata | undefined;
   const slotScan = scanRuntimeSlots(relationships, runtimes, previous);
 
   const catalogState = catalogStateFile === stateFile
     ? state
-    : readStateForUpdate(catalogStateFile);
+    : readStateFile(catalogStateFile);
   const tags = isRecord(catalogState.tags)
     ? catalogState.tags as Record<string, string[]>
     : {};
@@ -723,9 +725,11 @@ function scanInventory({
   ];
   const metadata = buildInventoryMetadata(resources, slotScan.slots, previous, now);
   const nextBundles = buildRepoBundles(catalogState.bundles, resources, slotScan.slots);
-  writeState(stateFile, scope === 'global'
-    ? { ...state, bundles: nextBundles, tags, runtimeInventory: metadata }
-    : { ...state, runtimeInventory: metadata });
+  if (options.persist !== false) {
+    writeStateFile(stateFile, scope === 'global'
+      ? { ...state, bundles: nextBundles, tags, runtimeInventory: metadata }
+      : { ...state, runtimeInventory: metadata });
+  }
 
   return {
     scope,
