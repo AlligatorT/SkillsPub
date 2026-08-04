@@ -797,84 +797,127 @@ function assertBrokenLink(repair: DoctorRepair): void {
   throw new Error(`repair target is no longer broken: ${repair.path}`);
 }
 
+function repairTemporaryPath(repair: DoctorRepair, index: number): string {
+  return `${repair.path}.skillspub-repair-${process.pid}-${index}`;
+}
+
+function preflightDoctorRepair(repair: DoctorRepair, index: number): void {
+  assertBrokenLink(repair);
+  fs.accessSync(path.dirname(repair.path), fs.constants.W_OK | fs.constants.X_OK);
+  if (repair.kind === 'remove-broken-link') return;
+  if (!repair.to) throw new Error(`retarget repair has no target: ${repair.path}`);
+  const target = path.resolve(path.dirname(repair.path), repair.to);
+  const stat = fs.statSync(target);
+  if (!stat.isDirectory() || !fs.existsSync(path.join(target, 'SKILL.md')))
+    throw new Error(`retarget repair target is not a Skill resource: ${target}`);
+  const temporary = repairTemporaryPath(repair, index);
+  try {
+    fs.lstatSync(temporary);
+    throw new Error(`temporary repair path already exists: ${temporary}`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
+
+function applyDoctorRepair(repair: DoctorRepair, index: number): void {
+  assertBrokenLink(repair);
+  if (repair.kind === 'remove-broken-link') {
+    fs.unlinkSync(repair.path);
+    return;
+  }
+  if (!repair.to) throw new Error(`retarget repair has no target: ${repair.path}`);
+  const temporary = repairTemporaryPath(repair, index);
+  fs.symlinkSync(repair.to, temporary);
+  try {
+    fs.renameSync(temporary, repair.path);
+  } catch (error) {
+    try {
+      fs.unlinkSync(temporary);
+    } catch (cleanupError) {
+      throw new Error(
+        `${(error as Error).message}; temporary link remains at ${temporary}: ` +
+        (cleanupError as Error).message,
+      );
+    }
+    throw error;
+  }
+}
+
 export function applyDoctorRepairs(repairs: DoctorRepair[]): DoctorApplyResult {
   const paths = new Set<string>();
   for (const [index, repair] of repairs.entries()) {
     if (paths.has(repair.path)) throw new Error(`duplicate repair path: ${repair.path}`);
     paths.add(repair.path);
-    assertBrokenLink(repair);
-    fs.accessSync(path.dirname(repair.path), fs.constants.W_OK);
-    if (repair.kind === 'retarget-link') {
-      if (!repair.to) throw new Error(`retarget repair has no target: ${repair.path}`);
-      const target = path.resolve(path.dirname(repair.path), repair.to);
-      const stat = fs.statSync(target);
-      if (!stat.isDirectory() || !fs.existsSync(path.join(target, 'SKILL.md')))
-        throw new Error(`retarget repair target is not a Skill resource: ${target}`);
-      const temporary = `${repair.path}.skillspub-repair-${process.pid}-${index}`;
-      try {
-        fs.lstatSync(temporary);
-        throw new Error(`temporary repair path already exists: ${temporary}`);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      }
-    }
+    preflightDoctorRepair(repair, index);
   }
 
   const completed: DoctorRepair[] = [];
   for (const [index, repair] of repairs.entries()) {
-    const temporary = `${repair.path}.skillspub-repair-${process.pid}-${index}`;
-    let temporaryCreated = false;
     try {
-      assertBrokenLink(repair);
-      if (repair.kind === 'remove-broken-link') fs.unlinkSync(repair.path);
-      else {
-        if (!repair.to) throw new Error(`retarget repair has no target: ${repair.path}`);
-        fs.symlinkSync(repair.to, temporary);
-        temporaryCreated = true;
-        fs.renameSync(temporary, repair.path);
-        temporaryCreated = false;
-      }
+      applyDoctorRepair(repair, index);
       completed.push(repair);
     } catch (error) {
-      let message = (error as Error).message;
-      if (temporaryCreated) {
-        try {
-          fs.unlinkSync(temporary);
-        } catch (cleanupError) {
-          message += `; temporary link remains at ${temporary}: ${(cleanupError as Error).message}`;
-        }
-      }
       return {
         completed,
-        failed: { repair, error: message },
+        failed: { repair, error: (error as Error).message },
       };
     }
   }
   return { completed };
 }
 
+interface RetargetEvidence {
+  occupants: Map<string, string>;
+  currentHashes: Map<string, string>;
+  priorResourceIds: Set<string>;
+  priorResources: Record<string, unknown>;
+}
+
+function matchingCounterpart(
+  target: string,
+  root: string,
+  counterpart: string,
+  evidence: RetargetEvidence,
+): string | undefined {
+  const relative = path.relative(path.resolve(root), target);
+  if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
+    return undefined;
+  const candidate = path.resolve(counterpart, relative);
+  const candidateResourceId = evidence.occupants.get(candidate);
+  const priorResourceId = path.resolve(rootIdentity(root), relative);
+  const priorResource = evidence.priorResources[priorResourceId];
+  if (!candidateResourceId || !evidence.priorResourceIds.has(priorResourceId) ||
+    !isRecord(priorResource) || typeof priorResource.hash !== 'string' ||
+    evidence.currentHashes.get(candidateResourceId) !== priorResource.hash)
+    return undefined;
+  return candidate;
+}
+
 function replacementTarget(
   relationship: RuntimeRelationship,
   report: InventoryScanReport,
-  priorResourceIds: Set<string>,
+  state: Record<string, unknown>,
 ): string | undefined {
   const rawTarget = relationship.target;
   if (!rawTarget) return undefined;
   const target = path.resolve(path.dirname(relationship.path), rawTarget);
-  const occupants = new Set(report.relationships.flatMap(({ path: entryPath, realPath }) =>
-    realPath ? [path.resolve(entryPath)] : []));
+  const evidence: RetargetEvidence = {
+    occupants: new Map(report.relationships.flatMap(({ path: entryPath, realPath }) =>
+      realPath ? [[path.resolve(entryPath), realPath] as const] : [])),
+    currentHashes: new Map(report.resources.map(({ id, hash }) => [id, hash])),
+    priorResourceIds: previousResourceIds(state, relationship),
+    priorResources: isRecord(state.runtimeInventory) && isRecord(state.runtimeInventory.resources)
+      ? state.runtimeInventory.resources
+      : {},
+  };
   const candidates = new Set<string>();
   for (const runtime of report.runtimes) {
     for (const [root, counterpart] of [
       [runtime.discoveryRoot, runtime.parkingRoot],
       [runtime.parkingRoot, runtime.discoveryRoot],
     ]) {
-      const relative = path.relative(path.resolve(root), target);
-      if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
-      const candidate = path.resolve(counterpart, relative);
-      const priorResourceId = path.resolve(rootIdentity(root), relative);
-      if (occupants.has(candidate) && priorResourceIds.has(priorResourceId))
-        candidates.add(candidate);
+      const candidate = matchingCounterpart(target, root, counterpart, evidence);
+      if (candidate) candidates.add(candidate);
     }
   }
   if (candidates.size !== 1) return undefined;
@@ -921,15 +964,17 @@ function staleTagReferences(
 function stalePresetReferences(
   value: unknown,
   resources: Set<string>,
-  stale: Array<[string, string]> = [],
 ): Array<[string, string]> {
-  if (typeof value === 'string' && value.startsWith('skill:')) {
-    const resourceId = value.slice('skill:'.length);
-    if (!resourceExists(resources, resourceId)) stale.push([`Preset:${value}`, resourceId]);
-  } else if (Array.isArray(value)) {
-    for (const item of value) stalePresetReferences(item, resources, stale);
-  } else if (isRecord(value)) {
-    for (const item of Object.values(value)) stalePresetReferences(item, resources, stale);
+  if (!isRecord(value)) return [];
+  const stale: Array<[string, string]> = [];
+  for (const preset of Object.values(value)) {
+    if (!isRecord(preset) || !Array.isArray(preset.selectors)) continue;
+    for (const selector of preset.selectors) {
+      if (typeof selector !== 'string' || !selector.startsWith('skill:')) continue;
+      const resourceId = selector.slice('skill:'.length);
+      if (!resourceExists(resources, resourceId))
+        stale.push([`Preset:${selector}`, resourceId]);
+    }
   }
   return stale;
 }
@@ -981,11 +1026,12 @@ function baseIntents(state: Record<string, unknown>): Map<string, Activation> {
 }
 
 function collectClaimedSlots(value: unknown, slots: Set<string>): void {
-  if (typeof value === 'string' && value.includes('\0')) slots.add(value);
-  else if (Array.isArray(value))
-    for (const item of value) collectClaimedSlots(item, slots);
-  else if (isRecord(value))
-    for (const item of Object.values(value)) collectClaimedSlots(item, slots);
+  let lists: unknown[][] = [];
+  if (Array.isArray(value)) lists = [value];
+  else if (isRecord(value)) lists = Object.values(value).filter(Array.isArray);
+  for (const list of lists)
+    for (const item of list)
+      if (typeof item === 'string' && item.includes('\0')) slots.add(item);
 }
 
 function parkingFindings(
@@ -1081,7 +1127,7 @@ function doctorRepairs(
       relationship.inspectionError || relationship.readOnly || !relationship.target ||
       conflicted.has(runtimeSlotId(relationship.runtimeId, relationship.slot)))
       return [];
-    const to = replacementTarget(relationship, report, previousResourceIds(state, relationship));
+    const to = replacementTarget(relationship, report, state);
     const kind = to ? 'retarget-link' : 'remove-broken-link';
     return [{
       id: `${kind}:${relationship.path}`,

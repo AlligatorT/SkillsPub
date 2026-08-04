@@ -224,6 +224,33 @@ test('Doctor previews and repairs a managed Link whose local source moved to par
   assert.equal(fs.realpathSync(link), fs.realpathSync(parked));
 });
 
+test('Doctor does not retarget to a different resource placed in the matching parking Slot', () => {
+  const { home, runtime: consumer } = setup();
+  consumer.key = 'consumer';
+  const source: Runtime = {
+    key: 'source',
+    kind: 'agent',
+    discoveryRoot: path.join(home.configDir, 'source', 'skills'),
+    parkingRoot: path.join(home.configDir, 'source', '.skillspub-off', 'skills'),
+    projectPath: '.source/skills',
+  };
+  const oldTarget = path.join(source.discoveryRoot, 'shared');
+  fs.mkdirSync(oldTarget, { recursive: true });
+  fs.writeFileSync(path.join(oldTarget, 'SKILL.md'), '# original');
+  const link = path.join(consumer.discoveryRoot, 'shared');
+  fs.symlinkSync(oldTarget, link);
+  scanGlobalInventory(home, [consumer, source]);
+  fs.rmSync(oldTarget, { recursive: true });
+  const replacement = path.join(source.parkingRoot, 'shared');
+  fs.mkdirSync(replacement, { recursive: true });
+  fs.writeFileSync(path.join(replacement, 'SKILL.md'), '# unrelated replacement');
+
+  const [repair] = doctorGlobalInventory(home, [consumer, source]).repairs;
+
+  assert.equal(repair.kind, 'remove-broken-link');
+  assert.equal(repair.to, undefined);
+});
+
 test('Doctor does not retarget an untracked external Link', () => {
   const { home, runtime: consumer } = setup();
   consumer.key = 'consumer';
