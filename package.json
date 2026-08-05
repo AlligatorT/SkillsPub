@@ -4,7 +4,8 @@
   "description": "SkillsPub multi-agent skills on/off manager — disk is the source of truth",
   "type": "module",
   "files": [
-    "src"
+    "src",
+    "SKILL.md"
   ],
   "bin": {
     "skillspub": "src/cli.ts"
