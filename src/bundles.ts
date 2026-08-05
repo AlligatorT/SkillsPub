@@ -346,10 +346,7 @@ export function removePresetSelectors(
   const current = presets[name];
   if (!current) throw new Error(`unknown preset: ${name}`);
   if (!selectors || selectors.length === 0) {
-    const { [name]: _, ...remaining } = presets;
-    state.presets = remaining;
-    writeState(home, state);
-    return undefined;
+    throw new Error('removing a Preset definition requires: skillspub preset delete <name> [--yes]');
   }
   const removed = new Set(selectors.map((selector) => {
     try {
@@ -996,6 +993,7 @@ function buildReconcileTargets(
     }
 
     const from = relationship.activation;
+    if (claimed && intent === undefined) baseIntentDefaults[slotId] = from;
     if (from === desired) continue;
 
     const destination = activationDestination({
@@ -1073,20 +1071,16 @@ export function planPresetReconcile(
     if (!readPresets(catalogState)[name] && !activations[name] &&
       !readStringListRecord(policyState.lastClaims, 'lastClaims')[name])
       throw new Error(`unknown preset: ${name}`);
-    if (!activations[name] && runtimeNames && runtimeNames.length > 0)
+    if (!activations[name])
       throw new Error(`preset is not active: ${name}`);
+    if (runtimeNames && runtimeNames.length > 0) {
+      const active = new Set(activations[name]);
+      for (const runtime of runtimeNames)
+        if (!active.has(runtime)) throw new Error(`preset is not active on Runtime: ${runtime}`);
+    }
   }
-  let next = { ...activations };
-  if (name && runtimeNames && runtimeNames.length > 0) {
-    // re-reconcile one preset on specific runtimes — keep activation as-is if present
-    if (!next[name]) next[name] = [...runtimeNames];
-  }
-  if (name) {
-    next = Object.fromEntries(Object.entries(next).filter(([preset]) => preset === name));
-    // still need full claims from ALL activations for correct multi-preset slots
-    next = activations;
-  }
-  return planFromActivations(home, next, scope);
+  // Always recompute claims from every active Preset so multi-preset Slots stay correct.
+  return planFromActivations(home, activations, scope);
 }
 
 export function activatePreset(

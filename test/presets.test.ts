@@ -53,7 +53,8 @@ test('preset create/add/rm/ls/show keep dynamic selectors', () => {
   assert.equal(showPreset(home, 'tools').length, 3);
   assert.equal(removePresetSelectors(home, 'tools', ['tag:backend']), 1);
   assert.equal(showPreset(home, 'tools').length, 2);
-  assert.equal(removePresetSelectors(home, 'tools'), undefined);
+  assert.throws(() => removePresetSelectors(home, 'tools'), /preset delete/);
+  deletePreset(home, 'tools', { yes: true });
   assert.deepEqual(listPresets(home), []);
 });
 
@@ -86,22 +87,20 @@ test('duplicate selector paths claim a Slot once', () => {
 });
 
 test('deactivate drops claims and applies latent Base intent OFF', () => {
-  const { home, discoveryRoot, parkingRoot, configDir } = setup();
+  const { home, runtime, discoveryRoot, parkingRoot, configDir } = setup();
+  fs.mkdirSync(parkingRoot, { recursive: true });
+  fs.renameSync(path.join(discoveryRoot, 'one'), path.join(parkingRoot, 'one'));
+  scanGlobalInventory(home, [runtime]);
   createPreset(home, 'tools', ['skill:one']);
   applyPresetReconcile(home, activatePreset(home, 'tools', ['shared']));
-
-  // Base intent OFF while claim kept it ON
-  const stateFile = path.join(configDir, 'state.json');
-  const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-  state.baseIntent = { 'global:shared\0one': 'off' };
-  fs.writeFileSync(stateFile, JSON.stringify(state));
   assert.ok(fs.existsSync(path.join(discoveryRoot, 'one', 'SKILL.md')));
 
   const plan = deactivatePreset(home, 'tools', ['shared']);
   applyPresetReconcile(home, plan);
 
   assert.ok(fs.existsSync(path.join(parkingRoot, 'one', 'SKILL.md')));
-  const updated = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  const updated = JSON.parse(fs.readFileSync(path.join(configDir, 'state.json'), 'utf8'));
+  assert.equal(updated.baseIntent['global:shared\0one'], 'off');
   assert.equal(updated.presetActivations.tools, undefined);
   assert.equal(updated.claims['global:shared\0one'], undefined);
   assert.equal(updated.lastClaims.tools, undefined);
