@@ -1159,7 +1159,8 @@ export function deletePreset(
   if (activations[name]?.length) {
     const plan = deactivatePreset(home, name, activations[name]);
     applyPresetReconcile(home, plan);
-  } else if (options.projectPath) {
+  }
+  if (options.projectPath) {
     const projectState = readStateFile(
       path.join(path.resolve(options.projectPath), '.skillspub', 'state.json'),
     );

@@ -143,6 +143,26 @@ test('delete active Preset deactivates, reconciles, then removes definition', ()
   assert.equal(updated.presetActivations?.tools, undefined);
 });
 
+test('project delete removes Project claims even with a Global activation', () => {
+  const { home, configDir } = setup();
+  const project = path.join(configDir, 'proj');
+  fs.mkdirSync(path.join(project, '.agents', 'skills'), { recursive: true });
+  createPreset(home, 'tools', ['skill:one']);
+  applyPresetReconcile(home, activatePreset(home, 'tools', ['shared']));
+  applyPresetReconcile(home, activatePreset(home, 'tools', ['shared'], { projectPath: project }), {
+    projectPath: project,
+  });
+
+  deletePreset(home, 'tools', { yes: true, projectPath: project });
+
+  const projectState = JSON.parse(
+    fs.readFileSync(path.join(project, '.skillspub', 'state.json'), 'utf8'),
+  );
+  assert.equal(listPresets(home).length, 0);
+  assert.equal(projectState.presetActivations?.tools, undefined);
+  assert.equal(projectState.claims?.[`project:${fs.realpathSync(project)}:shared\0one`], undefined);
+});
+
 test('project activate stores claims in project state only', () => {
   const { home, runtime, configDir, discoveryRoot } = setup();
   const project = path.join(configDir, 'proj');
