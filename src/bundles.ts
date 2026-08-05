@@ -5,6 +5,7 @@ import {
   normalizeSlotName,
   readStateFile,
   scanGlobalInventory,
+  scanProjectInventory,
   writeStateFile,
   type Activation,
   type InventoryResource,
@@ -17,11 +18,32 @@ interface ResourceMetadata {
   name: string;
 }
 
+interface PresetDefinition {
+  selectors: string[];
+}
+
 interface CatalogState extends Record<string, unknown> {
   bundles?: Record<string, string[]>;
+  presets?: Record<string, PresetDefinition>;
   runtimeInventory?: {
     resources?: Record<string, ResourceMetadata>;
   };
+}
+
+export interface PresetScope {
+  projectPath?: string;
+}
+
+export interface PresetSelector {
+  selector: string;
+}
+
+export interface PresetReconcilePlan extends ActivationPlan {
+  stateFile: string;
+  claims: Record<string, string[]>;
+  lastClaims: Record<string, string[]>;
+  presetActivations: Record<string, string[]>;
+  baseIntentDefaults: Record<string, Activation>;
 }
 
 export interface BundleMember {
@@ -249,6 +271,97 @@ export function tagsForResource(home: Home, selector: string): ResourceTags {
     tags: tags[id] ?? [],
     stale: resources(state)[id] === undefined,
   };
+}
+
+function readPresets(state: CatalogState): Record<string, PresetDefinition> {
+  const value = state.presets ?? {};
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('invalid state presets');
+  for (const preset of Object.values(value)) {
+    if (!preset || typeof preset !== 'object' || Array.isArray(preset) ||
+      !Array.isArray(preset.selectors) ||
+      preset.selectors.some((selector) => typeof selector !== 'string'))
+      throw new Error('invalid state presets');
+  }
+  return value as Record<string, PresetDefinition>;
+}
+
+function assertPresetName(name: string): void {
+  if (!name) throw new Error('preset name must be non-empty');
+}
+
+function normalizePresetSelector(selector: string, state: CatalogState): string {
+  if (selector.startsWith('bundle:') || selector.startsWith('tag:')) return selector;
+  if (selector.startsWith('skill:') || !selector.includes(':'))
+    return `skill:${resourceId(selector, state)}`;
+  throw new Error(`invalid Preset selector: ${selector}`);
+}
+
+export function listPresets(home: Home): Array<{ name: string; selectors: number }> {
+  return Object.entries(readPresets(readState(home)))
+    .map(([name, preset]) => ({ name, selectors: preset.selectors.length }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function showPreset(home: Home, name: string): PresetSelector[] {
+  const preset = readPresets(readState(home))[name];
+  if (!preset) throw new Error(`unknown preset: ${name}`);
+  return preset.selectors.map((selector) => ({ selector }));
+}
+
+export function createPreset(home: Home, name: string, selectors: string[]): number {
+  assertPresetName(name);
+  const state = readState(home);
+  const presets = readPresets(state);
+  if (presets[name]) throw new Error(`preset already exists: ${name}`);
+  const normalized = [...new Set(selectors.map((selector) =>
+    normalizePresetSelector(selector, state)))].sort((a, b) => a.localeCompare(b));
+  state.presets = { ...presets, [name]: { selectors: normalized } };
+  writeState(home, state);
+  return normalized.length;
+}
+
+export function addPresetSelectors(home: Home, name: string, selectors: string[]): number {
+  assertPresetName(name);
+  if (selectors.length === 0) throw new Error('preset add requires at least one selector');
+  const state = readState(home);
+  const presets = readPresets(state);
+  const current = presets[name];
+  if (!current) throw new Error(`unknown preset: ${name}`);
+  const added = selectors.map((selector) => normalizePresetSelector(selector, state));
+  const next = [...new Set([...current.selectors, ...added])].sort((a, b) => a.localeCompare(b));
+  state.presets = { ...presets, [name]: { selectors: next } };
+  writeState(home, state);
+  return next.length - current.selectors.length;
+}
+
+export function removePresetSelectors(
+  home: Home,
+  name: string,
+  selectors?: string[],
+): number | undefined {
+  assertPresetName(name);
+  const state = readState(home);
+  const presets = readPresets(state);
+  const current = presets[name];
+  if (!current) throw new Error(`unknown preset: ${name}`);
+  if (!selectors || selectors.length === 0) {
+    const { [name]: _, ...remaining } = presets;
+    state.presets = remaining;
+    writeState(home, state);
+    return undefined;
+  }
+  const removed = new Set(selectors.map((selector) => {
+    try {
+      return normalizePresetSelector(selector, state);
+    } catch {
+      return selector;
+    }
+  }));
+  const next = current.selectors.filter((selector) => !removed.has(selector));
+  state.presets = { ...presets, [name]: { selectors: next } };
+  writeState(home, state);
+  return current.selectors.length - next.length;
 }
 
 export function expandSelector(
@@ -610,6 +723,19 @@ function preserveMovedResourceReferences(home: Home, previous: string, moved: st
         .sort((a, b) => a.localeCompare(b)),
     };
   }
+  const presets = readPresets(state);
+  const previousSelector = `skill:${previous}`;
+  const movedSelector = `skill:${moved}`;
+  state.presets = Object.fromEntries(
+    Object.entries(presets).map(([name, preset]) => [
+      name,
+      {
+        selectors: [...new Set(preset.selectors.map((selector) =>
+          selector === previousSelector ? movedSelector : selector))]
+          .sort((a, b) => a.localeCompare(b)),
+      },
+    ]),
+  );
   writeState(home, state);
 }
 
@@ -660,4 +786,428 @@ export function applyActivationPlan(home: Home, plan: ActivationPlan): void {
   const { movedLinks, movedLocals } = moveRelationships(home, plan);
   createMissingLinks(plan, movedLocals);
   retargetMovedLinks(plan, movedLinks, movedLocals);
+}
+
+function claimId(preset: string): string {
+  return `preset:${preset}`;
+}
+
+function readStringListRecord(value: unknown, field: string): Record<string, string[]> {
+  const record = value ?? {};
+  if (!record || typeof record !== 'object' || Array.isArray(record) ||
+    Object.values(record).some((items) =>
+      !Array.isArray(items) || items.some((item) => typeof item !== 'string')))
+    throw new Error(`invalid state ${field}`);
+  return record as Record<string, string[]>;
+}
+
+function readPresetActivations(state: Record<string, unknown>): Record<string, string[]> {
+  const value = state.presetActivations;
+  if (value === undefined) return {};
+  if (Array.isArray(value)) {
+    if (value.some((item) => typeof item !== 'string'))
+      throw new Error('invalid state presetActivations');
+    return Object.fromEntries(value.map((name) => [name, []] as const));
+  }
+  return readStringListRecord(value, 'presetActivations');
+}
+
+function scopeScan(home: Home, scope: PresetScope = {}): {
+  report: InventoryScanReport;
+  stateFile: string;
+  catalogState: CatalogState;
+  policyState: Record<string, unknown>;
+} {
+  if (scope.projectPath) {
+    const report = scanProjectInventory(home, scope.projectPath, undefined, { persist: false });
+    return {
+      report,
+      stateFile: report.stateFile,
+      catalogState: readState(home),
+      policyState: readStateFile(report.stateFile),
+    };
+  }
+  const report = scanGlobalInventory(home, undefined, { persist: false });
+  const stateFile = statePath(home);
+  const catalogState = readStateFile(stateFile) as CatalogState;
+  return { report, stateFile, catalogState, policyState: catalogState };
+}
+
+function resolveRuntimeKeys(
+  report: InventoryScanReport,
+  runtimeNames: string[],
+): ScannedRuntime[] {
+  if (runtimeNames.length === 0) throw new Error('at least one Runtime is required');
+  return runtimeNames.map((name) => {
+    const matches = report.runtimes.filter((runtime) => {
+      if (runtime.key !== name && runtime.id !== name) return false;
+      if (report.scope === 'project') return runtime.scope === 'project';
+      return runtime.scope === 'global';
+    });
+    if (matches.length !== 1) throw new Error(`unknown Runtime: ${name}`);
+    return matches[0];
+  });
+}
+
+function resourceSlots(
+  resource: InventoryResource,
+  runtime: ScannedRuntime,
+): string[] {
+  const existing = [...new Set(resource.relationships.flatMap((relationship) =>
+    relationship.runtimeId === runtime.id ? [relationship.slot] : []))];
+  return existing.length > 0 ? existing : [normalizeSlotName(resource.name)];
+}
+
+function expandPresetClaims(
+  home: Home,
+  report: InventoryScanReport,
+  catalogState: CatalogState,
+  activations: Record<string, string[]>,
+  previousLastClaims: Record<string, string[]>,
+): {
+  claims: Record<string, string[]>;
+  lastClaims: Record<string, string[]>;
+  resourcesBySlot: Map<string, string>;
+  staleResourceIds: string[];
+} {
+  const presets = readPresets(catalogState);
+  const claims = new Map<string, Set<string>>();
+  const lastClaims: Record<string, string[]> = {};
+  const resourcesBySlot = new Map<string, string>();
+  const staleResourceIds = new Set<string>();
+  const resourceById = new Map(report.resources.map((resource) => [resource.id, resource]));
+
+  for (const [preset, runtimeKeys] of Object.entries(activations)) {
+    const definition = presets[preset];
+    if (!definition) {
+      if (previousLastClaims[preset]) lastClaims[preset] = [...previousLastClaims[preset]];
+      continue;
+    }
+    const runtimes = runtimeKeys.length > 0
+      ? resolveRuntimeKeys(report, runtimeKeys)
+      : report.runtimes.filter((runtime) =>
+        report.scope === 'project' ? runtime.scope === 'project' : runtime.scope === 'global');
+    const slots = new Set<string>();
+    for (const selector of definition.selectors) {
+      const expanded = expandSelector(home, selector, report);
+      for (const id of expanded.staleResourceIds) staleResourceIds.add(id);
+      for (const resourceId of expanded.resourceIds) {
+        const resource = resourceById.get(resourceId);
+        if (!resource) {
+          staleResourceIds.add(resourceId);
+          continue;
+        }
+        for (const runtime of runtimes) {
+          for (const slot of resourceSlots(resource, runtime)) {
+            const slotId = `${runtime.id}\0${slot}`;
+            const set = claims.get(slotId) ?? new Set<string>();
+            set.add(claimId(preset));
+            claims.set(slotId, set);
+            resourcesBySlot.set(slotId, resourceId);
+            slots.add(slotId);
+          }
+        }
+      }
+    }
+    lastClaims[preset] = [...slots].sort((a, b) => a.localeCompare(b));
+  }
+
+  return {
+    claims: Object.fromEntries(
+      [...claims].map(([slotId, ids]) => [
+        slotId,
+        [...ids].sort((a, b) => a.localeCompare(b)),
+      ]),
+    ),
+    lastClaims,
+    resourcesBySlot,
+    staleResourceIds: [...staleResourceIds],
+  };
+}
+
+function frozenClaimSlots(lastClaims: Record<string, string[]>): Set<string> {
+  return new Set(Object.values(lastClaims).flat());
+}
+
+function buildReconcileTargets(
+  report: InventoryScanReport,
+  claims: Record<string, string[]>,
+  lastClaims: Record<string, string[]>,
+  baseIntent: Record<string, Activation>,
+  resourcesBySlot: Map<string, string>,
+  previousClaims: Record<string, string[]>,
+): { targets: ActivationTarget[]; baseIntentDefaults: Record<string, Activation> } {
+  const frozen = frozenClaimSlots(lastClaims);
+  const slotIds = new Set([
+    ...Object.keys(claims),
+    ...Object.keys(previousClaims),
+    ...frozen,
+  ]);
+  const targets: ActivationTarget[] = [];
+  const baseIntentDefaults: Record<string, Activation> = {};
+  const resourceById = new Map(report.resources.map((resource) => [resource.id, resource]));
+
+  for (const slotId of slotIds) {
+    const separator = slotId.indexOf('\0');
+    if (separator < 0) continue;
+    const runtimeId = slotId.slice(0, separator);
+    const slot = slotId.slice(separator + 1);
+    const runtime = report.runtimes.find((candidate) => candidate.id === runtimeId);
+    if (!runtime) continue;
+    const claimed = (claims[slotId]?.length ?? 0) > 0 || frozen.has(slotId);
+    const intent = baseIntent[slotId];
+    // no claim and no base intent: leave Actual alone unless we previously claimed it
+    if (!claimed && intent === undefined && !previousClaims[slotId]?.length) continue;
+
+    const relationships = report.slots.find((candidate) =>
+      candidate.runtimeId === runtimeId && candidate.name === slot)?.relationships ?? [];
+    if (relationships.length > 1) throw slotConflict(slotId, relationships);
+
+    const desired: Activation = claimed
+      ? 'on'
+      : (intent ?? relationships[0]?.activation ?? 'off');
+
+    const resourceId = resourcesBySlot.get(slotId) ?? relationships[0]?.resourceId;
+    if (!resourceId) continue;
+    const resource = resourceById.get(resourceId);
+    const relationship = relationships.find((candidate) => candidate.resourceId === resourceId)
+      ?? relationships[0];
+    if (relationship && relationships.length === 1 && relationship.resourceId &&
+      relationship.resourceId !== resourceId && desired === 'on')
+      throw slotConflict(slotId, relationships);
+
+    if (!relationship) {
+      if (desired === 'off') continue;
+      baseIntentDefaults[slotId] = 'off';
+      const destination = path.join(runtime.discoveryRoot, slot);
+      preflightTarget(undefined, 'missing', desired, destination);
+      targets.push({
+        slotId,
+        runtimeId,
+        runtimeKey: runtime.key,
+        slot,
+        resourceId: resource?.id ?? resourceId,
+        from: 'missing',
+        intent: intent ?? 'off',
+        to: desired,
+        destination,
+      });
+      continue;
+    }
+
+    const from = relationship.activation;
+    if (from === desired) continue;
+
+    const destination = activationDestination({
+      relationship,
+      from,
+      to: desired,
+      runtime,
+      slotName: slot,
+    });
+    preflightTarget(relationship, from, desired, destination);
+    targets.push({
+      slotId,
+      runtimeId,
+      runtimeKey: runtime.key,
+      slot,
+      resourceId: resource?.id ?? resourceId,
+      from,
+      intent: intent ?? desired,
+      to: desired,
+      relationship,
+      destination,
+    });
+  }
+
+  preflightDependentLinks(report, targets);
+  return { targets, baseIntentDefaults };
+}
+
+function planFromActivations(
+  home: Home,
+  activations: Record<string, string[]>,
+  scope: PresetScope = {},
+): PresetReconcilePlan {
+  const { report, stateFile, catalogState, policyState } = scopeScan(home, scope);
+  const previousClaims = readStringListRecord(policyState.claims, 'claims');
+  const previousLastClaims = readStringListRecord(policyState.lastClaims, 'lastClaims');
+  const baseIntent = readBaseIntent(policyState as CatalogState);
+  const expanded = expandPresetClaims(
+    home, report, catalogState, activations, previousLastClaims,
+  );
+  const { targets, baseIntentDefaults } = buildReconcileTargets(
+    report,
+    expanded.claims,
+    expanded.lastClaims,
+    baseIntent,
+    expanded.resourcesBySlot,
+    previousClaims,
+  );
+  return {
+    report,
+    targets,
+    staleResourceIds: expanded.staleResourceIds,
+    stateFile,
+    claims: expanded.claims,
+    lastClaims: expanded.lastClaims,
+    presetActivations: Object.fromEntries(
+      Object.entries(activations).map(([name, runtimes]) => [
+        name,
+        [...runtimes].sort((a, b) => a.localeCompare(b)),
+      ]),
+    ),
+    baseIntentDefaults,
+  };
+}
+
+export function planPresetReconcile(
+  home: Home,
+  name?: string,
+  runtimeNames?: string[],
+  scope: PresetScope = {},
+): PresetReconcilePlan {
+  const { policyState, catalogState } = scopeScan(home, scope);
+  const activations = readPresetActivations(policyState);
+  if (name) {
+    if (!readPresets(catalogState)[name] && !activations[name] &&
+      !readStringListRecord(policyState.lastClaims, 'lastClaims')[name])
+      throw new Error(`unknown preset: ${name}`);
+    if (!activations[name] && runtimeNames && runtimeNames.length > 0)
+      throw new Error(`preset is not active: ${name}`);
+  }
+  let next = { ...activations };
+  if (name && runtimeNames && runtimeNames.length > 0) {
+    // re-reconcile one preset on specific runtimes — keep activation as-is if present
+    if (!next[name]) next[name] = [...runtimeNames];
+  }
+  if (name) {
+    next = Object.fromEntries(Object.entries(next).filter(([preset]) => preset === name));
+    // still need full claims from ALL activations for correct multi-preset slots
+    next = activations;
+  }
+  return planFromActivations(home, next, scope);
+}
+
+export function activatePreset(
+  home: Home,
+  name: string,
+  runtimeNames: string[],
+  scope: PresetScope = {},
+): PresetReconcilePlan {
+  assertPresetName(name);
+  const { report, catalogState, policyState } = scopeScan(home, scope);
+  if (!readPresets(catalogState)[name]) throw new Error(`unknown preset: ${name}`);
+  resolveRuntimeKeys(report, runtimeNames);
+  const activations = readPresetActivations(policyState);
+  const current = new Set(activations[name] ?? []);
+  for (const runtime of runtimeNames) current.add(runtime);
+  return planFromActivations(home, {
+    ...activations,
+    [name]: [...current],
+  }, scope);
+}
+
+export function deactivatePreset(
+  home: Home,
+  name: string,
+  runtimeNames: string[],
+  scope: PresetScope = {},
+): PresetReconcilePlan {
+  assertPresetName(name);
+  const { report, policyState } = scopeScan(home, scope);
+  resolveRuntimeKeys(report, runtimeNames);
+  const activations = readPresetActivations(policyState);
+  if (!(name in activations) &&
+    !readStringListRecord(policyState.lastClaims, 'lastClaims')[name])
+    throw new Error(`preset is not active: ${name}`);
+  const remaining = new Set(activations[name] ?? []);
+  for (const runtime of runtimeNames) remaining.delete(runtime);
+  const next = { ...activations };
+  if (remaining.size === 0) delete next[name];
+  else next[name] = [...remaining];
+  return planFromActivations(home, next, scope);
+}
+
+export function applyPresetReconcile(
+  home: Home,
+  plan: PresetReconcilePlan,
+  _scope: PresetScope = {},
+): void {
+  const state = readStateFile(plan.stateFile);
+  const baseIntent = { ...readBaseIntent(state as CatalogState) };
+  for (const [slotId, activation] of Object.entries(plan.baseIntentDefaults))
+    if (baseIntent[slotId] === undefined) baseIntent[slotId] = activation;
+  state.baseIntent = baseIntent;
+  state.claims = plan.claims;
+  state.lastClaims = plan.lastClaims;
+  state.presetActivations = plan.presetActivations;
+  writeStateFile(plan.stateFile, state);
+
+  const { movedLinks, movedLocals } = moveRelationships(home, plan);
+  createMissingLinks(plan, movedLocals);
+  retargetMovedLinks(plan, movedLinks, movedLocals);
+}
+
+export function deletePreset(
+  home: Home,
+  name: string,
+  options: { yes?: boolean; projectPath?: string } = {},
+): void {
+  assertPresetName(name);
+  if (!options.yes) throw new Error('deleting a Preset requires --yes');
+  const state = readState(home);
+  const presets = readPresets(state);
+  if (!presets[name]) throw new Error(`unknown preset: ${name}`);
+
+  const globalPolicy = readStateFile(statePath(home));
+  const activations = readPresetActivations(globalPolicy);
+  if (activations[name]?.length) {
+    const plan = deactivatePreset(home, name, activations[name]);
+    applyPresetReconcile(home, plan);
+  } else if (options.projectPath) {
+    const projectState = readStateFile(
+      path.join(path.resolve(options.projectPath), '.skillspub', 'state.json'),
+    );
+    const projectActivations = readPresetActivations(projectState);
+    if (projectActivations[name]?.length) {
+      const plan = deactivatePreset(home, name, projectActivations[name], {
+        projectPath: options.projectPath,
+      });
+      applyPresetReconcile(home, plan, { projectPath: options.projectPath });
+    }
+  }
+
+  const latest = readState(home);
+  const { [name]: _, ...remaining } = readPresets(latest);
+  latest.presets = remaining;
+  writeState(home, latest);
+}
+
+export function assertUnlinkAllowed(home: Home, slotIdOrName: string): void {
+  const state = readStateFile(statePath(home));
+  const claims = readStringListRecord(state.claims, 'claims');
+  const lastClaims = readStringListRecord(state.lastClaims, 'lastClaims');
+  const slotIds = slotIdOrName.includes('\0')
+    ? [slotIdOrName]
+    : Object.keys(claims).filter((slotId) => slotId.endsWith(`\0${slotIdOrName}`));
+  const check = (slotId: string): void => {
+    if ((claims[slotId]?.length ?? 0) > 0)
+      throw new Error(`cannot unlink claimed Runtime Slot ${slotId.replace('\0', '/')}`);
+    for (const [preset, slots] of Object.entries(lastClaims))
+      if (slots.includes(slotId))
+        throw new Error(
+          `cannot unlink claimed Runtime Slot ${slotId.replace('\0', '/')} (${preset})`,
+        );
+  };
+  if (slotIdOrName.includes('\0')) check(slotIdOrName);
+  else {
+    for (const slotId of slotIds) check(slotId);
+    for (const [preset, slots] of Object.entries(lastClaims))
+      for (const slotId of slots)
+        if (slotId.endsWith(`\0${slotIdOrName}`))
+          throw new Error(
+            `cannot unlink claimed Runtime Slot ${slotId.replace('\0', '/')} (${preset})`,
+          );
+  }
 }

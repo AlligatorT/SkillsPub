@@ -28,19 +28,31 @@ import {
   sharedUpdate,
 } from './shared.ts';
 import {
+  activatePreset,
   addBundleMembers,
+  addPresetSelectors,
   addResourceTags,
   applyActivationPlan,
+  applyPresetReconcile,
   createBundle,
+  createPreset,
+  deactivatePreset,
+  deletePreset,
   expandSelector,
   listBundles,
+  listPresets,
   listTags,
   planActivation,
+  planPresetReconcile,
   remainingDrift,
   removeBundleMembers,
+  removePresetSelectors,
   removeResourceTags,
   showBundle,
+  showPreset,
   tagsForResource,
+  type PresetReconcilePlan,
+  type PresetScope,
 } from './bundles.ts';
 
 const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the source of truth)
@@ -50,10 +62,11 @@ const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the sour
   skillspub status <skill>             per-agent state of one skill
   skillspub bundle ls|show|create|add|rm ...
   skillspub tag add|rm|ls ...          manage global resource Tags
+  skillspub preset create|add|rm|ls|show|activate|deactivate|reconcile|delete ...
   skillspub shared find|describe|add|update|remove ...  manage the Shared Runtime via skills@1.5.21
   skillspub scan                       explicitly scan Global Runtime inventory
   skillspub doctor [--repair --yes]    diagnose; explicitly confirm safe repairs
-  skillspub project <path> scan|doctor|shared ...  operate on the exact Project Runtime roots
+  skillspub project <path> scan|doctor|shared|preset ...  operate on the exact Project Runtime roots
   skillspub runtimes                   Runtime registry (~/.config/skillspub/runtimes.json)
   skillspub agents                     legacy Agent registry view
   skillspub tui                        interactive full-screen skill browser
@@ -322,6 +335,131 @@ function cmdTag(home: ReturnType<typeof defaultHome>, args: string[]): void {
   }
 }
 
+function printPresetPlan(plan: PresetReconcilePlan): void {
+  console.log('Plan:');
+  if (plan.targets.length === 0) console.log('  no Runtime Slot changes');
+  else for (const target of plan.targets) {
+    const intent = target.intent === target.to
+      ? ''
+      : ` (Base intent ${target.intent}; claimed ${target.to})`;
+    console.log(
+      `  ${target.runtimeId}/${target.slot}\t${target.from} -> ${target.to}${intent}`,
+    );
+  }
+  if (plan.staleResourceIds.length > 0) {
+    console.log('Stale selectors:');
+    for (const id of plan.staleResourceIds) console.log(`  - skill:${id}`);
+  }
+}
+
+function runPresetPlan(
+  home: ReturnType<typeof defaultHome>,
+  plan: PresetReconcilePlan,
+  scope: PresetScope,
+): void {
+  printPresetPlan(plan);
+  try {
+    applyPresetReconcile(home, plan, scope);
+  } catch (error) {
+    let drift: string;
+    try {
+      const report = scope.projectPath
+        ? scanProjectInventory(home, scope.projectPath)
+        : scanGlobalInventory(home);
+      drift = remainingDrift(plan, report).join(', ') || 'none';
+    } catch (scanError) {
+      drift = `could not rescan: ${(scanError as Error).message}`;
+    }
+    throw new Error(`${(error as Error).message}\nRemaining drift: ${drift}`);
+  }
+  if (scope.projectPath) scanProjectInventory(home, scope.projectPath);
+  else scanGlobalInventory(home);
+}
+
+function cmdPreset(
+  home: ReturnType<typeof defaultHome>,
+  args: string[],
+  projectPath?: string,
+): void {
+  const scope: PresetScope = projectPath ? { projectPath } : {};
+  const [action, name, ...rest] = args;
+  switch (action) {
+    case 'ls': {
+      if (name) throw new Error('usage: skillspub preset ls');
+      const presets = listPresets(home);
+      if (presets.length === 0) console.log('no presets found');
+      else for (const preset of presets)
+        console.log(`${preset.name}\t${preset.selectors}`);
+      break;
+    }
+    case 'show': {
+      if (!name || rest.length > 0)
+        throw new Error('usage: skillspub preset show <name>');
+      console.log(name);
+      const selectors = showPreset(home, name);
+      if (selectors.length === 0) console.log('  no selectors');
+      else for (const item of selectors) console.log(`  ${item.selector}`);
+      break;
+    }
+    case 'create': {
+      if (!name) throw new Error('usage: skillspub preset create <name> [<selector...>]');
+      const count = createPreset(home, name, rest);
+      console.log(`created preset ${name} with ${count} selector${count === 1 ? '' : 's'}`);
+      break;
+    }
+    case 'add': {
+      if (!name || rest.length === 0)
+        throw new Error('usage: skillspub preset add <name> <selector...>');
+      const added = addPresetSelectors(home, name, rest);
+      console.log(`added ${added} selector${added === 1 ? '' : 's'} to ${name}`);
+      break;
+    }
+    case 'rm': {
+      if (!name) throw new Error('usage: skillspub preset rm <name> [<selector...>]');
+      const removed = removePresetSelectors(home, name, rest);
+      console.log(removed === undefined
+        ? `removed preset ${name}`
+        : `removed ${removed} selector${removed === 1 ? '' : 's'} from ${name}`);
+      break;
+    }
+    case 'activate': {
+      if (!name || rest.length === 0)
+        throw new Error('usage: skillspub preset activate <name> <runtime...>');
+      runPresetPlan(home, activatePreset(home, name, rest, scope), scope);
+      break;
+    }
+    case 'deactivate': {
+      if (!name || rest.length === 0)
+        throw new Error('usage: skillspub preset deactivate <name> <runtime...>');
+      runPresetPlan(home, deactivatePreset(home, name, rest, scope), scope);
+      break;
+    }
+    case 'reconcile': {
+      const presetName = name;
+      const runtimes = rest;
+      runPresetPlan(
+        home,
+        planPresetReconcile(home, presetName, runtimes.length > 0 ? runtimes : undefined, scope),
+        scope,
+      );
+      break;
+    }
+    case 'delete': {
+      if (!name) throw new Error('usage: skillspub preset delete <name> [--yes]');
+      const yes = rest.includes('--yes');
+      if (rest.some((arg) => arg !== '--yes'))
+        throw new Error('usage: skillspub preset delete <name> [--yes]');
+      deletePreset(home, name, { yes, projectPath });
+      console.log(`deleted preset ${name}`);
+      break;
+    }
+    default:
+      throw new Error(
+        'usage: skillspub preset ls|show|create|add|rm|activate|deactivate|reconcile|delete ...',
+      );
+  }
+}
+
 function cmdBundle(home: ReturnType<typeof defaultHome>, args: string[]): void {
   const [action, name, ...selectors] = args;
   switch (action) {
@@ -548,6 +686,9 @@ async function main(
       case 'tag':
         cmdTag(home, rest);
         break;
+      case 'preset':
+        cmdPreset(home, rest);
+        break;
       case 'shared':
         cmdShared(home, rest);
         break;
@@ -560,12 +701,13 @@ async function main(
         break;
       case 'project': {
         const [projectPath, projectCommand, ...projectArgs] = rest;
-        if (!projectPath) throw new Error('usage: skillspub project <path> scan|doctor|shared');
+        if (!projectPath) throw new Error('usage: skillspub project <path> scan|doctor|shared|preset');
         if (projectCommand === 'scan' && projectArgs.length === 0)
           printScan(scanProjectInventory(home, projectPath));
         else if (projectCommand === 'doctor') cmdDoctor(home, projectArgs, projectPath);
         else if (projectCommand === 'shared') cmdShared(home, projectArgs, projectPath);
-        else throw new Error('usage: skillspub project <path> scan|doctor|shared');
+        else if (projectCommand === 'preset') cmdPreset(home, projectArgs, projectPath);
+        else throw new Error('usage: skillspub project <path> scan|doctor|shared|preset');
         break;
       }
       case 'runtimes':

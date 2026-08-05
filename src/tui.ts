@@ -20,6 +20,7 @@ import {
   type SkillRelationship,
   type TuiSnapshot,
 } from './core.ts';
+import { assertUnlinkAllowed } from './bundles.ts';
 
 /** Below this width the passive summary column is hidden. */
 const WIDE_MIN = 80;
@@ -469,8 +470,10 @@ export function App({home}: {home: Home}): ReactNode {
         try {
           if (confirmation.kind === 'link')
             linkSkill(confirmation.agent, confirmation.row.name, confirmation.source);
-          else if (confirmation.info)
+          else if (confirmation.info) {
+            assertUnlinkAllowed(home, path.basename(confirmation.info.path));
             unlinkRelationship(confirmation.agent, confirmation.info);
+          }
           refresh(confirmation.row);
           setFeedback(`${confirmation.kind === 'link' ? 'Linked' : 'Unlinked'} ${confirmation.row.name} @ ${confirmation.agent.name}`);
         } catch (err) {

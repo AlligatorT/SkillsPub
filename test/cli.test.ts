@@ -500,6 +500,48 @@ test('Tag commands use resource identity for filtering and planned Runtime mutat
   assert.match(run(['tag', 'rm', `skill:${selected}`]).stdout, /removed 1 tag/);
 });
 
+test('preset activate/deactivate/reconcile update claims and Desired state', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-preset-'));
+  const discoveryRoot = path.join(configDir, 'shared', 'skills');
+  const parkingRoot = path.join(configDir, 'shared', '.skillspub-off', 'skills');
+  fs.mkdirSync(path.join(discoveryRoot, 'one'), { recursive: true });
+  fs.writeFileSync(path.join(discoveryRoot, 'one', 'SKILL.md'), '# one');
+  fs.writeFileSync(path.join(configDir, 'runtimes.json'), JSON.stringify({
+    version: 1,
+    runtimes: [{
+      key: 'shared',
+      kind: 'shared',
+      discoveryRoot,
+      parkingRoot,
+      projectPath: '.agents/skills',
+    }],
+  }));
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+  assert.equal(run(['scan']).status, 0);
+  assert.equal(run(['preset', 'create', 'tools', 'skill:one']).status, 0);
+
+  const activated = run(['preset', 'activate', 'tools', 'shared']);
+  assert.equal(activated.status, 0, activated.stderr);
+  assert.match(activated.stdout, /Plan:/);
+  let state = JSON.parse(fs.readFileSync(path.join(configDir, 'state.json'), 'utf8'));
+  assert.deepEqual(state.claims['global:shared\0one'], ['preset:tools']);
+  assert.ok(state.presetActivations.tools.includes('shared'));
+
+  state.baseIntent = { 'global:shared\0one': 'off' };
+  fs.writeFileSync(path.join(configDir, 'state.json'), JSON.stringify(state));
+  const deactivated = run(['preset', 'deactivate', 'tools', 'shared']);
+  assert.equal(deactivated.status, 0, deactivated.stderr);
+  assert.ok(fs.existsSync(path.join(parkingRoot, 'one', 'SKILL.md')));
+  state = JSON.parse(fs.readFileSync(path.join(configDir, 'state.json'), 'utf8'));
+  assert.equal(state.claims['global:shared\0one'], undefined);
+
+  assert.equal(run(['preset', 'delete', 'tools', '--yes']).status, 0);
+  assert.match(run(['preset', 'ls']).stdout, /no presets found/);
+});
+
 test('doctor is read-only by default and repairs only with explicit confirmation', () => {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-doctor-'));
   const discoveryRoot = path.join(configDir, 'shared', 'skills');
