@@ -371,6 +371,84 @@ export function sharedDescribe(home: Home, source: string, projectPath?: string)
   if (result.status !== 0) throw new Error(`skills description lookup failed (exit ${result.status})`);
 }
 
+/** One guarded Shared Runtime operation: snapshot Desired state, make Slots visible,
+ *  run the skills CLI under the operation lock, restore Desired state, report Drift.
+ *  add/update/remove below are only select/args/check/after over this template. */
+interface SharedOp {
+  name: 'add' | 'update' | 'remove';
+  select(target: Target): ManagedSkill[];
+  args(selected: ManagedSkill[], globalFlag: string[]): string[];
+  /** Slots reported by finalActual when the selection is empty (fresh add). */
+  slots?(selected: ManagedSkill[]): string[];
+  /** restoreDesired only when something failed (remove: success means the Slots are gone). */
+  restoreOnFailureOnly?: boolean;
+  /** Ops-specific post-run check; throws on failure. May rescan and push into drift.
+   *  Runs after the finalActual rescan for always-restore ops (report is fresh),
+   *  before the conditional restore for restoreOnFailureOnly ops (must mid-scan).
+   *  `outcome` carries the run result so check errors can mirror the generic reason. */
+  check?(target: Target, selected: ManagedSkill[], drift: string[], outcome: {
+    result?: ReturnType<typeof runSkills>;
+    failure?: Error;
+    actual?: string;
+  }): void;
+  /** Runs only on success; a throw here propagates unwrapped. */
+  after?(target: Target, selected: ManagedSkill[], actual: string): void;
+}
+
+function guardedSkillsOp(
+  home: Home,
+  projectPath: string | undefined,
+  op: SharedOp,
+): SharedCommandResult {
+  const initial = resolveTarget(home, projectPath);
+  return withOperationLock(initial, () => {
+    const target = resolveTarget(home, projectPath);
+    validatePolicyState(target);
+    const selected = op.select(target);
+    const desired = desiredFor(target, selected);
+    const args = op.args(selected, projectPath ? [] : ['--global']);
+    let result: ReturnType<typeof runSkills> | undefined;
+    let failure: Error | undefined;
+    let drift: string[] = [];
+    const restore = (): void => {
+      if (desired.size > 0) drift = restoreDesired(target, desired);
+    };
+    try {
+      ensureVisible(target, selected);
+      result = runSkills(args, target.cwd);
+    } catch (error) {
+      failure = error as Error;
+    }
+    const runFailed = Boolean(failure || !result || result.status !== 0);
+    const slots = op.slots?.(selected) ?? selected.map(({ slot }) => slot);
+    let checkError: Error | undefined;
+    let actual: string;
+    if (op.restoreOnFailureOnly) {
+      try {
+        op.check?.(target, selected, drift, { result, failure });
+      } catch (error) {
+        checkError = error as Error;
+      }
+      if (runFailed || checkError) restore();
+      actual = finalActual(target, slots, drift);
+    } else {
+      restore();
+      actual = finalActual(target, slots, drift);
+      try {
+        op.check?.(target, selected, drift, { result, failure, actual });
+      } catch (error) {
+        checkError = error as Error;
+      }
+    }
+    if (runFailed || checkError) {
+      const reason = failure?.message ?? checkError?.message ?? `exit ${result?.status ?? 1}`;
+      throw new Error(`skills ${op.name} failed (${reason})\nActual: ${actual}\nRemaining drift: ${drift.join(', ') || 'none'}`);
+    }
+    op.after?.(target, selected, actual);
+    return { actual, drift };
+  });
+}
+
 export function sharedAdd(
   home: Home,
   source: string,
@@ -380,59 +458,47 @@ export function sharedAdd(
 ): SharedCommandResult {
   validateSource(source);
   const slot = validateName(name);
-  const initial = resolveTarget(home, projectPath);
-  return withOperationLock(initial, () => {
-    const target = resolveTarget(home, projectPath);
-    validatePolicyState(target);
-    const existing = relationship(target, slot);
-    const slotInfo = target.report.slots.find((item) =>
-      item.runtimeId === target.runtime.id && item.name === slot);
-    if (existing) {
-      const current = provenanceLabel(slotInfo?.provenance);
-      if (!sameSource(source, name, slotInfo?.provenance)) {
-        console.log(`Replace: ${current} -> ${source}`);
-        if (!replace) throw new Error('source replacement requires --replace');
+  return guardedSkillsOp(home, projectPath, {
+    name: 'add',
+    select(target) {
+      const existing = relationship(target, slot);
+      const slotInfo = target.report.slots.find((item) =>
+        item.runtimeId === target.runtime.id && item.name === slot);
+      if (existing) {
+        const current = provenanceLabel(slotInfo?.provenance);
+        if (!sameSource(source, name, slotInfo?.provenance)) {
+          console.log(`Replace: ${current} -> ${source}`);
+          if (!replace) throw new Error('source replacement requires --replace');
+        }
+      } else {
+        for (const root of [target.runtime.discoveryRoot, target.runtime.parkingRoot]) {
+          const candidate = path.join(root, slot);
+          if (fs.lstatSync(candidate, { throwIfNoEntry: false }))
+            throw new Error(`path conflict: ${candidate}`);
+        }
       }
-    } else {
-      for (const root of [target.runtime.discoveryRoot, target.runtime.parkingRoot]) {
-        const candidate = path.join(root, slot);
-        if (fs.lstatSync(candidate, { throwIfNoEntry: false }))
-          throw new Error(`path conflict: ${candidate}`);
-      }
-    }
-
-    const selected = existing
-      ? [{ name: existing.name, slot, provenance: slotInfo?.provenance ?? {} }]
-      : [];
-    const desired = desiredFor(target, selected);
-    const args = ['add', source, '--skill', name, '--agent', 'codex'];
-    if (!projectPath) args.push('--global');
-    args.push('--copy');
-    let result: ReturnType<typeof runSkills> | undefined;
-    let failure: Error | undefined;
-    let drift: string[] = [];
-    try {
-      ensureVisible(target, selected);
-      result = runSkills(args, target.cwd);
-    } catch (error) {
-      failure = error as Error;
-    } finally {
-      if (desired.size > 0) drift = restoreDesired(target, desired);
-    }
-    const actual = finalActual(target, [slot], drift);
-    const installed = actual !== 'unavailable' && target.report.relationships.some((item) =>
-      item.runtimeId === target.runtime.id && item.slot === slot);
-    if (failure || !result || result.status !== 0 || !installed) {
-      if (!existing && installed) drift.push(`${target.runtime.id}/${slot}: expected missing`);
-      const reason = failure?.message ?? `exit ${result?.status ?? 1}`;
-      throw new Error(`skills add failed (${reason})\nActual: ${actual}\nRemaining drift: ${drift.join(', ') || 'none'}`);
-    }
-    const managed = readManagedSkillLock(target.lockFile)
-      .find((skill) => skill.slot === slot);
-    if (managed && !sameSource(source, name, managed.provenance))
-      throw new Error(`skills add failed (installer lock source changed)\nActual: ${actual}\nRemaining drift: ${target.runtime.id}/${slot}: unverified provenance`);
-    if (!existing) updateBaseIntent(target, [slot], 'on');
-    return { actual, drift };
+      return existing
+        ? [{ name: existing.name, slot, provenance: slotInfo?.provenance ?? {} }]
+        : [];
+    },
+    args: (_selected, globalFlag) =>
+      ['add', source, '--skill', name, '--agent', 'codex', ...globalFlag, '--copy'],
+    slots: () => [slot],
+    check(target, selected, drift, { result, failure, actual }) {
+      const installed = actual !== 'unavailable' && target.report.relationships.some((item) =>
+        item.runtimeId === target.runtime.id && item.slot === slot);
+      const runFailed = failure || !result || result.status !== 0;
+      if (runFailed && selected.length === 0 && installed)
+        drift.push(`${target.runtime.id}/${slot}: expected missing`);
+      if (!runFailed && !installed) throw new Error(`exit ${result?.status ?? 1}`);
+    },
+    after(target, selected, actual) {
+      const managed = readManagedSkillLock(target.lockFile)
+        .find((skill) => skill.slot === slot);
+      if (managed && !sameSource(source, name, managed.provenance))
+        throw new Error(`skills add failed (installer lock source changed)\nActual: ${actual}\nRemaining drift: ${target.runtime.id}/${slot}: unverified provenance`);
+      if (selected.length === 0) updateBaseIntent(target, [slot], 'on');
+    },
   });
 }
 
@@ -441,31 +507,11 @@ export function sharedUpdate(
   names: string[],
   projectPath?: string,
 ): SharedCommandResult {
-  const initial = resolveTarget(home, projectPath);
-  return withOperationLock(initial, () => {
-    const target = resolveTarget(home, projectPath);
-    validatePolicyState(target);
-    const selected = managedSelection(target, names);
-    const desired = desiredFor(target, selected);
-    const args = ['update', ...selected.map(({ name }) => name)];
-    if (!projectPath) args.push('--global');
-    let result: ReturnType<typeof runSkills> | undefined;
-    let failure: Error | undefined;
-    let drift: string[] = [];
-    try {
-      ensureVisible(target, selected);
-      result = runSkills(args, target.cwd);
-    } catch (error) {
-      failure = error as Error;
-    } finally {
-      drift = restoreDesired(target, desired);
-    }
-    const actual = finalActual(target, selected.map(({ slot }) => slot), drift);
-    if (failure || !result || result.status !== 0) {
-      const reason = failure?.message ?? `exit ${result?.status ?? 1}`;
-      throw new Error(`skills update failed (${reason})\nActual: ${actual}\nRemaining drift: ${drift.join(', ') || 'none'}`);
-    }
-    return { actual, drift };
+  return guardedSkillsOp(home, projectPath, {
+    name: 'update',
+    select: (target) => managedSelection(target, names),
+    args: (selected, globalFlag) =>
+      ['update', ...selected.map(({ name }) => name), ...globalFlag],
   });
 }
 
@@ -475,45 +521,30 @@ export function sharedRemove(
   projectPath?: string,
 ): SharedCommandResult {
   if (names.length === 0) throw new Error('usage: skillspub shared remove <managed-name...>');
-  const initial = resolveTarget(home, projectPath);
-  return withOperationLock(initial, () => {
-    const target = resolveTarget(home, projectPath);
-    validatePolicyState(target);
-    const selected = managedSelection(target, names);
-    const state = readStateFile(target.report.stateFile);
-    const claims = claimedSlots(state);
-    for (const skill of selected) {
-      const id = `${target.runtime.id}\0${skill.slot}`;
-      if (claims.has(id)) throw new Error(`cannot remove claimed Runtime Slot ${target.runtime.id}/${skill.slot}`);
-    }
-    const desired = desiredFor(target, selected);
-    const args = ['remove', ...selected.map(({ name }) => name), '--agent', 'codex'];
-    if (!projectPath) args.push('--global');
-    let result: ReturnType<typeof runSkills> | undefined;
-    let failure: Error | undefined;
-    try {
-      ensureVisible(target, selected);
-      result = runSkills(args, target.cwd);
-    } catch (error) {
-      failure = error as Error;
-    }
-    let remaining = selected;
-    try {
+  return guardedSkillsOp(home, projectPath, {
+    name: 'remove',
+    restoreOnFailureOnly: true,
+    select(target) {
+      const selected = managedSelection(target, names);
+      const state = readStateFile(target.report.stateFile);
+      const claims = claimedSlots(state);
+      for (const skill of selected) {
+        const id = `${target.runtime.id}\0${skill.slot}`;
+        if (claims.has(id)) throw new Error(`cannot remove claimed Runtime Slot ${target.runtime.id}/${skill.slot}`);
+      }
+      return selected;
+    },
+    args: (selected, globalFlag) =>
+      ['remove', ...selected.map(({ name }) => name), '--agent', 'codex', ...globalFlag],
+    check(target, selected, _drift, { result, failure }) {
       target.report = scan(home, projectPath);
-      remaining = selected.filter((skill) => target.report.relationships.some((item) =>
+      const remaining = selected.filter((skill) => target.report.relationships.some((item) =>
         item.runtimeId === target.runtime.id && item.slot === skill.slot));
-    } catch (error) {
-      failure ??= error as Error;
-    }
-    let drift: string[] = [];
-    if (failure || !result || result.status !== 0 || remaining.length > 0)
-      drift = restoreDesired(target, desired);
-    const actual = finalActual(target, selected.map(({ slot }) => slot), drift);
-    if (failure || !result || result.status !== 0 || remaining.length > 0) {
-      const reason = failure?.message ?? `exit ${result?.status ?? 1}`;
-      throw new Error(`skills remove failed (${reason})\nActual: ${actual}\nRemaining drift: ${drift.join(', ') || 'none'}`);
-    }
-    updateBaseIntent(target, selected.map(({ slot }) => slot));
-    return { actual, drift };
+      const runFailed = failure || !result || result.status !== 0;
+      if (!runFailed && remaining.length > 0) throw new Error(`exit ${result?.status ?? 1}`);
+    },
+    after(target, selected) {
+      updateBaseIntent(target, selected.map(({ slot }) => slot));
+    },
   });
 }
