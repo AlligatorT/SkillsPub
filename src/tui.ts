@@ -24,7 +24,7 @@ import {
   planLink,
   planToggle,
   planUnlink,
-} from './bundles.ts';
+} from './reconcile.ts';
 
 /** Below this width the passive summary column is hidden. */
 const WIDE_MIN = 80;

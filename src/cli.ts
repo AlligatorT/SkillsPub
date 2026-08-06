@@ -29,32 +29,34 @@ import {
   sharedUpdate,
 } from './shared.ts';
 import {
-  activatePreset,
   addBundleMembers,
   addPresetSelectors,
   addResourceTags,
-  applyActivationPlan,
-  applyPresetReconcile,
   createBundle,
   createPreset,
-  deactivatePreset,
-  deletePreset,
   expandSelector,
   listBundles,
   listPresets,
   listTags,
-  planActivation,
-  planPresetReconcile,
-  remainingDrift,
   removeBundleMembers,
   removePresetSelectors,
   removeResourceTags,
   showBundle,
   showPreset,
   tagsForResource,
+} from './catalog.ts';
+import {
+  activatePreset,
+  applyActivationPlan,
+  applyPresetReconcile,
+  deactivatePreset,
+  deletePreset,
+  planActivation,
+  planPresetReconcile,
+  remainingDrift,
   type PresetReconcilePlan,
   type PresetScope,
-} from './bundles.ts';
+} from './reconcile.ts';
 
 const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the source of truth)
 
