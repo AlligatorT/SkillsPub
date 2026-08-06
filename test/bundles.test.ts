@@ -6,14 +6,16 @@ import path from 'node:path';
 import {
   addBundleMembers,
   addResourceTags,
-  applyActivationPlan,
   createBundle,
   expandSelector,
-  planActivation,
-  remainingDrift,
   removeBundleMembers,
   removeResourceTags,
-} from '../src/bundles.ts';
+} from '../src/catalog.ts';
+import {
+  applyActivationPlan,
+  planActivation,
+  remainingDrift,
+} from '../src/reconcile.ts';
 import { scanGlobalInventory, type Runtime } from '../src/inventory.ts';
 
 function setup() {

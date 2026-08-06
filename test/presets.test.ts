@@ -5,16 +5,18 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   addPresetSelectors,
-  applyPresetReconcile,
   createPreset,
-  deactivatePreset,
-  deletePreset,
   listPresets,
-  planPresetReconcile,
   removePresetSelectors,
   showPreset,
+} from '../src/catalog.ts';
+import {
+  applyPresetReconcile,
+  deactivatePreset,
+  deletePreset,
+  planPresetReconcile,
   activatePreset,
-} from '../src/bundles.ts';
+} from '../src/reconcile.ts';
 import { scanGlobalInventory, scanProjectInventory, type Runtime } from '../src/inventory.ts';
 
 function setup() {
