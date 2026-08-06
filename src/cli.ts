@@ -2,24 +2,25 @@
 import { parseArgs } from 'node:util';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { defaultHome } from './core.ts';
 import {
-  defaultHome,
-  loadAgents,
   loadRuntimes,
-  buildInventory,
   applyDoctorRepairs,
   doctorGlobalInventory,
   doctorProjectInventory,
   scanGlobalInventory,
   scanProjectInventory,
-  setSkill,
-  loadState,
-  filterRows,
-  untagged,
   type DoctorReport,
   type InventoryScanReport,
+} from './inventory.ts';
+import {
+  filterRows,
+  projectRows,
+  readViewState,
+  untagged,
+  viewAgents,
   type Row,
-} from './core.ts';
+} from './view.ts';
 import {
   sharedAdd,
   sharedDescribe,
@@ -68,7 +69,6 @@ const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the sour
   skillspub doctor [--repair --yes]    diagnose; explicitly confirm safe repairs
   skillspub project <path> scan|doctor|shared|preset ...  operate on the exact Project Runtime roots
   skillspub runtimes                   Runtime registry (~/.config/skillspub/runtimes.json)
-  skillspub agents                     legacy Agent registry view
   skillspub tui                        interactive full-screen skill browser
 `;
 
@@ -164,16 +164,17 @@ function cmdLs(home: ReturnType<typeof defaultHome>, args: string[]): void {
     }
     return;
   }
-  const agents = loadAgents(home);
-  if (values.agent && !agents.some((a) => a.name === values.agent))
+  const report = scanGlobalInventory(home, undefined, { persist: false });
+  const agents = viewAgents(report);
+  if (values.agent && !agents.some((agent) => agent.name === values.agent))
     throw new Error(`unknown agent: ${values.agent}`);
-  const { tags } = loadState(home);
+  const { tags } = readViewState(home);
   const rows = filterRows(
-    buildInventory(home, agents).instances,
+    projectRows(report),
     { agent: values.agent, tag: values.tag },
     tags,
   );
-  const cols = values.agent ? [values.agent] : agents.map((a) => a.name);
+  const cols = values.agent ? [values.agent] : agents.map((agent) => agent.name);
   if (rows.length === 0) {
     console.log('no skills found');
     return;
@@ -200,51 +201,40 @@ function cmdOnOff(
     throw new Error(
       `usage: skillspub ${on ? 'on' : 'off'} <skill> <agent...>`,
     );
-  if (skill.startsWith('bundle:') || skill.startsWith('tag:') || skill.startsWith('skill:')) {
-    const confirmed = names.includes('--yes');
-    const runtimes = names.filter((name) => name !== '--yes');
-    const plan = planActivation(home, skill, runtimes, on ? 'on' : 'off');
-    console.log('Plan:');
-    if (plan.targets.length === 0) console.log('  no current Runtime Slots');
-    else for (const target of plan.targets) {
-      const intent = target.intent === target.to
-        ? ''
-        : ` (Base intent ${target.intent}; claimed ${target.to})`;
-      console.log(
-        `  ${target.runtimeId}/${target.slot}\t${target.from} -> ${target.to}${intent}`,
-      );
-    }
-    if (!confirmed && plan.targets.some((target) =>
-      target.from === 'missing' && target.to === 'on')) {
-      throw new Error('creating missing Relationships requires --yes');
-    }
-    try {
-      applyActivationPlan(home, plan);
-    } catch (error) {
-      let drift: string;
-      try {
-        const remaining = remainingDrift(plan, scanGlobalInventory(home));
-        drift = remaining.length > 0 ? remaining.join(', ') : 'none';
-      } catch (scanError) {
-        drift = `could not rescan: ${(scanError as Error).message}`;
-      }
-      throw new Error(`${(error as Error).message}\nRemaining drift: ${drift}`);
-    }
-    scanGlobalInventory(home);
-    return;
+  if (!skill.startsWith('bundle:') && !skill.startsWith('tag:') && !skill.startsWith('skill:')) {
+    const rows = projectRows(scanGlobalInventory(home, undefined, { persist: false }));
+    refuseAmbiguousName(rows, skill);
   }
-  const agents = loadAgents(home);
-  refuseAmbiguousName(buildInventory(home, agents).instances, skill);
-  for (const name of names) {
-    const agent = agents.find((a) => a.name === name);
-    if (!agent) throw new Error(`unknown agent: ${name}`);
-    const result = setSkill(agent, skill, on);
+  const confirmed = names.includes('--yes');
+  const runtimes = names.filter((name) => name !== '--yes');
+  const plan = planActivation(home, skill, runtimes, on ? 'on' : 'off');
+  console.log('Plan:');
+  if (plan.targets.length === 0) console.log('  no current Runtime Slots');
+  else for (const target of plan.targets) {
+    const intent = target.intent === target.to
+      ? ''
+      : ` (Base intent ${target.intent}; claimed ${target.to})`;
     console.log(
-      result === 'already'
-        ? `${skill} @ ${name}: already ${on ? 'on' : 'off'}`
-        : `${skill} @ ${name}: ${result}`,
+      `  ${target.runtimeId}/${target.slot}\t${target.from} -> ${target.to}${intent}`,
     );
   }
+  if (!confirmed && plan.targets.some((target) =>
+    target.from === 'missing' && target.to === 'on')) {
+    throw new Error('creating missing Relationships requires --yes');
+  }
+  try {
+    applyActivationPlan(home, plan);
+  } catch (error) {
+    let drift: string;
+    try {
+      const remaining = remainingDrift(plan, scanGlobalInventory(home));
+      drift = remaining.length > 0 ? remaining.join(', ') : 'none';
+    } catch (scanError) {
+      drift = `could not rescan: ${(scanError as Error).message}`;
+    }
+    throw new Error(`${(error as Error).message}\nRemaining drift: ${drift}`);
+  }
+  scanGlobalInventory(home);
 }
 
 function cmdStatus(
@@ -253,8 +243,9 @@ function cmdStatus(
 ): void {
   const [skill] = args;
   if (!skill) throw new Error('usage: skillspub status <skill>');
-  const agents = loadAgents(home);
-  const matches = matchingInstances(buildInventory(home, agents).instances, skill);
+  const report = scanGlobalInventory(home, undefined, { persist: false });
+  const agents = viewAgents(report);
+  const matches = matchingInstances(projectRows(report), skill);
   if (matches.length === 0) {
     console.error(`warning: ${skill} not found in any agent`);
     process.exitCode = 1;
@@ -277,12 +268,6 @@ function cmdStatus(
         console.log(`${agent.name}\t${CELL[info.presence]}\t${info.path}${extra}${name === skill ? '' : ` (${name})`}`);
       }
     }
-  }
-}
-
-function cmdAgents(home: ReturnType<typeof defaultHome>): void {
-  for (const a of loadAgents(home)) {
-    console.log(`${a.name}\t${a.dir}\t${fs.existsSync(a.dir) ? 'ok' : 'missing dir'}`);
   }
 }
 
@@ -574,7 +559,11 @@ function printDoctor(report: DoctorReport): void {
   console.log('Safe repair plan:');
   if (report.repairs.length === 0) console.log('  none');
   for (const repair of report.repairs) {
-    const action = repair.kind === 'retarget-link' ? 'retarget Link' : 'remove broken link';
+    const action = repair.kind === 'retarget-link'
+      ? 'retarget Link'
+      : repair.kind === 'migrate-legacy-off'
+        ? 'migrate legacy OFF'
+        : 'remove broken link';
     console.log(`  - ${action}: ${repair.path}: ${repair.from}${repair.to ? ` -> ${repair.to}` : ''}`);
   }
 }
@@ -713,9 +702,6 @@ async function main(
       case 'runtimes':
         if (rest.length > 0) throw new Error('usage: skillspub runtimes');
         cmdRuntimes(home);
-        break;
-      case 'agents':
-        cmdAgents(home);
         break;
       default:
         process.stderr.write(USAGE);

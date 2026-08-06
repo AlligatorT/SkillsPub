@@ -5,22 +5,26 @@ import {Box, Text, render, useApp, useInput, useStdout} from 'ink';
 import wrapAnsi from 'wrap-ansi';
 import {
   defaultHome,
-  linkSkill,
+  type Home,
+} from './core.ts';
+import {
   searchRows,
   skillDetail,
   sortRows,
-  toggleRelationship,
   tuiSnapshot,
-  unlinkRelationship,
   type Agent,
-  type Home,
   type Row,
   type SkillInfo,
   type SortOrder,
   type SkillRelationship,
   type TuiSnapshot,
-} from './core.ts';
-import { assertUnlinkAllowed } from './bundles.ts';
+} from './view.ts';
+import {
+  applyActivationPlan,
+  planLink,
+  planToggle,
+  planUnlink,
+} from './bundles.ts';
 
 /** Below this width the passive summary column is hidden. */
 const WIDE_MIN = 80;
@@ -38,6 +42,8 @@ interface Confirmation {
   row: Row;
   agent: Agent;
   info?: SkillInfo;
+  runtimeId: string;
+  slot: string;
   source: string;
   target: string;
 }
@@ -425,7 +431,7 @@ export function App({home}: {home: Home}): ReactNode {
     width - agentStatusWidth - (wide ? summaryWidth : 0),
   );
   const modalContent = modal
-    ? (skillDetail(home, agents, modal.row.id)?.content ?? 'SKILL.md unavailable')
+    ? (skillDetail(home, modal.row.id)?.content ?? 'SKILL.md unavailable')
     : '';
   const modalLines = modal ? detailLines(modalContent, Math.max(1, width - 8)) : [];
   const modalPage = Math.max(1, height - 6);
@@ -435,6 +441,11 @@ export function App({home}: {home: Home}): ReactNode {
   const selectedInfo = tab === 'agent'
     ? entry?.relationship.info
     : selectedRow?.agents[selectedAgent?.name ?? ''];
+  const selectedRel = tab === 'agent'
+    ? entry?.relationship
+    : selectedRow?.relationships.find((relationship) =>
+        relationship.agent === selectedAgent?.name &&
+        relationship.info.path === selectedInfo?.path);
   const actionable = focusColumn === 1 && selectedRow && selectedAgent;
   const refresh = (row?: Row) => {
     setSnapshot(tuiSnapshot(home));
@@ -468,11 +479,10 @@ export function App({home}: {home: Home}): ReactNode {
     if (confirmation) {
       if (input === 'y') {
         try {
-          if (confirmation.kind === 'link')
-            linkSkill(confirmation.agent, confirmation.row.name, confirmation.source);
-          else if (confirmation.info) {
-            assertUnlinkAllowed(home, path.basename(confirmation.info.path));
-            unlinkRelationship(confirmation.agent, confirmation.info);
+          if (confirmation.kind === 'link') {
+            applyActivationPlan(home, planLink(home, confirmation.row.id, confirmation.agent.name));
+          } else {
+            applyActivationPlan(home, planUnlink(home, confirmation.runtimeId, confirmation.slot));
           }
           refresh(confirmation.row);
           setFeedback(`${confirmation.kind === 'link' ? 'Linked' : 'Unlinked'} ${confirmation.row.name} @ ${confirmation.agent.name}`);
@@ -531,11 +541,11 @@ export function App({home}: {home: Home}): ReactNode {
       }
       return;
     }
-    if (input === ' ' && actionable && selectedInfo) {
+    if (input === ' ' && actionable && selectedInfo && selectedRel) {
       try {
-        const result = toggleRelationship(selectedAgent, selectedInfo);
+        applyActivationPlan(home, planToggle(home, selectedRel.runtimeId, selectedRel.slot));
         refresh(selectedRow);
-        setFeedback(`${selectedRow.name} @ ${selectedAgent.name}: ${result}`);
+        setFeedback(`${selectedRow.name} @ ${selectedAgent.name}: ${selectedInfo.underOff ? 'on' : 'off'}`);
       } catch (err) {
         setFeedback((err as Error).message);
       }
@@ -547,16 +557,20 @@ export function App({home}: {home: Home}): ReactNode {
         kind: 'link',
         row: selectedRow,
         agent: selectedAgent,
+        runtimeId: '',
+        slot: '',
         source: selectedRow.realPath,
         target: path.join(selectedAgent.dir, selectedRow.name),
       });
     }
-    if (input === 'u' && actionable && selectedInfo?.linked) {
+    if (input === 'u' && actionable && selectedInfo?.linked && selectedRel) {
       return setConfirmation({
         kind: 'unlink',
         row: selectedRow,
         agent: selectedAgent,
         info: selectedInfo,
+        runtimeId: selectedRel.runtimeId,
+        slot: selectedRel.slot,
         source: selectedInfo.path,
         target: selectedInfo.target ?? '?',
       });

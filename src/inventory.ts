@@ -110,7 +110,7 @@ export interface InventoryScanReport {
 
 export interface DoctorRepair {
   id: string;
-  kind: 'remove-broken-link' | 'retarget-link';
+  kind: 'remove-broken-link' | 'retarget-link' | 'migrate-legacy-off';
   path: string;
   from: string;
   to?: string;
@@ -264,7 +264,7 @@ export function normalizeManagedSkillName(name: string): string {
     .substring(0, 255) || 'unnamed-skill';
 }
 
-function runtimeSlotId(runtimeId: string, slot: string): string {
+export function runtimeSlotId(runtimeId: string, slot: string): string {
   return `${runtimeId}\0${slot}`;
 }
 
@@ -848,6 +848,15 @@ function assertRetargetTarget(repair: DoctorRepair): void {
 }
 
 function preflightDoctorRepair(repair: DoctorRepair, index: number): void {
+  if (repair.kind === 'migrate-legacy-off') {
+    if (!fs.lstatSync(repair.path, { throwIfNoEntry: false }))
+      throw new Error(`repair path is missing: ${repair.path}`);
+    if (!repair.to) throw new Error(`migrate-legacy-off repair has no destination: ${repair.path}`);
+    if (fs.lstatSync(repair.to, { throwIfNoEntry: false }))
+      throw new Error(`migrate-legacy-off destination already exists: ${repair.to}`);
+    fs.accessSync(path.dirname(repair.path), fs.constants.W_OK | fs.constants.X_OK);
+    return;
+  }
   assertBrokenLink(repair);
   fs.accessSync(path.dirname(repair.path), fs.constants.W_OK | fs.constants.X_OK);
   if (repair.kind === 'remove-broken-link') return;
@@ -862,6 +871,14 @@ function preflightDoctorRepair(repair: DoctorRepair, index: number): void {
 }
 
 function applyDoctorRepair(repair: DoctorRepair, index: number): void {
+  if (repair.kind === 'migrate-legacy-off') {
+    if (!repair.to) throw new Error(`migrate-legacy-off repair has no destination: ${repair.path}`);
+    if (fs.lstatSync(repair.to, { throwIfNoEntry: false }))
+      throw new Error(`migrate-legacy-off destination already exists: ${repair.to}`);
+    fs.mkdirSync(path.dirname(repair.to), { recursive: true });
+    fs.renameSync(repair.path, repair.to);
+    return;
+  }
   assertBrokenLink(repair);
   if (repair.kind === 'remove-broken-link') {
     fs.unlinkSync(repair.path);
@@ -1121,16 +1138,71 @@ function lockMismatchFindings(
   });
 }
 
+interface LegacyOffEntry {
+  runtime: ScannedRuntime;
+  name: string;
+  entryPath: string;
+  destination: string;
+}
+
+/** Legacy ADR-0007 `.off/` parking inside the discovery root is invisible to the scanner. */
+function legacyOffEntries(report: InventoryScanReport): LegacyOffEntry[] {
+  if (report.scope !== 'global') return [];
+  const entries: LegacyOffEntry[] = [];
+  for (const runtime of report.runtimes) {
+    if (!runtime.writable) continue;
+    const offDir = path.join(runtime.discoveryRoot, '.off');
+    let dirents: fs.Dirent[];
+    try {
+      dirents = fs.readdirSync(offDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const dirent of dirents) {
+      if (dirent.name.startsWith('.')) continue;
+      const entryPath = path.join(offDir, dirent.name);
+      const stat = fs.lstatSync(entryPath, { throwIfNoEntry: false });
+      if (!stat) continue;
+      let keep = false;
+      if (stat.isSymbolicLink()) {
+        keep = true;
+      } else if (stat.isDirectory()) {
+        keep = fs.existsSync(path.join(entryPath, 'SKILL.md'));
+      }
+      if (!keep) continue;
+      entries.push({
+        runtime,
+        name: dirent.name,
+        entryPath,
+        destination: path.join(runtime.parkingRoot, dirent.name),
+      });
+    }
+  }
+  return entries;
+}
+
+function legacyOffFindings(entries: LegacyOffEntry[]): ScanFinding[] {
+  return entries.map(({ runtime, name, entryPath }) => ({
+    category: 'structural',
+    code: 'legacy-off',
+    message: `legacy OFF location: ${entryPath} (repair moves it to the parking area)`,
+    runtimeId: runtime.id,
+    slot: normalizeSlotName(name),
+  }));
+}
+
 function doctorFindings(
   report: InventoryScanReport,
   state: Record<string, unknown>,
   catalog: Record<string, unknown>,
+  legacyOff: LegacyOffEntry[],
 ): ScanFinding[] {
   return [
     ...staleReferenceFindings(report, catalog),
     ...orphanedPresetFindings(report, state, catalog),
     ...parkingFindings(report, state),
     ...lockMismatchFindings(report, state),
+    ...legacyOffFindings(legacyOff),
   ];
 }
 
@@ -1139,10 +1211,11 @@ function doctorReport(
   state: Record<string, unknown>,
   catalog: Record<string, unknown>,
 ): DoctorReport {
+  const legacyOff = legacyOffEntries(report);
   return {
     ...report,
-    findings: [...report.findings, ...doctorFindings(report, state, catalog)],
-    repairs: doctorRepairs(report, state),
+    findings: [...report.findings, ...doctorFindings(report, state, catalog, legacyOff)],
+    repairs: doctorRepairs(report, state, legacyOff),
   };
 }
 
@@ -1177,16 +1250,31 @@ function retargetDetails(
 function doctorRepairs(
   report: InventoryScanReport,
   state: Record<string, unknown>,
+  legacyOff: LegacyOffEntry[],
 ): DoctorRepair[] {
+  const legacyRepairs = legacyOff.flatMap(
+    ({ runtime, name, entryPath, destination }) => {
+      if (fs.lstatSync(destination, { throwIfNoEntry: false })) return [];
+      return [{
+        id: `migrate-legacy-off:${entryPath}`,
+        kind: 'migrate-legacy-off' as const,
+        path: entryPath,
+        from: entryPath,
+        to: destination,
+        runtimeId: runtime.id,
+        slot: normalizeSlotName(name),
+      }];
+    },
+  );
   const conflicted = new Set(report.slots.flatMap(({ id, relationships }) =>
     relationships.length > 1 ? [id] : []));
-  return report.relationships.flatMap((relationship) => {
+  const linkRepairs = report.relationships.flatMap((relationship) => {
     const conflict = conflicted.has(runtimeSlotId(relationship.runtimeId, relationship.slot));
     if (relationship.form !== 'link' || relationship.realPath ||
       relationship.inspectionError || relationship.readOnly || !relationship.target || conflict)
       return [];
     const retarget = retargetDetails(relationship, report, state);
-    const kind = retarget ? 'retarget-link' : 'remove-broken-link';
+    const kind: DoctorRepair['kind'] = retarget ? 'retarget-link' : 'remove-broken-link';
     return [{
       id: `${kind}:${relationship.path}`,
       kind,
@@ -1197,6 +1285,7 @@ function doctorRepairs(
       slot: relationship.slot,
     }];
   });
+  return [...legacyRepairs, ...linkRepairs];
 }
 
 function globalInventory(
