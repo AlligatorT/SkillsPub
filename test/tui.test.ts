@@ -131,7 +131,8 @@ test('horizontal navigation moves focus between actionable columns only', async 
   await t.send('l');
   // first entry in registry scan order is the broken symlink row
   assert.match(t.stdout.frame(), /› \[ ON \] link broken broken/);
-  assert.doesNotMatch(t.stdout.frame(), /› a/);
+  // the unfocused agent column still marks the selected agent
+  assert.match(t.stdout.frame(), /› a/);
   // further right never lands on the passive summary; left returns to agents
   await t.send('l');
   assert.match(t.stdout.frame(), /› \[ ON \] link broken broken/);
@@ -393,6 +394,35 @@ test('Agent projection toggles the selected local relationship immediately', asy
   assert.ok(fs.existsSync(path.join(home.configDir, '.skillspub-off', 'a-skills', 'grilling', 'SKILL.md')));
   assert.match(t.stdout.frame(), /grilling @ a: off/);
   assert.match(t.stdout.frame(), /\[ OFF \] local\s+grilling/);
+  t.unmount();
+});
+
+test('agent tab keeps the operated relationship selected after toggle', async () => {
+  const { home } = setup();
+  const t = await renderApp(home);
+  await t.send('l');
+  await t.send('j');
+  await t.send('j'); // grilling
+  await t.send(' ');
+
+  const frame = t.stdout.frame();
+  // the entry moved to parking, but the marker follows it — not back to the first entry
+  assert.match(frame, /› \[ OFF \] local\s+grilling/);
+  assert.doesNotMatch(frame, /› \[ ON \] link broken/);
+  t.unmount();
+});
+
+test('skill tab keeps the operated instance selected after toggling an agent runtime', async () => {
+  const { home } = setup();
+  const t = await renderApp(home);
+  await t.send('\t');
+  for (let i = 0; i < 3; i++) await t.send('j'); // grilling
+  await t.send('l'); // agents column
+  await t.send(' '); // toggle grilling off for a: the local dir moves, its realPath changes
+
+  const frame = t.stdout.frame();
+  assert.match(frame, /› grilling/);
+  assert.match(frame, /› a {2}\[ OFF \] local/);
   t.unmount();
 });
 

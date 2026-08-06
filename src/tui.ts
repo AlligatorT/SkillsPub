@@ -135,8 +135,8 @@ function RowLine({
 }): ReactNode {
   return h(
     Text,
-    {inverse: active && focused, wrap},
-    `${active && focused ? '›' : ' '} `,
+    {inverse: active && focused, bold: active && !focused, wrap},
+    `${active ? '›' : ' '} `,
     children,
   );
 }
@@ -447,9 +447,22 @@ export function App({home}: {home: Home}): ReactNode {
         relationship.agent === selectedAgent?.name &&
         relationship.info.path === selectedInfo?.path);
   const actionable = focusColumn === 1 && selectedRow && selectedAgent;
-  const refresh = (row?: Row) => {
-    setSnapshot(tuiSnapshot(home));
+  /** Re-read disk, then re-anchor selection: mutation moves entries, so locate
+   *  the fresh row/relationship by (runtimeId, slot) or stable row id. */
+  const refresh = (keep?: { rowId?: string; runtimeId?: string; slot?: string }) => {
+    const next = tuiSnapshot(home);
+    setSnapshot(next);
+    if (!keep) return;
+    const row = keep.rowId !== undefined
+      ? next.rows.find((candidate) => candidate.id === keep.rowId)
+      : next.rows.find((candidate) => candidate.relationships.some((rel) =>
+          rel.runtimeId === keep.runtimeId && rel.slot === keep.slot));
     if (row) setInstanceId(row.id);
+    const rel = keep.runtimeId !== undefined
+      ? row?.relationships.find((candidate) =>
+          candidate.runtimeId === keep.runtimeId && candidate.slot === keep.slot)
+      : undefined;
+    if (rel) setRelationshipKey(rel.info.path);
   };
 
   useInput((input, key) => {
@@ -478,13 +491,17 @@ export function App({home}: {home: Home}): ReactNode {
     }
     if (confirmation) {
       if (input === 'y') {
+        const neighbor = tab === 'agent'
+          ? entries[relationshipIndex + 1] ?? entries[relationshipIndex - 1]
+          : undefined;
         try {
           if (confirmation.kind === 'link') {
             applyActivationPlan(home, planLink(home, confirmation.row.id, confirmation.agent.name));
           } else {
             applyActivationPlan(home, planUnlink(home, confirmation.runtimeId, confirmation.slot));
           }
-          refresh(confirmation.row);
+          refresh({rowId: confirmation.row.id});
+          if (neighbor) setRelationshipKey(neighbor.key);
           setFeedback(`${confirmation.kind === 'link' ? 'Linked' : 'Unlinked'} ${confirmation.row.name} @ ${confirmation.agent.name}`);
         } catch (err) {
           setFeedback((err as Error).message);
@@ -544,7 +561,7 @@ export function App({home}: {home: Home}): ReactNode {
     if (input === ' ' && actionable && selectedInfo && selectedRel) {
       try {
         applyActivationPlan(home, planToggle(home, selectedRel.runtimeId, selectedRel.slot));
-        refresh(selectedRow);
+        refresh({runtimeId: selectedRel.runtimeId, slot: selectedRel.slot});
         setFeedback(`${selectedRow.name} @ ${selectedAgent.name}: ${selectedInfo.underOff ? 'on' : 'off'}`);
       } catch (err) {
         setFeedback((err as Error).message);
