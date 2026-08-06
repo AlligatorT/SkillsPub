@@ -9,9 +9,9 @@ import {
   doctorProjectInventory,
   loadRuntimes,
   scanGlobalInventory,
-  type Home,
   type Runtime,
-} from '../src/core.ts';
+} from '../src/inventory.ts';
+import type { Home } from '../src/core.ts';
 
 function setup(): { home: Home; runtime: Runtime } {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-doctor-'));
@@ -362,4 +362,44 @@ test('Project Doctor reports stale references, missing parking, and Orphaned Pre
     false,
   );
   assert.equal(fs.readFileSync(projectStateFile, 'utf8'), projectState);
+});
+
+test('doctor migrates legacy .off parking into the parking area', () => {
+  const { home, runtime } = setup();
+  const parked = path.join(runtime.discoveryRoot, '.off', 'parked');
+  fs.mkdirSync(parked, { recursive: true });
+  fs.writeFileSync(path.join(parked, 'SKILL.md'), '# parked');
+
+  const report = doctorGlobalInventory(home, [runtime]);
+
+  const legacyOffPath = path.join(runtime.discoveryRoot, '.off', 'parked');
+  assert.equal(report.findings.some(({ code }) => code === 'legacy-off'), true);
+  const repair = report.repairs.find(({ kind }) => kind === 'migrate-legacy-off');
+  assert.ok(repair, 'expected a migrate-legacy-off repair');
+  assert.equal(repair.path, legacyOffPath);
+  assert.equal(repair.to, path.join(runtime.parkingRoot, 'parked'));
+
+  const result = applyDoctorRepairs(report.repairs);
+  assert.deepEqual(result.completed, report.repairs);
+  assert.equal(result.failed, undefined);
+  assert.equal(fs.existsSync(path.join(runtime.parkingRoot, 'parked', 'SKILL.md')), true);
+  assert.equal(fs.existsSync(legacyOffPath), false);
+});
+
+test('doctor reports legacy .off but skips repair when parking destination already exists', () => {
+  const { home, runtime } = setup();
+  const legacy = path.join(runtime.discoveryRoot, '.off', 'parked');
+  fs.mkdirSync(legacy, { recursive: true });
+  fs.writeFileSync(path.join(legacy, 'SKILL.md'), '# legacy');
+  const conflicting = path.join(runtime.parkingRoot, 'parked');
+  fs.mkdirSync(conflicting, { recursive: true });
+  fs.writeFileSync(path.join(conflicting, 'SKILL.md'), '# conflicting');
+
+  const report = doctorGlobalInventory(home, [runtime]);
+
+  assert.equal(report.findings.some(({ code }) => code === 'legacy-off'), true);
+  assert.equal(report.repairs.some(({ kind }) => kind === 'migrate-legacy-off'), false);
+  // conflicting content untouched
+  assert.equal(fs.readFileSync(path.join(conflicting, 'SKILL.md'), 'utf8'), '# conflicting');
+  assert.equal(fs.existsSync(path.join(legacy, 'SKILL.md')), true);
 });

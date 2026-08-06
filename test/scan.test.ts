@@ -8,9 +8,9 @@ import {
   normalizeSlotName,
   scanGlobalInventory,
   scanProjectInventory,
-  type Home,
   type Runtime,
-} from '../src/core.ts';
+} from '../src/inventory.ts';
+import type { Home } from '../src/core.ts';
 
 function tmpHome(): Home {
   return { configDir: fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-scan-')) };

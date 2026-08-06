@@ -31,14 +31,17 @@ function setup() {
 }
 
 test('ls prints matrix, off moves skill, status shows per-agent state', () => {
-  const { run, skills } = setup();
+  const { run, skills, configDir } = setup();
   assert.match(run(['ls']), /grilling\s+on/);
 
-  assert.match(run(['off', 'grilling', 'a']), /grilling @ a: off/);
-  assert.ok(fs.existsSync(path.join(skills, '.off', 'grilling', 'SKILL.md')));
+  assert.match(run(['off', 'grilling', 'a']), /global:a\/grilling\ton -> off/);
+  assert.ok(fs.existsSync(path.join(configDir, '.skillspub-off', 'skills', 'grilling', 'SKILL.md')));
+  assert.equal(fs.existsSync(path.join(skills, 'grilling')), false);
 
   assert.match(run(['status', 'grilling']), /a\s+off/);
-  assert.match(run(['agents']), /a\t.*ok/);
+
+  assert.match(run(['on', 'grilling', 'a']), /global:a\/grilling\toff -> on/);
+  assert.ok(fs.existsSync(path.join(skills, 'grilling', 'SKILL.md')));
 });
 
 test('variants are listed distinctly and ambiguous mutations fail', () => {

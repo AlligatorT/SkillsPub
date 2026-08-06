@@ -63,7 +63,7 @@ function setup() {
   mkSkill(shared, 'real-linked');
   fs.mkdirSync(a, { recursive: true });
   fs.symlinkSync(path.join(shared, 'real-linked'), path.join(a, 'linked'));
-  mkSkill(path.join(a, '.off'), 'parked');
+  mkSkill(path.join(configDir, '.skillspub-off', 'a-skills'), 'parked');
   fs.symlinkSync(path.join(shared, 'gone'), path.join(a, 'broken'));
   // same-name variants at different real paths
   mkSkill(a, 'code-review');
@@ -390,7 +390,7 @@ test('Agent projection toggles the selected local relationship immediately', asy
   await t.send('j'); // grilling
   await t.send(' ');
 
-  assert.ok(fs.existsSync(path.join(home.configDir, 'a-skills', '.off', 'grilling', 'SKILL.md')));
+  assert.ok(fs.existsSync(path.join(home.configDir, '.skillspub-off', 'a-skills', 'grilling', 'SKILL.md')));
   assert.match(t.stdout.frame(), /grilling @ a: off/);
   assert.match(t.stdout.frame(), /\[ OFF \] local\s+grilling/);
   t.unmount();
@@ -407,7 +407,7 @@ test('Agent projection keeps aliases to one instance independently selectable', 
 
   await t.send(' ');
   assert.ok(fs.lstatSync(path.join(a, 'linked')).isSymbolicLink());
-  assert.ok(fs.lstatSync(path.join(a, '.off', 'linked-alias')).isSymbolicLink());
+  assert.ok(fs.lstatSync(path.join(home.configDir, '.skillspub-off', 'a-skills', 'linked-alias')).isSymbolicLink());
   t.unmount();
 });
 
@@ -418,16 +418,21 @@ test('Agent projection distinguishes on and off entries with the same name and i
   mkSkill(sourceRoot, 'dual');
   const source = path.join(sourceRoot, 'dual');
   fs.symlinkSync(source, path.join(a, 'dual'));
-  fs.symlinkSync(source, path.join(a, '.off', 'dual'));
+  fs.symlinkSync(source, path.join(home.configDir, '.skillspub-off', 'a-skills', 'dual'));
   const t = await renderApp(home);
   await t.send('l');
-  for (let i = 0; i < 3; i++) await t.send('j');
+  // discovery entries scan before parking entries: ON dual is selectable separately
+  for (let i = 0; i < 2; i++) await t.send('j');
   assert.match(t.stdout.frame(), /› \[ ON \] link\s+dual/);
+  await t.send('j');
+  assert.match(t.stdout.frame(), /› \[ OFF \] link\s+dual/);
 
+  // on+off in one Runtime Slot is an on-off-conflict: unlink refuses the ambiguous Slot
   await t.send('u');
   await t.send('y');
-  assert.throws(() => fs.lstatSync(path.join(a, 'dual')));
-  assert.ok(fs.lstatSync(path.join(a, '.off', 'dual')).isSymbolicLink());
+  assert.match(t.stdout.frame(), /ambiguous or occupied/);
+  assert.ok(fs.lstatSync(path.join(a, 'dual')).isSymbolicLink());
+  assert.ok(fs.lstatSync(path.join(home.configDir, '.skillspub-off', 'a-skills', 'dual')).isSymbolicLink());
   t.unmount();
 });
 

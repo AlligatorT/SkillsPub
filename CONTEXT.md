@@ -100,3 +100,7 @@ Bundle、Tag 或 Preset selector 仍引用已不存在 resource 时保留的成�
 
 **CLI-coupled skill**:
 依赖配套 CLI 才能执行能力的 Skill。SkillsPub 只管理其 skill resource，不管理配套 CLI。
+
+**Projection**:
+从一次 inventory scan 派生的展示层翻译（如 skill × agent 矩阵行），不写磁盘、不另建真相。矩阵列是 Runtime key；所有磁盘变更走 plan/apply，不走 Projection。
+_避免_: 第二个读模型、视图自带扫描
