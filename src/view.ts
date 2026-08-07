@@ -242,19 +242,21 @@ function stringListRecord(value: unknown): Record<string, string[]> {
   ) as Record<string, string[]>;
 }
 
-/** Tags and bundles are catalog metadata; unreadable or invalid state projects as empty. */
+/** Tags, bundles and claims are catalog/policy metadata; unreadable or invalid state projects as empty. */
 export function readViewState(home: Home): {
   bundles: Record<string, string[]>;
   tags: Record<string, string[]>;
+  claims: Record<string, string[]>;
 } {
   try {
     const state = readStateFile(path.join(home.configDir, 'state.json'));
     return {
       bundles: stringListRecord(state.bundles),
       tags: stringListRecord(state.tags),
+      claims: stringListRecord(state.claims),
     };
   } catch {
-    return { bundles: {}, tags: {} };
+    return { bundles: {}, tags: {}, claims: {} };
   }
 }
 
@@ -279,12 +281,21 @@ export interface SkillDetail {
 export interface TuiSnapshot {
   agents: Agent[];
   rows: Row[];
+  catalog: {
+    bundles: Record<string, string[]>;
+    tags: Record<string, string[]>;
+    claims: Record<string, string[]>;
+  };
 }
 
 /** Read the live disk state. Call again after every mutation (ADR-0001). */
 export function tuiSnapshot(home: Home): TuiSnapshot {
   const report = scanGlobalInventory(home);
-  return { agents: viewAgents(report), rows: projectRows(report) };
+  return {
+    agents: viewAgents(report),
+    rows: projectRows(report),
+    catalog: readViewState(home),
+  };
 }
 
 /** Assemble detail for one explicit instance identity. */
