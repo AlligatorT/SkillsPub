@@ -106,7 +106,7 @@ test('initial projection: first agent selected, all relationship kinds shown, ab
   assert.match(frame, /Agent/);
   assert.match(frame, /Agents/);
   assert.match(frame, /Relationships/);
-  assert.match(frame, /Summary/);
+  assert.match(frame, /Info/);
   // all relationship kinds for agent a, text-first
   assert.match(frame, /\[ ON \] local\s+grilling/);
   assert.match(frame, /\[ ON \] link\s+linked/);
@@ -121,6 +121,29 @@ test('initial projection: first agent selected, all relationship kinds shown, ab
   assert.match(frame, /Source:/);
   // focus starts on the agent column, first agent selected
   assert.match(frame, /› a/);
+  t.unmount();
+});
+
+test('info panel shows bundle, tag, and preset membership of the selected skill', async () => {
+  const { home } = setup();
+  const grillingId = fs.realpathSync(path.join(home.configDir, 'a-skills', 'grilling'));
+  fs.writeFileSync(
+    path.join(home.configDir, 'state.json'),
+    JSON.stringify({
+      bundles: { tools: [grillingId] },
+      tags: { [grillingId]: ['interview'] },
+      claims: { 'global:a\0grilling': ['preset:work'] },
+    }),
+  );
+  const t = await renderApp(home);
+  await t.send('l');
+  await t.send('j');
+  await t.send('j'); // grilling
+  const frame = t.stdout.frame();
+  assert.match(frame, /Info/);
+  assert.match(frame, /Bundles: tools/);
+  assert.match(frame, /Tags: interview/);
+  assert.match(frame, /Presets: work/);
   t.unmount();
 });
 
@@ -145,7 +168,7 @@ test('narrow terminal hides only the passive summary', async () => {
   const { home } = setup();
   const t = await renderApp(home, 60, 30);
   const frame = t.stdout.frame();
-  assert.doesNotMatch(frame, /Summary/);
+  assert.doesNotMatch(frame, /Info/);
   assert.doesNotMatch(frame, /Source:/);
   // both actionable columns remain
   assert.match(frame, /Agents/);
@@ -278,7 +301,7 @@ test('skill tab: narrow terminal hides only the passive summary', async () => {
   const t = await renderApp(home, 60, 30);
   await t.send('\t');
   const frame = t.stdout.frame();
-  assert.doesNotMatch(frame, /Summary/);
+  assert.doesNotMatch(frame, /Info/);
   assert.doesNotMatch(frame, /Source:/);
   assert.match(frame, /Skills/);
   assert.match(frame, /b {2}missing/);

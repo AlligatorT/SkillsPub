@@ -270,29 +270,42 @@ function AgentStatusList({
   );
 }
 
-function Summary({
+interface Membership {
+  bundles: string[];
+  tags: string[];
+  presets: string[];
+}
+
+function InfoPanel({
   row,
   info,
+  membership,
   width,
 }: {
   row?: Row;
   info?: SkillInfo;
+  membership?: Membership;
   width: number;
 }): ReactNode {
+  const line = (key: string, label: string, value?: string) =>
+    h(Text, {key, wrap: 'wrap'}, ` ${label}: ${value && value.length > 0 ? value : '—'}`);
   return h(
     ListColumn,
-    {title: 'Summary', focused: false, width},
+    {title: 'Info', focused: false, width},
     !row
       ? h(Text, {dimColor: true}, '  nothing selected')
       : [
-          h(Text, {key: 'name', bold: true, wrap: 'truncate-end'}, ` ${row.displayName}`),
-          h(Text, {key: 'desc', wrap: 'truncate-end'}, ` ${row.description ?? '—'}`),
-          h(Text, {key: 'source', wrap: 'truncate-end'}, ` Source: ${row.sourceLabel}`),
+          h(Text, {key: 'name', bold: true, wrap: 'wrap'}, ` ${row.displayName}`),
+          h(Text, {key: 'desc', wrap: 'wrap'}, ` ${row.description ?? '—'}`),
+          line('source', 'Source', row.sourceLabel),
           h(
             Text,
-            {key: 'path', wrap: 'truncate-end', dimColor: info?.presence === 'deadlink'},
+            {key: 'path', wrap: 'wrap', dimColor: info?.presence === 'deadlink'},
             ` Path: ${row.realPath ?? (info ? `${info.path}${info.target ? ` -> ${info.target}` : ''}` : '—')}`,
           ),
+          line('bundles', 'Bundles', membership?.bundles.join(', ')),
+          line('tags', 'Tags', membership?.tags.join(', ')),
+          line('presets', 'Presets', membership?.presets.join(', ')),
         ],
   );
 }
@@ -425,10 +438,11 @@ export function App({home}: {home: Home}): ReactNode {
     28,
     Math.min(40, Math.max(0, ...agents.map((agent) => agent.name.length)) + 24),
   );
-  const summaryWidth = Math.max(24, Math.min(30, Math.floor(width * 0.26)));
+  // Info is capped (its text wraps); name lists flex with what remains (long names win).
+  const infoWidth = wide ? Math.max(28, Math.min(48, Math.floor(width * 0.28))) : 0;
   const instanceWidth = Math.max(
     10,
-    width - agentStatusWidth - (wide ? summaryWidth : 0),
+    width - agentStatusWidth - infoWidth,
   );
   const modalContent = modal
     ? (skillDetail(home, modal.row.id)?.content ?? 'SKILL.md unavailable')
@@ -447,6 +461,26 @@ export function App({home}: {home: Home}): ReactNode {
         relationship.agent === selectedAgent?.name &&
         relationship.info.path === selectedInfo?.path);
   const actionable = focusColumn === 1 && selectedRow && selectedAgent;
+  const membership = useMemo((): Membership | undefined => {
+    if (!selectedRow) return undefined;
+    const { bundles, tags, claims } = snapshot.catalog;
+    const unambiguousName = rows.filter((row) => row.name === selectedRow.name).length === 1;
+    return {
+      bundles: Object.entries(bundles)
+        .filter(([, members]) =>
+          members.includes(selectedRow.id) ||
+          (unambiguousName && members.includes(selectedRow.name)))
+        .map(([name]) => name)
+        .sort((a, b) => a.localeCompare(b)),
+      tags: tags[selectedRow.id] ?? [],
+      presets: [...new Set(
+        selectedRow.relationships.flatMap((rel) =>
+          (claims[`${rel.runtimeId}\0${rel.slot}`] ?? [])
+            .filter((claim) => claim.startsWith('preset:'))
+            .map((claim) => claim.slice('preset:'.length))),
+      )].sort((a, b) => a.localeCompare(b)),
+    };
+  }, [selectedRow, snapshot.catalog, rows]);
   /** Re-read disk, then re-anchor selection: mutation moves entries, so locate
    *  the fresh row/relationship by (runtimeId, slot) or stable row id. */
   const refresh = (keep?: { rowId?: string; runtimeId?: string; slot?: string }) => {
@@ -654,7 +688,14 @@ export function App({home}: {home: Home}): ReactNode {
               focused: focusColumn === 1,
               height: listHeight,
             }),
-            wide ? h(Summary, {row: entry?.row, info: entry?.relationship.info, width: summaryWidth}) : null,
+            wide
+              ? h(InfoPanel, {
+                  row: entry?.row,
+                  info: entry?.relationship.info,
+                  membership,
+                  width: infoWidth,
+                })
+              : null,
           )
         : h(
             Box,
@@ -666,6 +707,14 @@ export function App({home}: {home: Home}): ReactNode {
               width: instanceWidth,
               height: listHeight,
             }),
+            wide
+              ? h(InfoPanel, {
+                  row: instance,
+                  info: instance?.agents[agents[instAgent]?.name ?? ''],
+                  membership,
+                  width: infoWidth,
+                })
+              : null,
             h(AgentStatusList, {
               agents,
               row: instance,
@@ -674,13 +723,6 @@ export function App({home}: {home: Home}): ReactNode {
               width: agentStatusWidth,
               height: listHeight,
             }),
-            wide
-              ? h(Summary, {
-                  row: instance,
-                  info: instance?.agents[agents[instAgent]?.name ?? ''],
-                  width: summaryWidth,
-                })
-              : null,
           ),
     h(
       Text,
