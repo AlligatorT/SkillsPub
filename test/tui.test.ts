@@ -141,6 +141,7 @@ test('info panel shows bundle, tag, and preset membership of the selected skill'
   await t.send('j'); // grilling
   const frame = t.stdout.frame();
   assert.match(frame, /Info/);
+  assert.match(frame, /Description: Grill the/);
   assert.match(frame, /Bundles: tools/);
   assert.match(frame, /Tags: interview/);
   assert.match(frame, /Presets: work/);

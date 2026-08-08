@@ -287,8 +287,27 @@ function InfoPanel({
   membership?: Membership;
   width: number;
 }): ReactNode {
-  const line = (key: string, label: string, value?: string) =>
-    h(Text, {key, wrap: 'wrap'}, ` ${label}: ${value && value.length > 0 ? value : '—'}`);
+  const inner = Math.max(8, width - 2); // column borders
+  /** Pre-wrap a `Label: value` row with a hanging indent so continuation lines align. */
+  const labeled = (label: string, value: string | undefined, color?: string): ReactNode[] => {
+    const prefix = `${label}: `;
+    const text = value && value.length > 0 ? value : '—';
+    const lines = wrapAnsi(text, Math.max(4, inner - 1 - prefix.length), {
+      wordWrap: true,
+      trim: true,
+      hard: false,
+    }).split('\n');
+    return lines.map((part, index) =>
+      index === 0
+        ? h(
+            Text,
+            {key: label},
+            h(Text, {bold: true, color}, ` ${prefix}`),
+            part,
+          )
+        : h(Text, {key: `${label}-${index}`}, `${' '.repeat(1 + prefix.length)}${part}`),
+    );
+  };
   return h(
     ListColumn,
     {title: 'Info', focused: false, width},
@@ -296,16 +315,17 @@ function InfoPanel({
       ? h(Text, {dimColor: true}, '  nothing selected')
       : [
           h(Text, {key: 'name', bold: true, wrap: 'wrap'}, ` ${row.displayName}`),
-          h(Text, {key: 'desc', wrap: 'wrap'}, ` ${row.description ?? '—'}`),
-          line('source', 'Source', row.sourceLabel),
-          h(
-            Text,
-            {key: 'path', wrap: 'wrap', dimColor: info?.presence === 'deadlink'},
-            ` Path: ${row.realPath ?? (info ? `${info.path}${info.target ? ` -> ${info.target}` : ''}` : '—')}`,
+          h(Text, {key: 'gap-top'}, ''),
+          ...labeled('Description', row.description),
+          ...labeled('Source', row.sourceLabel),
+          ...labeled(
+            'Path',
+            row.realPath ?? (info ? `${info.path}${info.target ? ` -> ${info.target}` : ''}` : undefined),
           ),
-          line('bundles', 'Bundles', membership?.bundles.join(', ')),
-          line('tags', 'Tags', membership?.tags.join(', ')),
-          line('presets', 'Presets', membership?.presets.join(', ')),
+          h(Text, {key: 'gap-cat'}, ''),
+          ...labeled('Bundles', membership?.bundles.join(', '), 'cyan'),
+          ...labeled('Tags', membership?.tags.join(', '), 'green'),
+          ...labeled('Presets', membership?.presets.join(', '), 'magenta'),
         ],
   );
 }
