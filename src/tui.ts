@@ -288,25 +288,27 @@ function InfoPanel({
   width: number;
 }): ReactNode {
   const inner = Math.max(8, width - 2); // column borders
-  /** Pre-wrap a `Label: value` row with a hanging indent so continuation lines align. */
+  /** Pre-wrap a `Label: value` row; continuation lines align with the label, and
+   *  unbroken strings (paths) hard-wrap inside the panel instead of overflowing it. */
   const labeled = (label: string, value: string | undefined, color?: string): ReactNode[] => {
-    const prefix = `${label}: `;
-    const text = value && value.length > 0 ? value : '—';
-    const lines = wrapAnsi(text, Math.max(4, inner - 1 - prefix.length), {
+    const text = `${label}: ${value && value.length > 0 ? value : '—'}`;
+    const lines = wrapAnsi(text, Math.max(4, inner - 1), {
       wordWrap: true,
       trim: true,
-      hard: false,
+      hard: true,
     }).split('\n');
-    return lines.map((part, index) =>
-      index === 0
-        ? h(
-            Text,
-            {key: label},
-            h(Text, {bold: true, color}, ` ${prefix}`),
-            part,
-          )
-        : h(Text, {key: `${label}-${index}`}, `${' '.repeat(1 + prefix.length)}${part}`),
-    );
+    return lines.map((part, index) => {
+      if (index === 0 && part.startsWith(`${label}:`)) {
+        return h(
+          Text,
+          {key: label},
+          ' ',
+          h(Text, {bold: true, color}, `${label}:`),
+          part.slice(label.length + 1),
+        );
+      }
+      return h(Text, {key: `${label}-${index}`}, ` ${part}`);
+    });
   };
   return h(
     ListColumn,
