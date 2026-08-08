@@ -288,15 +288,20 @@ function InfoPanel({
   width: number;
 }): ReactNode {
   const inner = Math.max(8, width - 2); // column borders
+  /** OSC 8 terminal hyperlink: every wrapped line maps to the full URL, so
+   *  cmd+click never opens a truncated first-line fragment. */
+  const osc8 = (href: string, text: string): string =>
+    `\x1b]8;;${href}\x07${text}\x1b]8;;\x07`;
   /** Pre-wrap a `Label: value` row; continuation lines align with the label, and
    *  unbroken strings (paths) hard-wrap inside the panel instead of overflowing it. */
-  const labeled = (label: string, value: string | undefined, color?: string): ReactNode[] => {
+  const labeled = (label: string, value: string | undefined, color?: string, href?: string): ReactNode[] => {
     const text = `${label}: ${value && value.length > 0 ? value : '—'}`;
     const lines = wrapAnsi(text, Math.max(4, inner - 1), {
       wordWrap: true,
       trim: true,
       hard: true,
     }).split('\n');
+    const linkify = (part: string): string => href ? osc8(href, part) : part;
     return lines.map((part, index) => {
       if (index === 0 && part.startsWith(`${label}:`)) {
         return h(
@@ -304,10 +309,10 @@ function InfoPanel({
           {key: label},
           ' ',
           h(Text, {bold: true, color}, `${label}:`),
-          part.slice(label.length + 1),
+          linkify(part.slice(label.length + 1)),
         );
       }
-      return h(Text, {key: `${label}-${index}`}, ` ${part}`);
+      return h(Text, {key: `${label}-${index}`}, ` ${linkify(part)}`);
     });
   };
   return h(
@@ -319,7 +324,14 @@ function InfoPanel({
           h(Text, {key: 'name', bold: true, wrap: 'wrap'}, ` ${row.displayName}`),
           h(Text, {key: 'gap-top'}, ''),
           ...labeled('Description', row.description),
-          ...labeled('Source', row.sourceLabel),
+          ...labeled(
+            'Source',
+            row.provenance.sourceUrl
+              ? row.sourceLabel.replace(/^(?:git\+)?https?:\/\//, '')
+              : row.sourceLabel,
+            undefined,
+            row.provenance.sourceUrl,
+          ),
           ...labeled(
             'Path',
             row.realPath ?? (info ? `${info.path}${info.target ? ` -> ${info.target}` : ''}` : undefined),
