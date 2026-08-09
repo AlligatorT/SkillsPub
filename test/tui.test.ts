@@ -132,7 +132,7 @@ test('info panel shows bundle, tag, and preset membership of the selected skill'
     JSON.stringify({
       bundles: { tools: [grillingId] },
       tags: { [grillingId]: ['interview'] },
-      claims: { 'global:a\0grilling': ['preset:work'] },
+      presets: { work: { selectors: [`skill:${grillingId}`] } },
     }),
   );
   const t = await renderApp(home);

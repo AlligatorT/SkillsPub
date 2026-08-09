@@ -561,7 +561,7 @@ export function App({home}: {home: Home}): ReactNode {
   const manageRow = manage ? rows.find((candidate) => candidate.id === manage.rowId) : undefined;
   const membership = useMemo((): Membership | undefined => {
     if (!selectedRow) return undefined;
-    const { bundles, tags, claims } = snapshot.catalog;
+    const { bundles, tags, presets } = snapshot.catalog;
     const unambiguousName = rows.filter((row) => row.name === selectedRow.name).length === 1;
     return {
       bundles: Object.entries(bundles)
@@ -571,12 +571,12 @@ export function App({home}: {home: Home}): ReactNode {
         .map(([name]) => name)
         .sort((a, b) => a.localeCompare(b)),
       tags: tags[selectedRow.id] ?? [],
-      presets: [...new Set(
-        selectedRow.relationships.flatMap((rel) =>
-          (claims[`${rel.runtimeId}\0${rel.slot}`] ?? [])
-            .filter((claim) => claim.startsWith('preset:'))
-            .map((claim) => claim.slice('preset:'.length))),
-      )].sort((a, b) => a.localeCompare(b)),
+      // Definition membership, same semantics as Bundles/Tags and the manage modal —
+      // active claims are a separate concept (they only exist for activated Presets).
+      presets: Object.entries(presets)
+        .filter(([, preset]) => preset.selectors.includes(`skill:${selectedRow.id}`))
+        .map(([name]) => name)
+        .sort((a, b) => a.localeCompare(b)),
     };
   }, [selectedRow, snapshot.catalog, rows]);
   /** Re-read disk, then re-anchor selection: mutation moves entries, so locate
