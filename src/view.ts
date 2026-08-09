@@ -242,11 +242,24 @@ function stringListRecord(value: unknown): Record<string, string[]> {
   ) as Record<string, string[]>;
 }
 
-/** Tags, bundles and claims are catalog/policy metadata; unreadable or invalid state projects as empty. */
+function presetRecord(value: unknown): Record<string, { selectors: string[] }> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, preset]) =>
+        Boolean(preset) && typeof preset === 'object' && !Array.isArray(preset) &&
+        Array.isArray((preset as { selectors?: unknown }).selectors) &&
+        (preset as { selectors: unknown[] }).selectors.every((s) => typeof s === 'string')),
+  ) as Record<string, { selectors: string[] }>;
+}
+
+/** Tags, bundles, claims and preset definitions are catalog/policy metadata;
+ *  unreadable or invalid state projects as empty. */
 export function readViewState(home: Home): {
   bundles: Record<string, string[]>;
   tags: Record<string, string[]>;
   claims: Record<string, string[]>;
+  presets: Record<string, { selectors: string[] }>;
 } {
   try {
     const state = readStateFile(path.join(home.configDir, 'state.json'));
@@ -254,9 +267,10 @@ export function readViewState(home: Home): {
       bundles: stringListRecord(state.bundles),
       tags: stringListRecord(state.tags),
       claims: stringListRecord(state.claims),
+      presets: presetRecord(state.presets),
     };
   } catch {
-    return { bundles: {}, tags: {}, claims: {} };
+    return { bundles: {}, tags: {}, claims: {}, presets: {} };
   }
 }
 
@@ -285,6 +299,7 @@ export interface TuiSnapshot {
     bundles: Record<string, string[]>;
     tags: Record<string, string[]>;
     claims: Record<string, string[]>;
+    presets: Record<string, { selectors: string[] }>;
   };
 }
 
