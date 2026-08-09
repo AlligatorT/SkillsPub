@@ -148,6 +148,69 @@ test('info panel shows bundle, tag, and preset membership of the selected skill'
   t.unmount();
 });
 
+test('manage modal adds and removes tags for the selected skill', async () => {
+  const { home } = setup();
+  const grillingId = fs.realpathSync(path.join(home.configDir, 'a-skills', 'grilling'));
+  const t = await renderApp(home);
+  await t.send('l');
+  await t.send('j');
+  await t.send('j'); // grilling
+  await t.send('m');
+
+  let frame = t.stdout.frame();
+  assert.match(frame, /Manage: grilling/);
+  assert.match(frame, /Tags/);
+  assert.match(frame, /Presets/);
+  assert.match(frame, /Bundles:/);
+
+  // create-in-flow a tag
+  await t.send('a');
+  assert.match(t.stdout.frame(), /tag name: /);
+  for (const input of 'backend') await t.send(input);
+  await t.send('\r');
+  frame = t.stdout.frame();
+  assert.match(frame, /Tagged grilling: backend/);
+  assert.match(frame, /› backend/);
+  const state = () => JSON.parse(
+    fs.readFileSync(path.join(home.configDir, 'state.json'), 'utf8'));
+  assert.deepEqual(state().tags[grillingId], ['backend']);
+
+  // remove it with x
+  await t.send('x');
+  assert.match(t.stdout.frame(), /Removed tag backend from grilling/);
+  assert.equal(state().tags[grillingId], undefined);
+
+  await t.send('\x1b');
+  assert.doesNotMatch(t.stdout.frame(), /Manage: grilling/);
+  t.unmount();
+});
+
+test('manage modal creates presets in flow and toggles membership', async () => {
+  const { home } = setup();
+  const grillingId = fs.realpathSync(path.join(home.configDir, 'a-skills', 'grilling'));
+  const t = await renderApp(home);
+  await t.send('l');
+  await t.send('j');
+  await t.send('j'); // grilling
+  await t.send('m');
+  await t.send('\t'); // presets section
+
+  await t.send('a');
+  for (const input of 'work') await t.send(input);
+  await t.send('\r');
+  const frame = t.stdout.frame();
+  assert.match(frame, /Created preset work with grilling/);
+  assert.match(frame, /\[x\] work/);
+  const state = () => JSON.parse(
+    fs.readFileSync(path.join(home.configDir, 'state.json'), 'utf8'));
+  assert.deepEqual(state().presets.work.selectors, [`skill:${grillingId}`]);
+
+  await t.send(' '); // toggle membership off
+  assert.match(t.stdout.frame(), /Removed grilling from preset work/);
+  assert.deepEqual(state().presets.work.selectors, []);
+  t.unmount();
+});
+
 test('horizontal navigation moves focus between actionable columns only', async () => {
   const { home } = setup();
   const t = await renderApp(home);

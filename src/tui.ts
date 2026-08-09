@@ -25,6 +25,13 @@ import {
   planToggle,
   planUnlink,
 } from './reconcile.ts';
+import {
+  addPresetSelectors,
+  addResourceTags,
+  createPreset,
+  removePresetSelectors,
+  removeResourceTags,
+} from './catalog.ts';
 
 /** Below this width the passive summary column is hidden. */
 const WIDE_MIN = 80;
@@ -35,6 +42,13 @@ interface RelEntry {
   row: Row;
   relationship: SkillRelationship;
   key: string;
+}
+
+interface ManageState {
+  rowId: string;
+  section: 'tags' | 'presets';
+  index: number;
+  input?: { kind: 'tag' | 'preset'; value: string };
 }
 
 interface Confirmation {
@@ -344,6 +358,54 @@ function InfoPanel({
   );
 }
 
+function ManageModal({
+  row,
+  catalog,
+  bundles,
+  manage,
+}: {
+  row: Row;
+  catalog: TuiSnapshot['catalog'];
+  bundles: string[];
+  manage: ManageState;
+}): ReactNode {
+  const tags = catalog.tags[row.id] ?? [];
+  const selector = `skill:${row.id}`;
+  const presetNames = Object.keys(catalog.presets).sort((a, b) => a.localeCompare(b));
+  const active = (section: ManageState['section'], index: number) =>
+    manage.section === section && manage.index === index;
+  const marker = (on: boolean) => (on ? '›' : ' ');
+  const sectionTitle = (title: string, on: boolean) =>
+    h(Text, {bold: on, color: on ? 'cyan' : undefined}, ` ${title}`);
+  return h(
+    Box,
+    {flexGrow: 1, flexDirection: 'column', borderStyle: 'round', borderColor: 'cyan', paddingX: 1},
+    h(Text, {bold: true, wrap: 'truncate-end'}, ` Manage: ${row.displayName}`),
+    h(Text, {dimColor: true, wrap: 'truncate-end'},
+      ` Bundles: ${bundles.length > 0 ? bundles.join(', ') : '—'}`),
+    h(Text, null, ''),
+    sectionTitle('Tags', manage.section === 'tags'),
+    ...tags.map((tag, index) =>
+      h(Text, {key: `tag-${tag}`, inverse: active('tags', index)},
+        `${marker(active('tags', index))} ${tag}`)),
+    h(Text, {key: 'tag-add', inverse: active('tags', tags.length)},
+      `${marker(active('tags', tags.length))} + add tag`),
+    h(Text, null, ''),
+    sectionTitle('Presets', manage.section === 'presets'),
+    ...presetNames.map((name, index) => {
+      const member = (catalog.presets[name]?.selectors ?? []).includes(selector);
+      return h(Text, {key: `preset-${name}`, inverse: active('presets', index)},
+        `${marker(active('presets', index))} [${member ? 'x' : ' '}] ${name}`);
+    }),
+    h(Text, {key: 'preset-add', inverse: active('presets', presetNames.length)},
+      `${marker(active('presets', presetNames.length))} + new preset`),
+    manage.input
+      ? h(Text, null,
+          ` ${manage.input.kind === 'tag' ? 'tag' : 'preset'} name: ${manage.input.value}`)
+      : null,
+  );
+}
+
 function ConfirmationModal({
   confirmation,
 }: {
@@ -435,6 +497,7 @@ export function App({home}: {home: Home}): ReactNode {
   const [sort, setSort] = useState<SortOrder>('name');
   const [modal, setModal] = useState<{row: Row; scroll: number} | null>(null);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
+  const [manage, setManage] = useState<ManageState | null>(null);
   const [feedback, setFeedback] = useState('');
 
   const agents = snapshot.agents;
@@ -495,6 +558,7 @@ export function App({home}: {home: Home}): ReactNode {
         relationship.agent === selectedAgent?.name &&
         relationship.info.path === selectedInfo?.path);
   const actionable = focusColumn === 1 && selectedRow && selectedAgent;
+  const manageRow = manage ? rows.find((candidate) => candidate.id === manage.rowId) : undefined;
   const membership = useMemo((): Membership | undefined => {
     if (!selectedRow) return undefined;
     const { bundles, tags, claims } = snapshot.catalog;
@@ -546,6 +610,91 @@ export function App({home}: {home: Home}): ReactNode {
         return setModal({...modal, scroll: Math.max(0, modal.scroll - modalPage)});
       return;
     }
+    if (manage) {
+      const current = rows.find((candidate) => candidate.id === manage.rowId);
+      if (!current) return setManage(null);
+      const row = current;
+      const selector = `skill:${row.id}`;
+      const tags = snapshot.catalog.tags[row.id] ?? [];
+      const presetNames = Object.keys(snapshot.catalog.presets)
+        .sort((a, b) => a.localeCompare(b));
+      const rowCount = (manage.section === 'tags' ? tags.length : presetNames.length) + 1;
+      const draft = manage.input;
+      if (draft) {
+        if (key.escape) return setManage({...manage, input: undefined});
+        if (key.return) {
+          const value = draft.value.trim();
+          if (value) {
+            try {
+              if (draft.kind === 'tag') {
+                addResourceTags(home, selector, [value]);
+                setFeedback(`Tagged ${row.name}: ${value}`);
+              } else {
+                createPreset(home, value, [selector]);
+                setFeedback(`Created preset ${value} with ${row.name}`);
+              }
+              refresh({rowId: row.id});
+            } catch (err) {
+              setFeedback((err as Error).message);
+            }
+          }
+          return setManage({...manage, input: undefined});
+        }
+        if (key.backspace || key.delete || input === '\x7f')
+          return setManage({...manage, input: {...draft, value: draft.value.slice(0, -1)}});
+        if (input && !key.ctrl && !key.meta)
+          return setManage({...manage, input: {...draft, value: draft.value + input}});
+        return;
+      }
+      if (key.escape) return setManage(null);
+      if (key.tab)
+        return setManage({
+          ...manage,
+          section: manage.section === 'tags' ? 'presets' : 'tags',
+          index: 0,
+        });
+      if (key.downArrow || input === 'j')
+        return setManage({...manage, index: Math.min(rowCount - 1, manage.index + 1)});
+      if (key.upArrow || input === 'k')
+        return setManage({...manage, index: Math.max(0, manage.index - 1)});
+      const onActionRow = manage.index === rowCount - 1;
+      if (manage.section === 'tags') {
+        if ((key.return || input === 'a') && onActionRow)
+          return setManage({...manage, input: {kind: 'tag', value: ''}});
+        if (input === 'x' && !onActionRow && tags[manage.index] !== undefined) {
+          const tag = tags[manage.index];
+          try {
+            removeResourceTags(home, selector, [tag]);
+            refresh({rowId: row.id});
+            setFeedback(`Removed tag ${tag} from ${row.name}`);
+          } catch (err) {
+            setFeedback((err as Error).message);
+          }
+          return setManage({...manage, index: Math.min(manage.index, tags.length - 1)});
+        }
+        return;
+      }
+      if ((key.return || input === 'a') && onActionRow)
+        return setManage({...manage, input: {kind: 'preset', value: ''}});
+      if (input === ' ' && !onActionRow) {
+        const name = presetNames[manage.index];
+        if (name !== undefined) {
+          try {
+            const member = (snapshot.catalog.presets[name]?.selectors ?? []).includes(selector);
+            if (member) removePresetSelectors(home, name, [selector]);
+            else addPresetSelectors(home, name, [selector]);
+            refresh({rowId: row.id});
+            setFeedback(member
+              ? `Removed ${row.name} from preset ${name}`
+              : `Added ${row.name} to preset ${name}`);
+          } catch (err) {
+            setFeedback((err as Error).message);
+          }
+        }
+        return;
+      }
+      return;
+    }
     if (searching) {
       if (key.escape) {
         setQuery('');
@@ -579,6 +728,8 @@ export function App({home}: {home: Home}): ReactNode {
       if (input === 'n' || key.escape) return setConfirmation(null);
       return;
     }
+    if (input === 'm' && selectedRow?.realPath)
+      return setManage({rowId: selectedRow.id, section: 'tags', index: 0});
     if (input === 'q' || (key.ctrl && input === 'c')) return exit();
     if (input === '/') return setSearching(true);
     if (input === 's')
@@ -699,6 +850,17 @@ export function App({home}: {home: Home}): ReactNode {
           {height: bodyHeight, paddingLeft: 2, paddingRight: 2, paddingTop: 1},
           h(DetailModal, {row: modal.row, lines: modalLines, scroll: modal.scroll, height}),
         )
+      : manage && manageRow
+        ? h(
+            Box,
+            {height: bodyHeight, paddingLeft: 2, paddingRight: 2, paddingTop: 1},
+            h(ManageModal, {
+              row: manageRow,
+              catalog: snapshot.catalog,
+              bundles: membership?.bundles ?? [],
+              manage,
+            }),
+          )
       : confirmation
         ? h(
             Box,
@@ -763,11 +925,13 @@ export function App({home}: {home: Home}): ReactNode {
       {inverse: true, wrap: 'truncate-end'},
       modal
         ? ' ↑↓/jk scroll  PgUp/PgDn page  esc close '
-        : confirmation
-          ? ' y confirm  n/esc cancel '
-          : searching
+        : manage
+          ? ` ${feedback}${feedback ? '  ' : ''}j/k move  tab section  space toggle  a add  x rm tag  esc close `
+          : confirmation
+            ? ' y confirm  n/esc cancel '
+            : searching
             ? ` search: ${query || '…'}  enter apply  esc clear `
-            : ` ${feedback}${feedback ? '  ' : ''}${tab}:${columnName}  ←→/hl column  ↑↓/jk select${actionHint}  enter SKILL.md  / search  s sort:${sortLabel(sort)}  R refresh  tab switch  q quit `,
+            : ` ${feedback}${feedback ? '  ' : ''}${tab}:${columnName}  ←→/hl  ↑↓/jk${actionHint}  enter SKILL.md  m manage  / search  s sort:${sortLabel(sort)}  R refresh  tab  q `,
     ),
   );
 }
