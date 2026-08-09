@@ -111,7 +111,7 @@ test('initial projection: first agent selected, all relationship kinds shown, ab
   assert.match(frame, /\[ ON \] local\s+grilling/);
   assert.match(frame, /\[ ON \] link\s+linked/);
   assert.match(frame, /\[ OFF \] local\s+parked/);
-  assert.match(frame, /\[ ON \] link broken\s+broken ->/);
+  assert.match(frame, /\[ ON \] link!\s+broken ->/);
   // same-name variants disambiguated, clean names stay clean
   assert.match(frame, /code-review \(/);
   assert.match(frame, /\[ ON \] local\s+grilling/);
@@ -217,12 +217,12 @@ test('horizontal navigation moves focus between actionable columns only', async 
   assert.match(t.stdout.frame(), /› a/);
   await t.send('l');
   // first entry in registry scan order is the broken symlink row
-  assert.match(t.stdout.frame(), /› \[ ON \] link broken broken/);
+  assert.match(t.stdout.frame(), /› \[ ON \] link!\s+broken/);
   // the unfocused agent column still marks the selected agent
   assert.match(t.stdout.frame(), /› a/);
   // further right never lands on the passive summary; left returns to agents
   await t.send('l');
-  assert.match(t.stdout.frame(), /› \[ ON \] link broken broken/);
+  assert.match(t.stdout.frame(), /› \[ ON \] link!\s+broken/);
   await t.send('h');
   assert.match(t.stdout.frame(), /› a/);
   t.unmount();
@@ -282,7 +282,7 @@ test('skill tab lists every live instance/variant and per-agent states', async (
   assert.equal((frame.match(/code-review \(/g) ?? []).length, 2);
   assert.match(frame, /only-b/);
   // first instance is the broken symlink: broken for a, missing for b (registry order)
-  assert.match(frame, /a {2}\[ ON \] link broken/);
+  assert.match(frame, /a {2}\[ ON \] link!/);
   assert.match(frame, /b {2}missing/);
   t.unmount();
 });
@@ -336,10 +336,10 @@ test('skill tab: horizontal focus moves Skills ↔ Agents, never the summary', a
   await t.send('\t');
   assert.match(t.stdout.frame(), /› broken/);
   await t.send('l');
-  assert.match(t.stdout.frame(), /› a {2}\[ ON \] link broken/);
+  assert.match(t.stdout.frame(), /› a {2}\[ ON \] link!/);
   // further right never lands on the passive summary; left returns to skills
   await t.send('l');
-  assert.match(t.stdout.frame(), /› a {2}\[ ON \] link broken/);
+  assert.match(t.stdout.frame(), /› a {2}\[ ON \] link!/);
   await t.send('h');
   assert.match(t.stdout.frame(), /› broken/);
   t.unmount();
@@ -464,9 +464,9 @@ test('broken relationships keep activation and resource form visible', async () 
   const { home } = setup();
   const t = await renderApp(home);
   await t.send('l');
-  assert.match(t.stdout.frame(), /› \[ ON \] link broken\s+broken ->/);
+  assert.match(t.stdout.frame(), /› \[ ON \] link!\s+broken ->/);
   await t.send(' ');
-  assert.match(t.stdout.frame(), /› \[ OFF \] link broken\s+broken ->/);
+  assert.match(t.stdout.frame(), /› \[ OFF \] link!\s+broken ->/);
   t.unmount();
 });
 
@@ -484,6 +484,20 @@ test('Agent projection toggles the selected local relationship immediately', asy
   t.unmount();
 });
 
+test('relationship statuses pad to a fixed width so skill names align', async () => {
+  const { home } = setup();
+  const t = await renderApp(home);
+  await t.send('l');
+  const lines = t.stdout.frame().split('\n');
+  const grilling = lines.find((l) => l.includes('[ ON ] local') && l.includes('grilling'));
+  const linked = lines.find((l) => l.includes('[ ON ] link') && l.includes('linked'));
+  const broken = lines.find((l) => l.includes('link!'));
+  assert.ok(grilling && linked && broken);
+  assert.equal(grilling.indexOf('grilling'), linked.indexOf('linked'));
+  assert.equal(linked.indexOf('linked'), broken.indexOf('broken', broken.indexOf('link!')));
+  t.unmount();
+});
+
 test('agent tab keeps the operated relationship selected after toggle', async () => {
   const { home } = setup();
   const t = await renderApp(home);
@@ -495,7 +509,7 @@ test('agent tab keeps the operated relationship selected after toggle', async ()
   const frame = t.stdout.frame();
   // the entry moved to parking, but the marker follows it — not back to the first entry
   assert.match(frame, /› \[ OFF \] local\s+grilling/);
-  assert.doesNotMatch(frame, /› \[ ON \] link broken/);
+  assert.doesNotMatch(frame, /› \[ ON \] link!/);
   t.unmount();
 });
 

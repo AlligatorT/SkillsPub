@@ -75,10 +75,11 @@ function entriesFor(rows: Row[], agentName: string): RelEntry[] {
   );
 }
 
+/** Fixed-width status column so skill names align; deadlink gets '!' (red + target suffix carry the rest). */
 function statusText(info: SkillInfo): string {
-  const state = info.underOff ? '[ OFF ]' : '[ ON ]';
-  const form = info.linked ? 'link' : 'local';
-  return `${state} ${form}${info.presence === 'deadlink' ? ' broken' : ''}`;
+  const base = `${info.underOff ? '[ OFF ]' : '[ ON ]'} ${info.linked ? 'link' : 'local'}`;
+  const text = info.presence === 'deadlink' ? `${base}!` : base;
+  return text.padEnd('[ OFF ] local'.length);
 }
 
 function statusColor(info: SkillInfo): string {
