@@ -211,6 +211,69 @@ test('manage modal creates presets in flow and toggles membership', async () => 
   t.unmount();
 });
 
+test('batch mode marks skills and applies a batch tag', async () => {
+  const { home } = setup();
+  const grillingId = fs.realpathSync(path.join(home.configDir, 'a-skills', 'grilling'));
+  const linkedId = fs.realpathSync(path.join(home.configDir, 'shared', 'real-linked'));
+  const t = await renderApp(home);
+  await t.send('v');
+  assert.match(t.stdout.frame(), /0 marked/);
+  await t.send('l');
+  await t.send('j');
+  await t.send('j'); // grilling
+  await t.send(' ');
+  assert.match(t.stdout.frame(), /1 marked/);
+  await t.send('j'); // linked
+  await t.send(' ');
+  const frame = t.stdout.frame();
+  assert.match(frame, /2 marked/);
+  assert.match(frame, /●/);
+  await t.send('t');
+  for (const input of 'tools') await t.send(input);
+  await t.send('\r');
+  assert.match(t.stdout.frame(), /Tagged 2 skills: tools/);
+  const state = () => JSON.parse(
+    fs.readFileSync(path.join(home.configDir, 'state.json'), 'utf8'));
+  assert.deepEqual(state().tags[grillingId], ['tools']);
+  assert.deepEqual(state().tags[linkedId], ['tools']);
+  await t.send('v'); // exit clears marks
+  assert.doesNotMatch(t.stdout.frame(), /2 marked/);
+  t.unmount();
+});
+
+test('batch off previews per-row plans and applies on confirm', async () => {
+  const { home } = setup();
+  const t = await renderApp(home);
+  await t.send('v');
+  await t.send('l');
+  await t.send('j');
+  await t.send('j'); // grilling
+  await t.send(' ');
+  await t.send('O');
+  const frame = t.stdout.frame();
+  assert.match(frame, /Batch off @ a\?/);
+  assert.match(frame, /global:a\/grilling  on -> off/);
+  await t.send('y');
+  assert.ok(fs.existsSync(
+    path.join(home.configDir, '.skillspub-off', 'a-skills', 'grilling', 'SKILL.md')));
+  assert.match(t.stdout.frame(), /Batch off @ a: 1 applied/);
+  t.unmount();
+});
+
+test('batch marks clear on tab switch', async () => {
+  const { home } = setup();
+  const t = await renderApp(home);
+  await t.send('v');
+  await t.send('l');
+  await t.send('j');
+  await t.send('j');
+  await t.send(' ');
+  assert.match(t.stdout.frame(), /1 marked/);
+  await t.send('\t');
+  assert.match(t.stdout.frame(), /0 marked/);
+  t.unmount();
+});
+
 test('horizontal navigation moves focus between actionable columns only', async () => {
   const { home } = setup();
   const t = await renderApp(home);

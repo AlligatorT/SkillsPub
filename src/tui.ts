@@ -21,9 +21,11 @@ import {
 } from './view.ts';
 import {
   applyActivationPlan,
+  planActivation,
   planLink,
   planToggle,
   planUnlink,
+  type ActivationPlan,
 } from './reconcile.ts';
 import {
   addPresetSelectors,
@@ -49,6 +51,13 @@ interface ManageState {
   section: 'tags' | 'presets';
   index: number;
   input?: { kind: 'tag' | 'preset'; value: string };
+}
+
+interface BatchConfirm {
+  intent: 'on' | 'off';
+  runtimeName: string;
+  plans: ActivationPlan[];
+  errors: string[];
 }
 
 interface Confirmation {
@@ -140,18 +149,20 @@ function ListColumn({
 function RowLine({
   active,
   focused,
+  marked,
   wrap = 'truncate-end',
   children,
 }: {
   active: boolean;
   focused: boolean;
+  marked?: boolean;
   wrap?: 'truncate-end' | 'wrap';
   children?: ReactNode;
 }): ReactNode {
   return h(
     Text,
-    {inverse: active && focused, bold: active && !focused, wrap},
-    `${active ? '›' : ' '} `,
+    {inverse: active && focused, bold: (active && !focused) || marked, wrap},
+    `${active ? '›' : marked ? '●' : ' '} `,
     children,
   );
 }
@@ -188,11 +199,13 @@ function RelationshipList({
   selected,
   focused,
   height,
+  marks,
 }: {
   entries: RelEntry[];
   selected: number;
   focused: boolean;
   height: number;
+  marks?: Set<string>;
 }): ReactNode {
   const start = windowStart(entries.length, selected, height);
   return h(
@@ -203,7 +216,7 @@ function RelationshipList({
       const active = start + index === selected;
       return h(
         RowLine,
-        {key: entry.key, active, focused},
+        {key: entry.key, active, focused, marked: marks?.has(entry.row.id)},
         h(Text, {color: statusColor(info)}, statusText(info)),
         ' ',
         entry.relationship.name === entry.row.name
@@ -227,12 +240,14 @@ function InstanceList({
   focused,
   width,
   height,
+  marks,
 }: {
   rows: Row[];
   selected: number;
   focused: boolean;
   width: number;
   height: number;
+  marks?: Set<string>;
 }): ReactNode {
   const start = windowStart(rows.length, selected, height);
   return h(
@@ -241,7 +256,13 @@ function InstanceList({
     ...rows.slice(start, start + height).map((row, index) =>
       h(
         RowLine,
-        {key: row.id, active: start + index === selected, focused, wrap: 'wrap'},
+        {
+          key: row.id,
+          active: start + index === selected,
+          focused,
+          marked: marks?.has(row.id),
+          wrap: 'wrap',
+        },
         row.displayName,
       ),
     ),
@@ -356,6 +377,21 @@ function InfoPanel({
           ...labeled('Tags', membership?.tags.join(', '), 'green'),
           ...labeled('Presets', membership?.presets.join(', '), 'magenta'),
         ],
+  );
+}
+
+function BatchActivationModal({confirm}: {confirm: BatchConfirm}): ReactNode {
+  const lines = confirm.plans.flatMap((plan) =>
+    plan.targets.map((target) =>
+      `  ${target.runtimeId}/${target.slot}  ${target.from} -> ${target.to}`));
+  return h(
+    Box,
+    {flexGrow: 1, flexDirection: 'column', borderStyle: 'round', borderColor: 'yellow', paddingX: 1, justifyContent: 'center'},
+    h(Text, {bold: true}, `Batch ${confirm.intent} @ ${confirm.runtimeName}?`),
+    ...confirm.errors.map((error, index) => h(Text, {key: `err-${index}`, color: 'red'}, `  ${error}`)),
+    ...lines.slice(0, 12).map((line, index) => h(Text, {key: `line-${index}`}, line)),
+    lines.length > 12 ? h(Text, {dimColor: true}, `  … ${lines.length - 12} more`) : null,
+    h(Text, {color: 'yellow'}, ' y confirm  n/esc cancel '),
   );
 }
 
@@ -499,6 +535,9 @@ export function App({home}: {home: Home}): ReactNode {
   const [modal, setModal] = useState<{row: Row; scroll: number} | null>(null);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [manage, setManage] = useState<ManageState | null>(null);
+  const [batch, setBatch] = useState<{ marks: Set<string> } | null>(null);
+  const [batchConfirm, setBatchConfirm] = useState<BatchConfirm | null>(null);
+  const [batchTag, setBatchTag] = useState<{ action: 'add' | 'rm'; value: string } | null>(null);
   const [feedback, setFeedback] = useState('');
 
   const agents = snapshot.agents;
@@ -707,6 +746,59 @@ export function App({home}: {home: Home}): ReactNode {
       if (input && !key.ctrl && !key.meta) return setQuery((value) => value + input);
       return;
     }
+    if (batchConfirm) {
+      if (input === 'y') {
+        let applied = 0;
+        const failures: string[] = [];
+        for (const plan of batchConfirm.plans) {
+          try {
+            applyActivationPlan(home, plan);
+            applied++;
+          } catch (err) {
+            failures.push((err as Error).message);
+          }
+        }
+        refresh();
+        setFeedback(
+          `Batch ${batchConfirm.intent} @ ${batchConfirm.runtimeName}: ${applied} applied` +
+          (failures.length > 0 ? `, ${failures.length} failed` : ''),
+        );
+        return setBatchConfirm(null);
+      }
+      if (input === 'n' || key.escape) return setBatchConfirm(null);
+      return;
+    }
+    if (batchTag) {
+      if (key.escape) return setBatchTag(null);
+      if (key.return) {
+        const value = batchTag.value.trim();
+        if (value && batch) {
+          const markedRows = rows.filter((row) => batch.marks.has(row.id) && row.realPath);
+          let count = 0;
+          const failures: string[] = [];
+          for (const row of markedRows) {
+            try {
+              if (batchTag.action === 'add') addResourceTags(home, `skill:${row.id}`, [value]);
+              else removeResourceTags(home, `skill:${row.id}`, [value]);
+              count++;
+            } catch (err) {
+              failures.push((err as Error).message);
+            }
+          }
+          refresh();
+          setFeedback(
+            `${batchTag.action === 'add' ? 'Tagged' : 'Untagged'} ${count} skills: ${value}` +
+            (failures.length > 0 ? ` (${failures.length} failed)` : ''),
+          );
+        }
+        return setBatchTag(null);
+      }
+      if (key.backspace || key.delete || input === '\x7f')
+        return setBatchTag({...batchTag, value: batchTag.value.slice(0, -1)});
+      if (input && !key.ctrl && !key.meta)
+        return setBatchTag({...batchTag, value: batchTag.value + input});
+      return;
+    }
     if (confirmation) {
       if (input === 'y') {
         const neighbor = tab === 'agent'
@@ -729,6 +821,42 @@ export function App({home}: {home: Home}): ReactNode {
       if (input === 'n' || key.escape) return setConfirmation(null);
       return;
     }
+    if (batch) {
+      if (input === 'v' || key.escape) return setBatch(null);
+      if (key.tab) {
+        setBatch({marks: new Set()});
+        return setTab((value) => (value === 'agent' ? 'skill' : 'agent'));
+      }
+      if (input === ' ' && selectedRow?.realPath) {
+        const marks = new Set(batch.marks);
+        if (marks.has(selectedRow.id)) marks.delete(selectedRow.id);
+        else marks.add(selectedRow.id);
+        return setBatch({marks});
+      }
+      if (input === ' ') return setFeedback('cannot mark a broken relationship');
+      if (input === 'o' || input === 'O') {
+        const intent = input === 'o' ? 'on' : 'off';
+        const runtime = selectedAgent;
+        const markedRows = rows.filter((row) => batch.marks.has(row.id) && row.realPath);
+        if (!runtime || markedRows.length === 0)
+          return setFeedback('Batch: mark at least one skill with a directory');
+        const plans: ActivationPlan[] = [];
+        const errors: string[] = [];
+        for (const row of markedRows) {
+          try {
+            plans.push(planActivation(home, `skill:${row.id}`, [runtime.name], intent));
+          } catch (err) {
+            errors.push(`${row.name}: ${(err as Error).message}`);
+          }
+        }
+        return setBatchConfirm({intent, runtimeName: runtime.name, plans, errors});
+      }
+      if (input === 't' || input === 'T')
+        return setBatchTag({action: input === 't' ? 'add' : 'rm', value: ''});
+      if (input === 'i' || input === 'u' || input === 'm')
+        return setFeedback('exit batch mode first (v)');
+    }
+    if (input === 'v') return setBatch({marks: new Set()});
     if (input === 'm' && selectedRow?.realPath)
       return setManage({rowId: selectedRow.id, section: 'tags', index: 0});
     if (input === 'q' || (key.ctrl && input === 'c')) return exit();
@@ -862,6 +990,12 @@ export function App({home}: {home: Home}): ReactNode {
               manage,
             }),
           )
+      : batchConfirm
+        ? h(
+            Box,
+            {height: bodyHeight, paddingLeft: 2, paddingRight: 2, paddingTop: 1},
+            h(BatchActivationModal, {confirm: batchConfirm}),
+          )
       : confirmation
         ? h(
             Box,
@@ -884,6 +1018,7 @@ export function App({home}: {home: Home}): ReactNode {
               selected: relationshipIndex,
               focused: focusColumn === 1,
               height: listHeight,
+              marks: batch?.marks,
             }),
             wide
               ? h(InfoPanel, {
@@ -903,6 +1038,7 @@ export function App({home}: {home: Home}): ReactNode {
               focused: focusColumn === 0,
               width: instanceWidth,
               height: listHeight,
+              marks: batch?.marks,
             }),
             wide
               ? h(InfoPanel, {
@@ -928,11 +1064,17 @@ export function App({home}: {home: Home}): ReactNode {
         ? ' ↑↓/jk scroll  PgUp/PgDn page  esc close '
         : manage
           ? ` ${feedback}${feedback ? '  ' : ''}j/k move  tab section  space toggle  a add  x rm tag  esc close `
-          : confirmation
-            ? ' y confirm  n/esc cancel '
-            : searching
-            ? ` search: ${query || '…'}  enter apply  esc clear `
-            : ` ${feedback}${feedback ? '  ' : ''}${tab}:${columnName}  ←→/hl  ↑↓/jk${actionHint}  enter SKILL.md  m manage  / search  s sort:${sortLabel(sort)}  R refresh  tab  q `,
+        : batchConfirm
+          ? ' y confirm  n/esc cancel '
+        : batchTag
+          ? ` tag ${batchTag.action === 'add' ? 'add' : 'rm'}: ${batchTag.value}`
+        : batch
+          ? ` ${feedback}${feedback ? '  ' : ''}v/esc exit  space mark  o on  O off  t tag  T untag  ${batch.marks.size} marked `
+        : confirmation
+          ? ' y confirm  n/esc cancel '
+        : searching
+          ? ` search: ${query || '…'}  enter apply  esc clear `
+          : ` ${feedback}${feedback ? '  ' : ''}${tab}:${columnName}  ←→/hl  ↑↓/jk${actionHint}  enter SKILL.md  m manage  / search  s sort:${sortLabel(sort)}  R refresh  tab  q `,
     ),
   );
 }
