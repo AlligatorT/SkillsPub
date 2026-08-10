@@ -257,6 +257,24 @@ test('batch off previews per-row plans and applies on confirm', async () => {
   assert.ok(fs.existsSync(
     path.join(home.configDir, '.skillspub-off', 'a-skills', 'grilling', 'SKILL.md')));
   assert.match(t.stdout.frame(), /Batch off @ a: 1 applied/);
+  assert.match(t.stdout.frame(), /1 marked/); // mark survives the move to parking
+  t.unmount();
+});
+
+test('batch off keeps marks on moved (local) and removed (link) rows', async () => {
+  const { home } = setup();
+  const t = await renderApp(home);
+  await t.send('v');
+  await t.send('l');
+  await t.send('j');
+  await t.send('j'); // grilling (local)
+  await t.send(' ');
+  await t.send('j'); // linked (link)
+  await t.send(' ');
+  await t.send('O');
+  await t.send('y');
+  assert.match(t.stdout.frame(), /Batch off @ a: 2 applied/);
+  assert.match(t.stdout.frame(), /2 marked/);
   t.unmount();
 });
 

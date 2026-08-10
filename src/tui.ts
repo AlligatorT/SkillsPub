@@ -91,6 +91,11 @@ function statusText(info: SkillInfo): string {
   return text.padEnd('[ OFF ] local'.length);
 }
 
+/** Mark identity that survives on/off moves: configDir-relative path with the off-parking prefix stripped. */
+function markKey(configDir: string, realPath: string): string {
+  return path.relative(configDir, realPath).replace(/^\.skillspub-off\//, '');
+}
+
 function statusColor(info: SkillInfo): string {
   if (info.presence === 'deadlink') return 'red';
   return info.presence === 'on' ? 'green' : 'yellow';
@@ -565,6 +570,13 @@ export function App({home}: {home: Home}): ReactNode {
   const instance = rows[instanceIndex];
 
   const wide = width >= WIDE_MIN;
+  const markedIds = batch
+    ? new Set(
+        rows
+          .filter((row) => row.realPath && batch.marks.has(markKey(home.configDir, row.realPath)))
+          .map((row) => row.id),
+      )
+    : undefined;
   const bodyHeight = Math.max(3, height - 2);
   const listHeight = Math.max(1, bodyHeight - 3);
   const agentWidth = Math.max(
@@ -773,7 +785,8 @@ export function App({home}: {home: Home}): ReactNode {
       if (key.return) {
         const value = batchTag.value.trim();
         if (value && batch) {
-          const markedRows = rows.filter((row) => batch.marks.has(row.id) && row.realPath);
+          const markedRows = rows.filter(
+          (row) => row.realPath && batch.marks.has(markKey(home.configDir, row.realPath)));
           let count = 0;
           const failures: string[] = [];
           for (const row of markedRows) {
@@ -829,15 +842,17 @@ export function App({home}: {home: Home}): ReactNode {
       }
       if (input === ' ' && selectedRow?.realPath) {
         const marks = new Set(batch.marks);
-        if (marks.has(selectedRow.id)) marks.delete(selectedRow.id);
-        else marks.add(selectedRow.id);
+        const key = markKey(home.configDir, selectedRow.realPath);
+        if (marks.has(key)) marks.delete(key);
+        else marks.add(key);
         return setBatch({marks});
       }
       if (input === ' ') return setFeedback('cannot mark a broken relationship');
       if (input === 'o' || input === 'O') {
         const intent = input === 'o' ? 'on' : 'off';
         const runtime = selectedAgent;
-        const markedRows = rows.filter((row) => batch.marks.has(row.id) && row.realPath);
+        const markedRows = rows.filter(
+          (row) => row.realPath && batch.marks.has(markKey(home.configDir, row.realPath)));
         if (!runtime || markedRows.length === 0)
           return setFeedback('Batch: mark at least one skill with a directory');
         const plans: ActivationPlan[] = [];
@@ -1018,7 +1033,7 @@ export function App({home}: {home: Home}): ReactNode {
               selected: relationshipIndex,
               focused: focusColumn === 1,
               height: listHeight,
-              marks: batch?.marks,
+              marks: markedIds,
             }),
             wide
               ? h(InfoPanel, {
@@ -1038,7 +1053,7 @@ export function App({home}: {home: Home}): ReactNode {
               focused: focusColumn === 0,
               width: instanceWidth,
               height: listHeight,
-              marks: batch?.marks,
+              marks: markedIds,
             }),
             wide
               ? h(InfoPanel, {
