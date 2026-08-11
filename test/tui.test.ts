@@ -336,6 +336,31 @@ test('project TUI batch-on links a global skill into the project runtime', async
   t.unmount();
 });
 
+test('project TUI R refresh keeps the project snapshot', async () => {
+  const { home } = setup();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-proj-'));
+  const t = await renderApp(home, 100, 30, projectDir);
+  assert.match(t.stdout.frame(), /Project:/);
+  await t.send('R');
+  assert.match(t.stdout.frame(), /Project:/); // not reverted to the global snapshot
+  t.unmount();
+});
+
+test('project TUI intercepts unlink on an inherited link', async () => {
+  const { home } = setup();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-proj-'));
+  const t = await renderApp(home, 100, 30, projectDir);
+  await t.send('l');
+  await t.send('j');
+  await t.send('j');
+  await t.send('j'); // linked (inherited global link)
+  await t.send('u');
+  assert.match(t.stdout.frame(), /read-only: inherited from global/);
+  // the link is untouched
+  assert.ok(fs.lstatSync(path.join(home.configDir, 'a-skills', 'linked')).isSymbolicLink());
+  t.unmount();
+});
+
 test('project TUI toggles a project-scope skill off into project parking', async () => {
   const { home } = setup();
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-proj-'));

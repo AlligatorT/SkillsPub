@@ -342,7 +342,7 @@ export function projectTuiSnapshot(home: Home, projectPath: string): TuiSnapshot
       .map((runtime) => ({ name: runtime.key, dir: runtime.discoveryRoot })),
     rows: projectRows(report),
     catalog: readViewState(home),
-    project: fs.realpathSync(projectPath),
+    project: report.projectPath,
   };
 }
 

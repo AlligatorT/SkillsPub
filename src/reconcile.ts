@@ -31,7 +31,6 @@ export interface PresetScope {
 }
 
 export interface PresetReconcilePlan extends ActivationPlan {
-  stateFile: string;
   claims: Record<string, string[]>;
   lastClaims: Record<string, string[]>;
   presetActivations: Record<string, string[]>;

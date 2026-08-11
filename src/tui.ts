@@ -891,7 +891,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     if (input === 'R') {
       const currentAgent = agent?.name;
       const currentInstanceAgent = instanceAgent?.name;
-      const next = tuiSnapshot(home);
+      const next = takeSnapshot();
       setSnapshot(next);
       setAgentIndex(Math.max(0, next.agents.findIndex(({name}) => name === currentAgent)));
       setInstanceAgentIndex(Math.max(0, next.agents.findIndex(({name}) => name === currentInstanceAgent)));
