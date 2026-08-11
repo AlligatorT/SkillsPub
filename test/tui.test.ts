@@ -79,10 +79,15 @@ function setup() {
   return { home: { configDir } };
 }
 
-async function renderApp(home: { configDir: string }, columns = 100, rows = 30) {
+async function renderApp(
+  home: { configDir: string },
+  columns = 100,
+  rows = 30,
+  projectPath?: string,
+) {
   const stdin = new FakeStdin();
   const stdout = new FakeStdout(columns, rows);
-  const app = render(h(App, { home }), {
+  const app = render(h(App, { home, projectPath }), {
     stdin: stdin as never,
     stdout: stdout as never,
     interactive: true,
@@ -289,6 +294,66 @@ test('batch marks clear on tab switch', async () => {
   assert.match(t.stdout.frame(), /1 marked/);
   await t.send('\t');
   assert.match(t.stdout.frame(), /0 marked/);
+  t.unmount();
+});
+
+test('project TUI badges the project and intercepts inherited mutations', async () => {
+  const { home } = setup();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-proj-'));
+  const t = await renderApp(home, 100, 30, projectDir);
+  const frame = t.stdout.frame();
+  assert.match(frame, /Project:/);
+  assert.match(frame, /·global/);
+  await t.send('l');
+  await t.send('j');
+  await t.send('j'); // grilling (inherited global ON)
+  await t.send(' ');
+  assert.match(t.stdout.frame(), /read-only: inherited from global/);
+  t.unmount();
+});
+
+test('project TUI batch-on links a global skill into the project runtime', async () => {
+  const { home } = setup();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-proj-'));
+  const t = await renderApp(home, 100, 30, projectDir);
+  await t.send('v');
+  await t.send('l');
+  await t.send('j');
+  await t.send('j'); // grilling
+  await t.send(' ');
+  await t.send('o');
+  const frame = t.stdout.frame();
+  assert.match(frame, /Batch on @ a\?/);
+  assert.match(frame, /missing -> on/);
+  await t.send('y');
+  assert.match(t.stdout.frame(), /Batch on @ a: 1 applied/);
+  const link = path.join(projectDir, '.a', 'skills', 'grilling');
+  assert.ok(fs.lstatSync(link).isSymbolicLink());
+  assert.ok(fs.existsSync(path.join(link, 'SKILL.md')));
+  assert.match(
+    fs.readFileSync(path.join(projectDir, '.skillspub', 'state.json'), 'utf8'),
+    /baseIntent/);
+  t.unmount();
+});
+
+test('project TUI toggles a project-scope skill off into project parking', async () => {
+  const { home } = setup();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-proj-'));
+  const projSkills = path.join(projectDir, '.a', 'skills');
+  fs.mkdirSync(projSkills, { recursive: true });
+  fs.symlinkSync(
+    path.join(home.configDir, 'a-skills', 'grilling'),
+    path.join(projSkills, 'grilling'));
+  const t = await renderApp(home, 100, 30, projectDir);
+  await t.send('\t'); // skill tab
+  await t.send('j');
+  await t.send('j');
+  await t.send('j'); // grilling row
+  await t.send('l'); // agents column, a selected
+  await t.send(' ');
+  assert.match(t.stdout.frame(), /grilling @ a: off/);
+  assert.ok(fs.existsSync(path.join(projectDir, '.skillspub', 'off', 'a', 'grilling')));
+  assert.ok(!fs.existsSync(path.join(projSkills, 'grilling')));
   t.unmount();
 });
 

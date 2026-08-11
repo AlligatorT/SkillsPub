@@ -11,6 +11,7 @@ import {
   searchRows,
   skillDetail,
   sortRows,
+  projectTuiSnapshot,
   tuiSnapshot,
   type Agent,
   type Row,
@@ -26,6 +27,7 @@ import {
   planToggle,
   planUnlink,
   type ActivationPlan,
+  type PresetScope,
 } from './reconcile.ts';
 import {
   addPresetSelectors,
@@ -205,12 +207,14 @@ function RelationshipList({
   focused,
   height,
   marks,
+  showScope,
 }: {
   entries: RelEntry[];
   selected: number;
   focused: boolean;
   height: number;
   marks?: Set<string>;
+  showScope?: boolean;
 }): ReactNode {
   const start = windowStart(entries.length, selected, height);
   return h(
@@ -229,6 +233,9 @@ function RelationshipList({
           : `${entry.relationship.name} → ${entry.row.displayName}`,
         info.presence === 'deadlink' && info.target
           ? h(Text, {dimColor: true}, ` -> ${info.target}`)
+          : null,
+        showScope && entry.relationship.scope && entry.relationship.scope !== 'project'
+          ? h(Text, {dimColor: true}, ` ·${entry.relationship.scope}`)
           : null,
       );
     }),
@@ -508,7 +515,7 @@ function DetailModal({
   );
 }
 
-export function App({home}: {home: Home}): ReactNode {
+export function App({home, projectPath}: {home: Home; projectPath?: string}): ReactNode {
   const {exit} = useApp();
   const {stdout} = useStdout();
   const readSize = () => ({
@@ -526,7 +533,10 @@ export function App({home}: {home: Home}): ReactNode {
   }, [stdout]);
   const {width, height} = size;
 
-  const [snapshot, setSnapshot] = useState<TuiSnapshot>(() => tuiSnapshot(home));
+  const takeSnapshot = () =>
+    projectPath ? projectTuiSnapshot(home, projectPath) : tuiSnapshot(home);
+  const [snapshot, setSnapshot] = useState<TuiSnapshot>(takeSnapshot);
+  const planScope: PresetScope = projectPath ? { projectPath } : {};
   const [tab, setTab] = useState<Tab>('agent');
   const [focusColumn, setFocusColumn] = useState<0 | 1>(0);
   const [agentIndex, setAgentIndex] = useState(0);
@@ -594,7 +604,7 @@ export function App({home}: {home: Home}): ReactNode {
     width - agentStatusWidth - infoWidth,
   );
   const modalContent = modal
-    ? (skillDetail(home, modal.row.id)?.content ?? 'SKILL.md unavailable')
+    ? (skillDetail(home, modal.row.id, projectPath)?.content ?? 'SKILL.md unavailable')
     : '';
   const modalLines = modal ? detailLines(modalContent, Math.max(1, width - 8)) : [];
   const modalPage = Math.max(1, height - 6);
@@ -634,7 +644,7 @@ export function App({home}: {home: Home}): ReactNode {
   /** Re-read disk, then re-anchor selection: mutation moves entries, so locate
    *  the fresh row/relationship by (runtimeId, slot) or stable row id. */
   const refresh = (keep?: { rowId?: string; runtimeId?: string; slot?: string }) => {
-    const next = tuiSnapshot(home);
+    const next = takeSnapshot();
     setSnapshot(next);
     if (!keep) return;
     const row = keep.rowId !== undefined
@@ -819,9 +829,9 @@ export function App({home}: {home: Home}): ReactNode {
           : undefined;
         try {
           if (confirmation.kind === 'link') {
-            applyActivationPlan(home, planLink(home, confirmation.row.id, confirmation.agent.name));
+            applyActivationPlan(home, planLink(home, confirmation.row.id, confirmation.agent.name, planScope));
           } else {
-            applyActivationPlan(home, planUnlink(home, confirmation.runtimeId, confirmation.slot));
+            applyActivationPlan(home, planUnlink(home, confirmation.runtimeId, confirmation.slot, planScope));
           }
           refresh({rowId: confirmation.row.id});
           if (neighbor) setRelationshipKey(neighbor.key);
@@ -859,7 +869,7 @@ export function App({home}: {home: Home}): ReactNode {
         const errors: string[] = [];
         for (const row of markedRows) {
           try {
-            plans.push(planActivation(home, `skill:${row.id}`, [runtime.name], intent));
+            plans.push(planActivation(home, `skill:${row.id}`, [runtime.name], intent, planScope));
           } catch (err) {
             errors.push(`${row.name}: ${(err as Error).message}`);
           }
@@ -922,8 +932,10 @@ export function App({home}: {home: Home}): ReactNode {
       return;
     }
     if (input === ' ' && actionable && selectedInfo && selectedRel) {
+      if (selectedRel.readOnly)
+        return setFeedback(`read-only: inherited from ${selectedRel.scope} — i links it into this project`);
       try {
-        applyActivationPlan(home, planToggle(home, selectedRel.runtimeId, selectedRel.slot));
+        applyActivationPlan(home, planToggle(home, selectedRel.runtimeId, selectedRel.slot, planScope));
         refresh({runtimeId: selectedRel.runtimeId, slot: selectedRel.slot});
         setFeedback(`${selectedRow.name} @ ${selectedAgent.name}: ${selectedInfo.underOff ? 'on' : 'off'}`);
       } catch (err) {
@@ -944,6 +956,8 @@ export function App({home}: {home: Home}): ReactNode {
       });
     }
     if (input === 'u' && actionable && selectedInfo?.linked && selectedRel) {
+      if (selectedRel.readOnly)
+        return setFeedback(`read-only: inherited from ${selectedRel.scope}`);
       return setConfirmation({
         kind: 'unlink',
         row: selectedRow,
@@ -986,6 +1000,7 @@ export function App({home}: {home: Home}): ReactNode {
       h(Text, {inverse: tab === 'agent'}, ' Agent '),
       ' ',
       h(Text, {inverse: tab === 'skill'}, ' Skill '),
+      snapshot.project ? h(Text, {color: 'cyan'}, `  Project: ${snapshot.project}`) : null,
       `  Sort: ${sortLabel(sort)}${query ? `  Search: ${query}` : ''}`,
     ),
     modal
@@ -1034,6 +1049,7 @@ export function App({home}: {home: Home}): ReactNode {
               focused: focusColumn === 1,
               height: listHeight,
               marks: markedIds,
+              showScope: snapshot.project !== undefined,
             }),
             wide
               ? h(InfoPanel, {
@@ -1094,13 +1110,16 @@ export function App({home}: {home: Home}): ReactNode {
   );
 }
 
-export async function runTui(home: Home = defaultHome()): Promise<void> {
+export async function runTui(
+  home: Home = defaultHome(),
+  options: { projectPath?: string } = {},
+): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     throw new Error('skillspub tui requires an interactive terminal');
   }
   process.stdout.write('\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l');
   try {
-    const app = render(h(App, {home}), {exitOnCtrlC: false, patchConsole: false});
+    const app = render(h(App, {home, projectPath: options.projectPath}), {exitOnCtrlC: false, patchConsole: false});
     await app.waitUntilExit();
   } finally {
     process.stdout.write('\x1b[?25h\x1b[?1049l');

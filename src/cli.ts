@@ -71,7 +71,8 @@ const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the sour
   skillspub doctor [--repair --yes]    diagnose; explicitly confirm safe repairs
   skillspub project <path> scan|doctor|shared|preset ...  operate on the exact Project Runtime roots
   skillspub runtimes                   Runtime registry (~/.config/skillspub/runtimes.json)
-  skillspub tui                        interactive full-screen skill browser
+  skillspub tui [--project [path]]     interactive full-screen skill browser
+                                       (--project: project-scope view, cwd when path omitted)
 `;
 
 export function shouldRunTui(
@@ -655,9 +656,14 @@ async function main(
   const home = defaultHome({ migrate: !readOnly });
   try {
     if (shouldRunTui(cmd, stdinIsTty, stdoutIsTty)) {
-      if (cmd === 'tui' && rest.length > 0)
-        throw new Error('usage: skillspub tui');
-      await (await import('./tui.ts')).runTui(home);
+      let projectPath: string | undefined;
+      const args = [...rest];
+      while (args.length > 0) {
+        const arg = args.shift();
+        if (arg === '--project') projectPath = args.shift() ?? process.cwd();
+        else throw new Error('usage: skillspub tui [--project [path]]');
+      }
+      await (await import('./tui.ts')).runTui(home, { projectPath });
     } else switch (cmd) {
       case 'ls':
         cmdLs(home, rest);
