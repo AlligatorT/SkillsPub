@@ -5,8 +5,10 @@ import {
   readStateFile,
   runtimeSlotId,
   scanGlobalInventory,
+  scanProjectInventory,
   type InventoryScanReport,
   type RuntimeRelationship,
+  type RuntimeScope,
   type SkillProvenance,
 } from './inventory.ts';
 
@@ -29,6 +31,10 @@ export interface SkillInfo {
   underOff: boolean;
   /** symlink target, for symlinked skills and dead links */
   target?: string;
+  /** Runtime scope this cell comes from (project scans only). */
+  scope?: RuntimeScope;
+  /** Inherited cells reject mutations (ADR-0007: only the exact project dir is writable). */
+  readOnly?: boolean;
 }
 
 export interface SkillRelationship {
@@ -37,6 +43,8 @@ export interface SkillRelationship {
   info: SkillInfo;
   runtimeId: string;
   slot: string;
+  scope?: RuntimeScope;
+  readOnly?: boolean;
 }
 
 export interface SkillInstance {
@@ -55,7 +63,10 @@ export interface SkillInstance {
 export type Row = SkillInstance;
 export type SortOrder = 'name' | 'status' | 'source';
 
-function toInfo(relationship: RuntimeRelationship): SkillInfo {
+function toInfo(
+  relationship: RuntimeRelationship,
+  runtime?: InventoryScanReport['runtimes'][number],
+): SkillInfo {
   return {
     presence: relationship.realPath ? relationship.activation : 'deadlink',
     path: relationship.path,
@@ -63,6 +74,8 @@ function toInfo(relationship: RuntimeRelationship): SkillInfo {
     linked: relationship.form === 'link',
     underOff: relationship.activation === 'off',
     target: relationship.target,
+    scope: runtime?.scope,
+    readOnly: runtime ? !runtime.writable : undefined,
   };
 }
 
@@ -103,6 +116,7 @@ function readDescription(realPath?: string): string | undefined {
 /** Project one scan into matrix rows. Pure: no disk or state reads beyond the report. */
 export function projectRows(report: InventoryScanReport): Row[] {
   const keys = new Map(report.runtimes.map((runtime) => [runtime.id, runtime.key]));
+  const runtimeById = new Map(report.runtimes.map((runtime) => [runtime.id, runtime]));
   const provenanceBySlot = new Map(report.slots.map((slot) => [slot.id, slot.provenance]));
   const grouped = new Map<string, SkillInstance>();
   for (const relationship of report.relationships) {
@@ -123,14 +137,17 @@ export function projectRows(report: InventoryScanReport): Row[] {
       grouped.set(id, instance);
     }
     const agent = keys.get(relationship.runtimeId) ?? relationship.runtimeKey;
+    const runtime = runtimeById.get(relationship.runtimeId);
     // Discovery entries scan before parking entries, so ??= prefers ON.
-    instance.agents[agent] ??= toInfo(relationship);
+    instance.agents[agent] ??= toInfo(relationship, runtime);
     instance.relationships.push({
       agent,
       name: relationship.name,
-      info: toInfo(relationship),
+      info: toInfo(relationship, runtime),
       runtimeId: relationship.runtimeId,
       slot: relationship.slot,
+      scope: runtime?.scope,
+      readOnly: runtime ? !runtime.writable : undefined,
     });
   }
 
@@ -295,6 +312,8 @@ export interface SkillDetail {
 export interface TuiSnapshot {
   agents: Agent[];
   rows: Row[];
+  /** Project root when this is a project-scope snapshot (ADR-0010). */
+  project?: string;
   catalog: {
     bundles: Record<string, string[]>;
     tags: Record<string, string[]>;
@@ -313,12 +332,29 @@ export function tuiSnapshot(home: Home): TuiSnapshot {
   };
 }
 
+/** Project-scope snapshot (ADR-0010): agent columns are the project runtimes only;
+ *  rows are the project + parent + global union, inherited cells marked read-only. */
+export function projectTuiSnapshot(home: Home, projectPath: string): TuiSnapshot {
+  const report = scanProjectInventory(home, projectPath);
+  return {
+    agents: report.runtimes
+      .filter((runtime) => runtime.scope === 'project')
+      .map((runtime) => ({ name: runtime.key, dir: runtime.discoveryRoot })),
+    rows: projectRows(report),
+    catalog: readViewState(home),
+    project: report.projectPath,
+  };
+}
+
 /** Assemble detail for one explicit instance identity. */
 export function skillDetail(
   home: Home,
   instanceId: string,
+  projectPath?: string,
 ): SkillDetail | undefined {
-  const report = scanGlobalInventory(home, undefined, { persist: false });
+  const report = projectPath
+    ? scanProjectInventory(home, projectPath, undefined, { persist: false })
+    : scanGlobalInventory(home, undefined, { persist: false });
   const rows = projectRows(report);
   const instance = rows.find(
     (candidate) => candidate.id === instanceId,

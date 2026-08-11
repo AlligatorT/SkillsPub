@@ -198,3 +198,27 @@ test('search/sort/filter/untagged operate on projected rows', () => {
     .map((row) => row.name), ['zebra']);
   assert.deepEqual(untagged(rows, { '/src/zebra': ['tools'] }), ['grilling']);
 });
+
+test('projectRows propagates runtime scope and read-only flags', () => {
+  const project = {
+    ...runtime('claude'),
+    id: 'project:/p:claude',
+    scope: 'project' as const,
+    writable: true,
+  };
+  const global = {
+    ...runtime('claude'),
+    id: 'global:claude',
+    scope: 'global' as const,
+    writable: false,
+  };
+  const rows = projectRows(report({
+    runtimes: [project, global],
+    relationships: [relationship({ runtimeId: 'global:claude', runtimeKey: 'claude' })],
+  }));
+  assert.equal(rows[0].agents.claude?.scope, 'global');
+  assert.equal(rows[0].agents.claude?.readOnly, true);
+  assert.equal(rows[0].relationships[0].scope, 'global');
+  assert.equal(rows[0].relationships[0].readOnly, true);
+});
+
