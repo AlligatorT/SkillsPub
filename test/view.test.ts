@@ -45,6 +45,7 @@ function relationship(overrides: Partial<RuntimeRelationship>): RuntimeRelations
 }
 
 function report(pieces: {
+  scope?: InventoryScanReport['scope'];
   runtimes?: ScannedRuntime[];
   relationships?: RuntimeRelationship[];
   slots?: InventoryScanReport['slots'];
@@ -63,7 +64,7 @@ function report(pieces: {
       }]),
   ).values()];
   return {
-    scope: 'global',
+    scope: pieces.scope ?? 'global',
     runtimes: pieces.runtimes ?? [runtime('claude'), runtime('pi')],
     resources,
     slots: pieces.slots ?? [],
@@ -219,6 +220,59 @@ test('projectRows propagates runtime scope and read-only flags', () => {
   assert.equal(rows[0].agents.claude?.scope, 'global');
   assert.equal(rows[0].agents.claude?.readOnly, true);
   assert.equal(rows[0].relationships[0].scope, 'global');
+  assert.equal(rows[0].relationships[0].readOnly, true);
+});
+
+test('project scope keeps one effective cell per Skill and Target', () => {
+  const project = {
+    ...runtime('claude'),
+    id: 'project:/p:claude',
+    scope: 'project' as const,
+    writable: true,
+  };
+  const parent = {
+    ...runtime('claude'),
+    id: 'parent:/parent:claude',
+    scope: 'parent' as const,
+    writable: false,
+  };
+  const global = {
+    ...runtime('claude'),
+    id: 'global:claude',
+    scope: 'global' as const,
+    writable: false,
+  };
+  const rows = projectRows(report({
+    scope: 'project',
+    runtimes: [project, parent, global],
+    relationships: [
+      relationship({
+        runtimeId: 'project:/p:claude',
+        runtimeKey: 'claude',
+        activation: 'off',
+        path: '/p/.skillspub/off/claude/grilling',
+        readOnly: false,
+      }),
+      relationship({
+        runtimeId: 'parent:/parent:claude',
+        runtimeKey: 'claude',
+        path: '/parent/.claude/skills/grilling',
+        readOnly: true,
+      }),
+      relationship({
+        runtimeId: 'global:claude',
+        runtimeKey: 'claude',
+        path: '/roots/claude/skills/grilling',
+        readOnly: true,
+      }),
+    ],
+  }));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].relationships.length, 1);
+  assert.equal(rows[0].agents.claude?.scope, 'parent');
+  assert.equal(rows[0].agents.claude?.presence, 'on');
+  assert.equal(rows[0].agents.claude?.readOnly, true);
+  assert.equal(rows[0].relationships[0].scope, 'parent');
   assert.equal(rows[0].relationships[0].readOnly, true);
 });
 

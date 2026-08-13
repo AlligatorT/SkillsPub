@@ -79,6 +79,16 @@ function toInfo(
   };
 }
 
+/** One Skill × Target cell for a project scan: inherited ON wins unless the project is ON. */
+function effectiveProjectRelationship(relationships: SkillRelationship[]): SkillRelationship {
+  const project = relationships.find((relationship) => relationship.scope === 'project');
+  const inheritedOn = relationships.find((relationship) =>
+    relationship.scope !== 'project' && relationship.info.presence === 'on');
+  if (project?.info.presence === 'on') return project;
+  if (inheritedOn) return inheritedOn;
+  return project ?? relationships[0];
+}
+
 export function viewAgents(report: InventoryScanReport): Agent[] {
   return report.runtimes.map((runtime) => ({
     name: runtime.key,
@@ -149,6 +159,21 @@ export function projectRows(report: InventoryScanReport): Row[] {
       scope: runtime?.scope,
       readOnly: runtime ? !runtime.writable : undefined,
     });
+  }
+
+  if (report.scope === 'project') {
+    for (const instance of grouped.values()) {
+      const byAgent = new Map<string, SkillRelationship[]>();
+      for (const relationship of instance.relationships) {
+        const list = byAgent.get(relationship.agent) ?? [];
+        list.push(relationship);
+        byAgent.set(relationship.agent, list);
+      }
+      instance.relationships = [...byAgent.values()].map(effectiveProjectRelationship);
+      instance.agents = Object.fromEntries(
+        instance.relationships.map((relationship) => [relationship.agent, relationship.info]),
+      );
+    }
   }
 
   const instances = [...grouped.values()].sort(

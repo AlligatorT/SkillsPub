@@ -36,11 +36,15 @@ class FakeStdout extends PassThrough {
     this.columns = columns;
     this.rows = rows;
   }
-  write(chunk: unknown): boolean {
+  write(chunk: unknown, encoding?: unknown, cb?: unknown): boolean {
     const s = String(chunk);
     // Each interactive render starts with erase/clear control sequences.
     if (/\x1b\[(2K|2J|3J|1A|\d+F)/.test(s)) this.current = s;
     else this.current += s;
+    const done = typeof encoding === 'function'
+      ? encoding as () => void
+      : typeof cb === 'function' ? cb as () => void : undefined;
+    if (done) queueMicrotask(done);
     return true;
   }
   frame(): string {
@@ -94,11 +98,12 @@ async function renderApp(
     exitOnCtrlC: false,
     patchConsole: false,
   });
-  const flush = () =>
-    new Promise<void>((resolve) => setTimeout(resolve, 80));
+  const flush = () => app.waitUntilRenderFlush();
   await flush();
   const send = async (input: string) => {
     stdin.write(input);
+    // Ink holds a lone ESC for 20ms so it can complete an escape sequence.
+    if (input === '\x1b') await new Promise((resolve) => setTimeout(resolve, 25));
     await flush();
   };
   return { stdin, stdout, send, flush, unmount: () => app.unmount() };
@@ -257,7 +262,7 @@ test('batch off previews per-row plans and applies on confirm', async () => {
   await t.send('O');
   const frame = t.stdout.frame();
   assert.match(frame, /Batch off @ a\?/);
-  assert.match(frame, /global:a\/grilling  on -> off/);
+  assert.match(frame, /global:a\/grilling {2}on -> off/);
   await t.send('y');
   assert.ok(fs.existsSync(
     path.join(home.configDir, '.skillspub-off', 'a-skills', 'grilling', 'SKILL.md')));
@@ -309,30 +314,69 @@ test('project TUI badges the project and intercepts inherited mutations', async 
   await t.send('j'); // grilling (inherited global ON)
   await t.send(' ');
   assert.match(t.stdout.frame(), /read-only: inherited from global/);
+  assert.doesNotMatch(t.stdout.frame(), / i /);
   t.unmount();
 });
 
-test('project TUI batch-on links a global skill into the project runtime', async () => {
+test('project TUI Space enables an inherited OFF skill in this project', async () => {
+  const { home } = setup();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-proj-'));
+  const t = await renderApp(home, 100, 30, projectDir);
+  await t.send('l');
+  for (let i = 0; i < 4; i++) await t.send('j'); // parked (inherited global OFF)
+  assert.match(t.stdout.frame(), /› \[ OFF \] local\s+parked/);
+  assert.doesNotMatch(t.stdout.frame(), / i link/);
+  await t.send(' ');
+  const frame = t.stdout.frame();
+  assert.doesNotMatch(frame, /Link relationship\?/);
+  assert.match(frame, /parked @ a: on/);
+  assert.match(frame, /› \[ ON \] link\s+parked/);
+  const link = path.join(projectDir, '.a', 'skills', 'parked');
+  assert.ok(fs.lstatSync(link).isSymbolicLink());
+  t.unmount();
+});
+
+test('project TUI Space enables a missing skill in this project', async () => {
+  const { home } = setup();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-proj-'));
+  const t = await renderApp(home, 100, 30, projectDir);
+  await t.send('\t');
+  for (let i = 0; i < 5; i++) await t.send('j'); // only-b
+  await t.send('l');
+  assert.match(t.stdout.frame(), /› a {2}missing/);
+  assert.match(t.stdout.frame(), / space on/);
+  assert.doesNotMatch(t.stdout.frame(), / i link/);
+  await t.send(' ');
+  assert.doesNotMatch(t.stdout.frame(), /Link relationship\?/);
+  assert.match(t.stdout.frame(), /only-b @ a: on/);
+  assert.ok(fs.lstatSync(path.join(projectDir, '.a', 'skills', 'only-b')).isSymbolicLink());
+  t.unmount();
+});
+
+test('project TUI batch-on skips inherited ON and enables inherited OFF', async () => {
   const { home } = setup();
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-proj-'));
   const t = await renderApp(home, 100, 30, projectDir);
   await t.send('v');
   await t.send('l');
   await t.send('j');
-  await t.send('j'); // grilling
+  await t.send('j'); // grilling (inherited ON)
+  await t.send(' ');
+  await t.send('j');
+  await t.send('j'); // parked (inherited OFF)
   await t.send(' ');
   await t.send('o');
   const frame = t.stdout.frame();
   assert.match(frame, /Batch on @ a\?/);
   assert.match(frame, /missing -> on/);
+  assert.doesNotMatch(frame, /grilling/);
   await t.send('y');
-  assert.match(t.stdout.frame(), /Batch on @ a: 1 applied/);
-  const link = path.join(projectDir, '.a', 'skills', 'grilling');
-  assert.ok(fs.lstatSync(link).isSymbolicLink());
-  assert.ok(fs.existsSync(path.join(link, 'SKILL.md')));
-  assert.match(
-    fs.readFileSync(path.join(projectDir, '.skillspub', 'state.json'), 'utf8'),
-    /baseIntent/);
+  const after = t.stdout.frame();
+  assert.match(after, /Batch on @ a: 1 applied/);
+  assert.match(after, /› \[ ON \] link\s+parked/);
+  assert.match(after, /2 marked/);
+  assert.ok(!fs.existsSync(path.join(projectDir, '.a', 'skills', 'grilling')));
+  assert.ok(fs.lstatSync(path.join(projectDir, '.a', 'skills', 'parked')).isSymbolicLink());
   t.unmount();
 });
 
@@ -376,7 +420,9 @@ test('project TUI toggles a project-scope skill off into project parking', async
   await t.send('j'); // grilling row
   await t.send('l'); // agents column, a selected
   await t.send(' ');
-  assert.match(t.stdout.frame(), /grilling @ a: off/);
+  const frame = t.stdout.frame();
+  assert.match(frame, /grilling @ a: off/);
+  assert.match(frame, /› grilling/);
   assert.ok(fs.existsSync(path.join(projectDir, '.skillspub', 'off', 'a', 'grilling')));
   assert.ok(!fs.existsSync(path.join(projSkills, 'grilling')));
   t.unmount();
