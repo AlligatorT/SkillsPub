@@ -1,6 +1,6 @@
 # SkillsPub
 
-SkillsPub 管理 skill resources 与 Runtime discovery roots 之间的 Relationships。磁盘记录实际状态；SkillsPub state 记录人工 intent 与 persistent Preset claims。
+SkillsPub 管理 skill resources 与 Skill Targets 之间的 Relationships。磁盘记录 Actual state；SkillsPub state 记录人工 intent 与 persistent Preset claims。
 
 ## Language
 
@@ -9,49 +9,53 @@ SkillsPub 管理 skill resources 与 Runtime discovery roots 之间的 Relations
 _避免_: Installation
 
 **Skill name**:
-Skill 面向人的名称。名称不保证跨来源唯一；同一 Runtime 内经 installer 规范化后的名称会竞争同一个 Slot。
+Skill 面向人的名称。名称不保证跨来源唯一；同一 Skill Target 内经 installer 规范化后的名称会竞争同一个 Slot。
 _避免_: 全局 Skill ID
 
 **Variant**:
 与另一个 skill resource 同名、但 `realPath` 不同的资源。只有同名歧义时，界面才添加来源后缀。
-_避免_: Duplicate、copy
+_避免_: Duplicate、受管镜像
 
 **Catalog candidate**:
 尚未安装的远程候选，以 `source + skill path/name` 识别。skills.sh 可以包含多个不同来源的同名候选。
 _避免_: 用 name 去重搜索结果
 
-**Agent**:
-消费一个或多个 Runtime roots 的执行环境，例如 Claude、Codex 或 Pi。
-_避免_: Client、provider
+**Harness**:
+发现并使用 Skills 的产品，例如 Claude Code、Codex、Hermes、OpenClaw 或 Pi。
+_避免_: 用 Agent 同时表示产品、Profile 与进程
 
-**Runtime**:
-一个可独立管理的 skill discovery root。Runtime 是 Relationship 的目标；它不一定等于一个 Agent。
-_避免_: 假设每个 root 只属于一个 Agent
+**Target Definition**:
+把 Harness 或公共标准的发现规则解析为 Skill Target 的定义，包括路径规则、scope、parking 和能力。内置定义由 Adapter 维护；用户配置只保存覆盖与 Generic Target。
+_避免_: 把未解析的路径模板当作实际 Target
 
-**Agent Runtime**:
-只有一个 Agent 消费的专属 Runtime，例如 `~/.claude/skills`。
+**Skill Target**:
+Skill 被放置和管理的具体目标，具有已解析的 discovery root、scope、稳定 ID 与可写状态。Relationship 的目标是 Skill Target，而不是 Harness。
+_避免_: Runtime、假设一个 Harness 只有一个 Target
 
-**Shared Runtime**:
-多个 Agents 共同消费的 Runtime，例如 `~/.agents/skills`。Shared Runtime 只有整体开关；消费者 Agent 上的 Shared 状态只读展示，不提供无法兑现的 per-Agent OFF。
-_避免_: Universal Agent
+**Shared Skill Target**:
+公共标准定义的 Skill Target，例如 `~/.agents/skills`。它只显示一个开关；哪些 Harness 消费或排除它，由各 Harness Adapter 报告。
+_避免_: Shared Harness、Dedicated Target、为每个消费者复制 Shared 开关
 
-**Runtime Slot**:
-Runtime root 下由规范化 entry name 占据的位置，以 `(Runtime, normalized name)` 识别。同一 Runtime 的一个 Slot 同时只能承载一个来源。
+**Generic Target**:
+用户为未内置支持的 Harness 或自定义目录声明的 Skill Target。SkillsPub 可以扫描和管理目录，但不承诺理解其 Harness 配置、隔离或最终可见性。
+
+**Target Slot**:
+Skill Target discovery root 下由规范化 entry name 占据的位置，以 `(Target, normalized name)` 识别。同一 Target 的一个 Slot 同时只能承载一个来源。
 
 **Relationship**:
-一个 skill resource 与 Runtime Slot 之间已经存在的关联，由 Runtime root 或其外部 parking area 中的目录 entry 表示。
-_避免_: 把 Relationship 限定为 skill × Agent
+一个 skill resource 与 Target Slot 之间已经存在的关联，由 discovery root 或其外部 parking area 中的目录 entry 表示。
+_避免_: 把 Relationship 限定为 skill × Harness
 
 **Activation**:
-Relationship 的可见性：`on` 表示 entry 位于 Runtime discovery root；`off` 表示 entry 位于该 Runtime 的 parking area。`off` 可恢复且不等于删除。
+Relationship 的可见性：`on` 表示 entry 位于 Target discovery root；`off` 表示 entry 位于该 Target 的 parking area。`off` 可恢复且不等于删除。
 _避免_: 把 OFF 内容放在 discovery root 的递归子目录
 
 **Resource form**:
-Relationship 的资源形态：`local` 是真实目录，`link` 是 symlink。Resource form 与 Activation 相互独立。
-_避免_: 把 `link` 当作第三种 Activation
+Relationship 的资源形态：`local` 是原始真实目录，`link` 是 symlink，`mirror` 是 Harness 不支持 Link 时由 SkillsPub 追踪来源的受管副本。Resource form 与 Activation 相互独立。
+_避免_: 把 form 当作 Activation、把 mirror 当作 Variant
 
 **Missing relationship**:
-选定 resource 与 Runtime Slot 之间没有 entry。它不是 `off`，需要 Link 才能建立 Relationship。
+选定 resource 与 Target Slot 之间没有 entry。它不是 `off`，需要 Link 或受管 Mirror 才能建立 Relationship。
 _避免_: Disabled
 
 **Broken link**:
@@ -61,6 +65,18 @@ _避免_: Disabled
 当前来源的可靠本地 metadata，优先采用 installer lock 的 `sourceUrl`、`skillPath` 等字段。来源是 Shared Slot 的可变属性，不是其持久身份；无法确认时显示 `Source unknown`。
 _避免_: Source guess、Expected source
 
+**Harness Adapter**:
+集中维护一个 Harness 的官方发现路径、配置格式、隔离能力、Target 解析、变更计划、写入与验证。Inventory 不包含 Harness 专属配置知识。
+
+**Source Adapter**:
+集中维护一个安装来源或传输工具的固定版本、命令、输出解析、provenance 和兼容性，例如 `npx skills`。Source Adapter 不决定最终启用哪些 Harness Targets。
+
+**Support level**:
+Harness Adapter 的能力等级：`managed` 可安全读写并验证，`discoverable` 只可靠扫描，`unsupported` 不猜测。只有 `managed` 承诺独立管理。
+
+**Shared consumption**:
+Harness 对 Shared Skill Target 的已验证关系：`not-consumed`、`required`、`enabled`、`excluded` 或 `unknown`。它描述最终可见性的一个输入，不复制 Target Relationship。
+
 **Actual state**:
 现场扫描得到的 Relationship、Activation 与 Resource form。磁盘是 Actual state 的唯一真相。
 
@@ -68,16 +84,16 @@ _避免_: Source guess、Expected source
 没有 Preset claim 时希望 Relationship 采用的 Activation。人工和外部 ON/OFF 都更新 Base intent。
 
 **Preset claim**:
-一个 active Preset 对 Runtime Slot 产生的正向 ON 要求。Claims 不表达强制 OFF；多个 Claims 按 Slot 去重。
+一个 active Preset 对 Target Slot 产生的正向 ON 要求。Claims 不表达强制 OFF；多个 Claims 按 Slot 去重。
 
 **Desired state**:
 `Preset claims` 与 `Base intent` 合成的目标状态：存在任一 claim 时为 ON，否则采用 Base intent。
 
 **Drift**:
-Actual state 与 Desired state 不一致。SkillsPub 显示 drift，但没有 watcher、daemon 或后台自动修复。
+Actual state 与 Desired state，或受管 Harness/Source 配置与其 claim 不一致。SkillsPub 显示 drift，但没有 watcher、daemon 或后台自动修复。
 
 **Reconcile**:
-显式、幂等地把 Actual state 收敛到 Desired state。预检失败时零变更；意外 I/O 失败保留已完成操作与 Desired state，后续再次 reconcile。
+显式、幂等地把 Actual state 和受管配置收敛到 Desired state。预检失败时零变更；意外 I/O 失败保留已完成操作与 Desired state，后续再次 reconcile。
 
 **Bundle**:
 多个 skill resources 的全局命名分组，是一次性选择器，不保存 activation。
@@ -86,7 +102,7 @@ Actual state 与 Desired state 不一致。SkillsPub 显示 drift，但没有 wa
 用于过滤和批量选择 resources 的全局人工标签，不做智能分类。
 
 **Preset**:
-由 `skill:`、`bundle:`、`tag:` 等动态 selectors 组成的全局持久 ON policy。Preset 可分别在 Global 或某个 Project Runtime target 上 activate。
+由 `skill:`、`bundle:`、`tag:` 等动态 selectors 组成的全局持久 ON policy。Preset 可分别在 Global 或某个 Project Skill Target 上 activate。
 _避免_: 一次性拷贝、强制 OFF profile
 
 **Orphaned Preset Activation**:
@@ -102,5 +118,5 @@ Bundle、Tag 或 Preset selector 仍引用已不存在 resource 时保留的成�
 依赖配套 CLI 才能执行能力的 Skill。SkillsPub 只管理其 skill resource，不管理配套 CLI。
 
 **Projection**:
-从一次 inventory scan 派生的展示层翻译（如 skill × agent 矩阵行），不写磁盘、不另建真相。矩阵列是 Runtime key；所有磁盘变更走 plan/apply，不走 Projection。
+从一次 inventory scan 派生的展示层翻译（如 skill × target 矩阵行），不写磁盘、不另建真相。矩阵列是 Target key；所有磁盘变更走 plan/apply，不走 Projection。
 _避免_: 第二个读模型、视图自带扫描
