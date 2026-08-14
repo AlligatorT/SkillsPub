@@ -8,6 +8,53 @@ export type RuntimeKind = 'agent' | 'shared';
 export type RuntimeScope = 'global' | 'project' | 'parent';
 export type Activation = 'on' | 'off';
 export type ResourceForm = 'local' | 'link';
+export type TargetKind = 'harness' | 'shared' | 'generic';
+
+/** Built-in path rules; user configuration stores only their field overrides. */
+export interface TargetDefinition {
+  key: string;
+  kind: Exclude<TargetKind, 'generic'>;
+  discoveryRoot: string;
+  parkingRoot: string;
+  projectPath: string;
+  lockFile?: string;
+}
+
+/** A concrete, resolved root that can hold Skill Target Slots. */
+export interface SkillTarget {
+  key: string;
+  kind: TargetKind;
+  discoveryRoot: string;
+  parkingRoot: string;
+  projectPath: string;
+  lockFile?: string;
+}
+
+export interface SharedTarget extends SkillTarget {
+  kind: 'shared';
+}
+
+export interface GenericTarget extends SkillTarget {
+  kind: 'generic';
+}
+
+export interface TargetDefinitionOverride {
+  key: string;
+  discoveryRoot?: string;
+  parkingRoot?: string;
+  projectPath?: string;
+  lockFile?: string;
+}
+
+export interface TargetMigrationPlan {
+  status: 'ready' | 'already-migrated';
+  targetFile: string;
+  legacyFile: string;
+  backupFile?: string;
+  writeTarget: boolean;
+  overrides: TargetDefinitionOverride[];
+  genericTargets: GenericTarget[];
+}
 
 export interface Runtime {
   key: string;
@@ -139,16 +186,22 @@ interface RuntimeRegistryFile {
   runtimes: Runtime[];
 }
 
+interface TargetRegistryFile {
+  version: 1;
+  overrides: TargetDefinitionOverride[];
+  genericTargets: GenericTarget[];
+}
+
 function expandHome(value: string): string {
   return value.startsWith('~') ? path.join(os.homedir(), value.slice(1)) : value;
 }
 
-function defaultRuntimes(): Runtime[] {
+export function defaultTargetDefinitions(): TargetDefinition[] {
   const home = os.homedir();
   return [
     {
       key: 'claude',
-      kind: 'agent',
+      kind: 'harness',
       discoveryRoot: path.join(home, '.claude', 'skills'),
       parkingRoot: path.join(home, '.claude', '.skillspub-off', 'skills'),
       projectPath: '.claude/skills',
@@ -163,12 +216,187 @@ function defaultRuntimes(): Runtime[] {
     },
     {
       key: 'pi',
-      kind: 'agent',
+      kind: 'harness',
       discoveryRoot: path.join(home, '.pi', 'agent', 'skills'),
       parkingRoot: path.join(home, '.pi', 'agent', '.skillspub-off', 'skills'),
       projectPath: '.pi/agent/skills',
     },
   ];
+}
+
+function targetFile(home: Home): string {
+  return path.join(home.configDir, 'targets.json');
+}
+
+function runtimeFile(home: Home): string {
+  return path.join(home.configDir, 'runtimes.json');
+}
+
+function isTargetKey(value: string): boolean {
+  return Boolean(value) && value !== '.' && value !== '..' &&
+    !value.includes('/') && !value.includes('\\');
+}
+
+function resolveTarget(target: SkillTarget, file: string): SkillTarget {
+  if (typeof target.key !== 'string' || !isTargetKey(target.key) ||
+    !['harness', 'shared', 'generic'].includes(target.kind) ||
+    typeof target.discoveryRoot !== 'string' || !target.discoveryRoot ||
+    typeof target.parkingRoot !== 'string' || !target.parkingRoot ||
+    typeof target.projectPath !== 'string' || path.isAbsolute(target.projectPath) ||
+    target.projectPath.split(path.sep).includes('..') ||
+    (target.lockFile !== undefined && typeof target.lockFile !== 'string'))
+    throw new Error(`invalid Skill Target entry in ${file}`);
+  const discoveryRoot = expandHome(target.discoveryRoot);
+  const parkingRoot = expandHome(target.parkingRoot);
+  const relative = path.relative(discoveryRoot, parkingRoot);
+  if (!relative || (!relative.startsWith('..') && !path.isAbsolute(relative)))
+    throw new Error(`parking root must be outside discovery root for Skill Target ${target.key}`);
+  return {
+    ...target,
+    discoveryRoot,
+    parkingRoot,
+    lockFile: target.lockFile
+      ? expandHome(target.lockFile)
+      : target.kind === 'shared'
+        ? path.join(path.dirname(discoveryRoot), '.skill-lock.json')
+        : undefined,
+  };
+}
+
+function assertUniqueTargets(targets: SkillTarget[], _file: string): void {
+  const keys = new Set<string>();
+  const roots = new Set<string>();
+  for (const target of targets) {
+    if (keys.has(target.key)) throw new Error(`duplicate Skill Target key: ${target.key}`);
+    keys.add(target.key);
+    const root = rootIdentity(target.discoveryRoot);
+    if (roots.has(root)) throw new Error(`ambiguous Skill Target discovery root: ${target.discoveryRoot}`);
+    roots.add(root);
+  }
+}
+
+function targetsFromRegistry(registry: TargetRegistryFile, file: string): SkillTarget[] {
+  const definitions = defaultTargetDefinitions();
+  const known = new Map(definitions.map((definition) => [definition.key, definition]));
+  const overrides = new Map<string, TargetDefinitionOverride>();
+  for (const override of registry.overrides) {
+    if (!known.has(override.key))
+      throw new Error(`unknown Target Definition override: ${override.key}`);
+    if (overrides.has(override.key))
+      throw new Error(`duplicate Target Definition override: ${override.key}`);
+    overrides.set(override.key, override);
+  }
+  const targets = definitions.map((definition) =>
+    resolveTarget({ ...definition, ...overrides.get(definition.key) }, file));
+  const generics = registry.genericTargets.map((target) =>
+    resolveTarget(target, file));
+  if (generics.some((target) => target.kind !== 'generic'))
+    throw new Error(`invalid Generic Target entry in ${file}`);
+  assertUniqueTargets([...targets, ...generics], file);
+  return [...targets, ...generics];
+}
+
+function readTargetRegistry(file: string): TargetRegistryFile | undefined {
+  if (!fs.existsSync(file)) return undefined;
+  let parsed: Partial<TargetRegistryFile>;
+  try {
+    parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<TargetRegistryFile>;
+  } catch (error) {
+    throw new Error(`cannot read Target registry ${file}: ${(error as Error).message}`);
+  }
+  if (parsed.version !== 1 || !Array.isArray(parsed.overrides) || !Array.isArray(parsed.genericTargets))
+    throw new Error(`invalid Target registry: ${file}`);
+  const overrides = parsed.overrides.map((override) => {
+    if (!isRecord(override) || typeof override.key !== 'string')
+      throw new Error(`invalid Target Definition override in ${file}`);
+    const result: TargetDefinitionOverride = { key: override.key };
+    for (const field of ['discoveryRoot', 'parkingRoot', 'projectPath', 'lockFile'] as const) {
+      if (override[field] === undefined) continue;
+      if (typeof override[field] !== 'string')
+        throw new Error(`invalid Target Definition override in ${file}`);
+      result[field] = override[field];
+    }
+    if (Object.keys(result).length === 1)
+      throw new Error(`empty Target Definition override in ${file}`);
+    return result;
+  });
+  const genericTargets = parsed.genericTargets.map((target) => {
+    if (!isRecord(target) || target.kind !== 'generic' || typeof target.key !== 'string' ||
+      typeof target.discoveryRoot !== 'string' || typeof target.parkingRoot !== 'string' ||
+      typeof target.projectPath !== 'string' ||
+      (target.lockFile !== undefined && typeof target.lockFile !== 'string'))
+      throw new Error(`invalid Generic Target entry in ${file}`);
+    return {
+      key: target.key,
+      kind: 'generic' as const,
+      discoveryRoot: target.discoveryRoot,
+      parkingRoot: target.parkingRoot,
+      projectPath: target.projectPath,
+      ...(typeof target.lockFile === 'string' ? { lockFile: target.lockFile } : {}),
+    };
+  });
+  const registry = { version: 1 as const, overrides, genericTargets };
+  targetsFromRegistry(registry, file);
+  return registry;
+}
+
+function runtimeFromTarget(target: SkillTarget): Runtime {
+  return {
+    key: target.key,
+    kind: target.kind === 'shared' ? 'shared' : 'agent',
+    discoveryRoot: target.discoveryRoot,
+    parkingRoot: target.parkingRoot,
+    projectPath: target.projectPath,
+    lockFile: target.lockFile,
+  };
+}
+
+function defaultRuntimes(): Runtime[] {
+  return defaultTargetDefinitions().map(runtimeFromTarget);
+}
+
+function resolveRuntime(runtime: Runtime, file: string): Runtime {
+  if (!runtime || typeof runtime.key !== 'string' || !isTargetKey(runtime.key) ||
+    (runtime.kind !== 'agent' && runtime.kind !== 'shared') ||
+    typeof runtime.discoveryRoot !== 'string' ||
+    typeof runtime.parkingRoot !== 'string' ||
+    typeof runtime.projectPath !== 'string' || path.isAbsolute(runtime.projectPath) ||
+    runtime.projectPath.split(path.sep).includes('..'))
+    throw new Error(`invalid Runtime entry in ${file}`);
+  const discoveryRoot = expandHome(runtime.discoveryRoot);
+  const parkingRoot = expandHome(runtime.parkingRoot);
+  const relative = path.relative(discoveryRoot, parkingRoot);
+  if (!relative || (!relative.startsWith('..') && !path.isAbsolute(relative)))
+    throw new Error(`parking root must be outside discovery root for Runtime ${runtime.key}`);
+  return {
+    ...runtime,
+    discoveryRoot,
+    parkingRoot,
+    lockFile: runtime.lockFile
+      ? expandHome(runtime.lockFile)
+      : runtime.kind === 'shared'
+        ? path.join(path.dirname(discoveryRoot), '.skill-lock.json')
+        : undefined,
+  };
+}
+
+function readRuntimeRegistry(file: string): Runtime[] | undefined {
+  if (!fs.existsSync(file)) return undefined;
+  let parsed: Partial<RuntimeRegistryFile>;
+  try {
+    parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<RuntimeRegistryFile>;
+  } catch (error) {
+    throw new Error(`cannot read Runtime registry ${file}: ${(error as Error).message}`);
+  }
+  if (parsed.version !== 1 || !Array.isArray(parsed.runtimes))
+    throw new Error(`invalid Runtime registry: ${file}`);
+  const runtimes = parsed.runtimes.map((runtime) => resolveRuntime(runtime, file));
+  const keys = new Set<string>();
+  for (const runtime of runtimes) {
+    if (keys.has(runtime.key)) throw new Error(`duplicate Runtime key: ${runtime.key}`);
+    keys.add(runtime.key);
+  }
+  return runtimes;
 }
 
 function legacyRuntimes(file: string): Runtime[] | undefined {
@@ -186,7 +414,7 @@ function legacyRuntimes(file: string): Runtime[] | undefined {
       const discoveryRoot = expandHome(line.slice(separator + 1).trim());
       const known = defaults.get(key);
       const kind = known?.kind ?? 'agent';
-      return {
+      return resolveRuntime({
         key,
         kind,
         discoveryRoot,
@@ -199,58 +427,179 @@ function legacyRuntimes(file: string): Runtime[] | undefined {
         lockFile: kind === 'shared'
           ? path.join(path.dirname(discoveryRoot), '.skill-lock.json')
           : undefined,
-      };
+      }, file);
     });
 }
 
-function writeJson(file: string, value: unknown): void {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
+function targetFromLegacyRuntime(runtime: Runtime, file: string): SkillTarget {
+  const definition = defaultTargetDefinitions().find(({ key }) => key === runtime.key);
+  if (!definition) {
+    return resolveTarget({
+      key: runtime.key,
+      kind: 'generic',
+      discoveryRoot: runtime.discoveryRoot,
+      parkingRoot: runtime.parkingRoot,
+      projectPath: runtime.projectPath,
+      lockFile: runtime.lockFile,
+    }, file);
+  }
+  const expectedKind = definition.kind === 'shared' ? 'shared' : 'agent';
+  if (runtime.kind !== expectedKind)
+    throw new Error(`ambiguous Runtime kind for known Target Definition: ${runtime.key}`);
+  return resolveTarget({
+    key: runtime.key,
+    kind: definition.kind,
+    discoveryRoot: runtime.discoveryRoot,
+    parkingRoot: runtime.parkingRoot,
+    projectPath: runtime.projectPath,
+    lockFile: runtime.lockFile,
+  }, file);
+}
+
+function targetRegistryFromLegacy(runtimes: Runtime[], file: string): TargetRegistryFile {
+  const definitions = new Map(defaultTargetDefinitions().map((definition) => [definition.key, definition]));
+  const overrides: TargetDefinitionOverride[] = [];
+  const genericTargets: GenericTarget[] = [];
+  for (const runtime of runtimes) {
+    const target = targetFromLegacyRuntime(runtime, file);
+    const definition = definitions.get(target.key);
+    if (!definition) {
+      genericTargets.push(target as GenericTarget);
+      continue;
+    }
+    const base = resolveTarget(definition, file);
+    const override: TargetDefinitionOverride = { key: target.key };
+    for (const field of ['discoveryRoot', 'parkingRoot', 'projectPath', 'lockFile'] as const) {
+      if (target[field] !== base[field]) override[field] = target[field];
+    }
+    if (Object.keys(override).length > 1) overrides.push(override);
+  }
+  const registry = { version: 1 as const, overrides, genericTargets };
+  targetsFromRegistry(registry, file);
+  return registry;
+}
+
+function canonicalTargetRegistry(registry: TargetRegistryFile): string {
+  return JSON.stringify({
+    version: 1,
+    overrides: [...registry.overrides]
+      .sort((a, b) => a.key.localeCompare(b.key))
+      .map(({ key, discoveryRoot, parkingRoot, projectPath, lockFile }) => ({
+        key,
+        ...(discoveryRoot === undefined ? {} : { discoveryRoot }),
+        ...(parkingRoot === undefined ? {} : { parkingRoot }),
+        ...(projectPath === undefined ? {} : { projectPath }),
+        ...(lockFile === undefined ? {} : { lockFile }),
+      })),
+    genericTargets: [...registry.genericTargets]
+      .sort((a, b) => a.key.localeCompare(b.key))
+      .map(({ key, discoveryRoot, parkingRoot, projectPath, lockFile }) => ({
+        key,
+        kind: 'generic',
+        discoveryRoot,
+        parkingRoot,
+        projectPath,
+        ...(lockFile === undefined ? {} : { lockFile }),
+      })),
+  });
+}
+
+export function loadTargets(home: Home): SkillTarget[] {
+  const file = targetFile(home);
+  const registry = readTargetRegistry(file);
+  if (registry) return targetsFromRegistry(registry, file);
+  const legacy = readRuntimeRegistry(runtimeFile(home))
+    ?? legacyRuntimes(path.join(home.configDir, 'agents.conf'))
+    ?? defaultRuntimes();
+  const targets = legacy.map((runtime) => targetFromLegacyRuntime(runtime, runtimeFile(home)));
+  assertUniqueTargets(targets, runtimeFile(home));
+  return targets;
 }
 
 export function loadRuntimes(
   home: Home,
-  options: { persist?: boolean } = {},
+  _options: { persist?: boolean } = {},
 ): Runtime[] {
-  const file = path.join(home.configDir, 'runtimes.json');
-  if (!fs.existsSync(file)) {
-    const runtimes = legacyRuntimes(path.join(home.configDir, 'agents.conf')) ?? defaultRuntimes();
-    if (options.persist !== false)
-      writeJson(file, { version: 1, runtimes } satisfies RuntimeRegistryFile);
-    return runtimes;
-  }
+  if (fs.existsSync(targetFile(home))) return loadTargets(home).map(runtimeFromTarget);
+  return readRuntimeRegistry(runtimeFile(home))
+    ?? legacyRuntimes(path.join(home.configDir, 'agents.conf'))
+    ?? defaultRuntimes();
+}
 
-  let parsed: Partial<RuntimeRegistryFile>;
-  try {
-    parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<RuntimeRegistryFile>;
-  } catch (error) {
-    throw new Error(`cannot read Runtime registry ${file}: ${(error as Error).message}`);
+export function planTargetMigration(home: Home): TargetMigrationPlan {
+  const legacyFile = runtimeFile(home);
+  const targetPath = targetFile(home);
+  const legacy = readRuntimeRegistry(legacyFile);
+  const existing = readTargetRegistry(targetPath);
+  if (!legacy) {
+    if (existing) {
+      return {
+        status: 'already-migrated',
+        targetFile: targetPath,
+        legacyFile,
+        writeTarget: false,
+        overrides: existing.overrides,
+        genericTargets: existing.genericTargets,
+      };
+    }
+    throw new Error(`no legacy Runtime registry: ${legacyFile}`);
   }
-  if (parsed.version !== 1 || !Array.isArray(parsed.runtimes))
-    throw new Error(`invalid Runtime registry: ${file}`);
-  const keys = new Set<string>();
-  return parsed.runtimes.map((runtime) => {
-    if (!runtime || typeof runtime.key !== 'string' ||
-      (runtime.kind !== 'agent' && runtime.kind !== 'shared') ||
-      typeof runtime.discoveryRoot !== 'string' ||
-      typeof runtime.parkingRoot !== 'string' ||
-      typeof runtime.projectPath !== 'string' || path.isAbsolute(runtime.projectPath) ||
-      runtime.projectPath.split(path.sep).includes('..'))
-      throw new Error(`invalid Runtime entry in ${file}`);
-    if (keys.has(runtime.key)) throw new Error(`duplicate Runtime key: ${runtime.key}`);
-    keys.add(runtime.key);
-    const discoveryRoot = expandHome(runtime.discoveryRoot);
-    let lockFile: string | undefined;
-    if (runtime.lockFile) lockFile = expandHome(runtime.lockFile);
-    else if (runtime.kind === 'shared')
-      lockFile = path.join(path.dirname(discoveryRoot), '.skill-lock.json');
-    return {
-      ...runtime,
-      discoveryRoot,
-      parkingRoot: expandHome(runtime.parkingRoot),
-      lockFile,
-    };
-  });
+  const registry = targetRegistryFromLegacy(legacy, legacyFile);
+  if (existing && canonicalTargetRegistry(existing) !== canonicalTargetRegistry(registry))
+    throw new Error(`Target registry already exists and differs from legacy Runtime registry: ${targetPath}`);
+  const backupFile = `${legacyFile}.v1.bak`;
+  if (fs.existsSync(backupFile))
+    throw new Error(`legacy Runtime backup already exists: ${backupFile}`);
+  return {
+    status: 'ready',
+    targetFile: targetPath,
+    legacyFile,
+    backupFile,
+    writeTarget: !existing,
+    overrides: registry.overrides,
+    genericTargets: registry.genericTargets,
+  };
+}
+
+function registryFromPlan(plan: TargetMigrationPlan): TargetRegistryFile {
+  return {
+    version: 1,
+    overrides: plan.overrides,
+    genericTargets: plan.genericTargets,
+  };
+}
+
+function sameMigrationPlan(left: TargetMigrationPlan, right: TargetMigrationPlan): boolean {
+  return left.status === right.status &&
+    left.targetFile === right.targetFile &&
+    left.legacyFile === right.legacyFile &&
+    left.backupFile === right.backupFile &&
+    left.writeTarget === right.writeTarget &&
+    canonicalTargetRegistry(registryFromPlan(left)) === canonicalTargetRegistry(registryFromPlan(right));
+}
+
+function writeTargetRegistry(file: string, registry: TargetRegistryFile): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const temporary = `${file}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(registry, null, 2) + '\n');
+    fs.renameSync(temporary, file);
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+  }
+}
+
+export function applyTargetMigration(home: Home, plan: TargetMigrationPlan): void {
+  if (plan.status === 'already-migrated') return;
+  const fresh = planTargetMigration(home);
+  if (!sameMigrationPlan(plan, fresh))
+    throw new Error('Target migration changed after preview; preview again');
+  const registry = registryFromPlan(fresh);
+  if (fresh.writeTarget) writeTargetRegistry(fresh.targetFile, registry);
+  const written = readTargetRegistry(fresh.targetFile);
+  if (!written || canonicalTargetRegistry(written) !== canonicalTargetRegistry(registry))
+    throw new Error(`Target registry validation failed: ${fresh.targetFile}`);
+  fs.renameSync(fresh.legacyFile, fresh.backupFile!);
 }
 
 export function normalizeSlotName(name: string): string {

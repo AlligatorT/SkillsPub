@@ -129,7 +129,7 @@ test('unknown command prints usage and exits 1', () => {
   assert.throws(() => run(['bogus']));
 });
 
-test('scan reports stable finding categories and is repeatable', () => {
+test('scan reports live findings without persisting read-only state', () => {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-scan-'));
   const discoveryRoot = path.join(configDir, 'shared', 'skills');
   const parkingRoot = path.join(configDir, 'shared', '.skillspub-off', 'skills');
@@ -158,10 +158,92 @@ test('scan reports stable finding categories and is repeatable', () => {
 
   const second = run(['scan']);
   assert.equal(second.status, 0, second.stderr);
-  assert.match(second.stdout, /External changes:\n {2}none/);
+  assert.match(second.stdout, /External changes:\n {2}- new resource:/);
+  assert.equal(fs.existsSync(path.join(configDir, 'state.json')), false);
 });
 
-test('project <path> scan writes state inside the exact Project', () => {
+test('target migration previews, confirms, and backs up the legacy Runtime registry', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-targets-'));
+  const piRoot = path.join(configDir, 'pi', 'skills');
+  const genericRoot = path.join(configDir, 'other', 'skills');
+  const legacyFile = path.join(configDir, 'runtimes.json');
+  const legacy = JSON.stringify({
+    version: 1,
+    runtimes: [
+      {
+        key: 'pi',
+        kind: 'agent',
+        discoveryRoot: piRoot,
+        parkingRoot: path.join(configDir, 'pi', '.skillspub-off', 'skills'),
+        projectPath: '.pi/agent/skills',
+      },
+      {
+        key: 'other',
+        kind: 'agent',
+        discoveryRoot: genericRoot,
+        parkingRoot: path.join(configDir, 'other', '.skillspub-off', 'skills'),
+        projectPath: '.other/skills',
+      },
+    ],
+  }, null, 2) + '\n';
+  fs.writeFileSync(legacyFile, legacy);
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+
+  const preview = run(['migrate', 'targets']);
+  assert.equal(preview.status, 0, preview.stderr);
+  assert.match(preview.stdout, /Target migration plan:/);
+  assert.match(preview.stdout, /override\tpi/);
+  assert.match(preview.stdout, /generic\tother/);
+  assert.equal(fs.existsSync(path.join(configDir, 'targets.json')), false);
+  assert.equal(fs.readFileSync(legacyFile, 'utf8'), legacy);
+
+  const migrated = run(['migrate', 'targets', '--yes']);
+  assert.equal(migrated.status, 0, migrated.stderr);
+  assert.match(migrated.stdout, /Migrated Target registry:/);
+  assert.equal(fs.existsSync(legacyFile), false);
+  assert.equal(
+    fs.readFileSync(path.join(configDir, 'runtimes.json.v1.bak'), 'utf8'),
+    legacy,
+  );
+  assert.match(run(['targets']).stdout, /pi\tharness/);
+  assert.match(run(['targets']).stdout, /other\tgeneric/);
+  assert.match(run(['migrate', 'targets', '--yes']).stdout, /already migrated/);
+});
+
+test('read-only Target commands do not migrate a legacy registry', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-read-only-targets-'));
+  const discoveryRoot = path.join(configDir, 'shared', 'skills');
+  const legacyFile = path.join(configDir, 'runtimes.json');
+  fs.writeFileSync(legacyFile, JSON.stringify({
+    version: 1,
+    runtimes: [{
+      key: 'shared',
+      kind: 'shared',
+      discoveryRoot,
+      parkingRoot: path.join(configDir, 'shared', '.skillspub-off', 'skills'),
+      projectPath: '.agents/skills',
+    }],
+  }));
+  const before = fs.readFileSync(legacyFile, 'utf8');
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+
+  for (const args of [['ls'], ['scan'], ['targets'], ['migrate', 'targets']]) {
+    const result = run(args);
+    assert.equal(result.status, 0, `${args.join(' ')}: ${result.stderr}`);
+  }
+  assert.equal(fs.readFileSync(legacyFile, 'utf8'), before);
+  assert.equal(fs.existsSync(path.join(configDir, 'targets.json')), false);
+  assert.equal(fs.existsSync(path.join(configDir, 'runtimes.json.v1.bak')), false);
+  assert.equal(fs.existsSync(path.join(configDir, 'state.json')), false);
+});
+
+test('project scan does not create Project state', () => {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-project-'));
   const project = path.join(configDir, 'project');
   fs.mkdirSync(path.join(project, '.agents', 'skills', 'example'), { recursive: true });
@@ -190,7 +272,7 @@ test('project <path> scan writes state inside the exact Project', () => {
   assert.match(result.stdout, new RegExp(`Project scan: ${realProject.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   assert.match(result.stdout, /parent-example.*read-only/);
   assert.match(result.stdout, /global-example.*read-only/);
-  assert.ok(fs.existsSync(path.join(realProject, '.skillspub', 'state.json')));
+  assert.equal(fs.existsSync(path.join(realProject, '.skillspub', 'state.json')), false);
   assert.equal(fs.existsSync(path.join(configDir, 'state.json')), false);
 });
 

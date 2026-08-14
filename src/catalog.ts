@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import type { Home } from './core.ts';
 import {
@@ -113,7 +114,7 @@ export function showBundle(home: Home, name: string): BundleMember[] {
   return members.map((id) => ({
     id,
     name: current[id]?.name,
-    stale: current[id] === undefined,
+    stale: current[id] === undefined || !fs.existsSync(id),
   }));
 }
 
