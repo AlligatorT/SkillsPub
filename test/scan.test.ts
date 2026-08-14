@@ -4,8 +4,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  applyTargetMigration,
   loadRuntimes,
+  loadTargets,
   normalizeSlotName,
+  planTargetMigration,
   scanGlobalInventory,
   scanProjectInventory,
   type Runtime,
@@ -426,25 +429,143 @@ test('malformed installer lock is structural, not an external source replacement
   assert.equal(invalidField.findings.some(({ code }) => code === 'source-changed'), false);
 });
 
-test('Runtime registry migrates legacy Agent config into JSON with external parking', () => {
+test('Target migration previews legacy Runtime overrides and Generic Targets without side effects', () => {
   const home = tmpHome();
-  const discoveryRoot = path.join(home.configDir, 'legacy', 'skills');
-  fs.writeFileSync(
-    path.join(home.configDir, 'agents.conf'),
-    `agents = ${discoveryRoot}\n`,
-  );
+  const piRoot = path.join(home.configDir, 'custom-pi', 'skills');
+  const genericRoot = path.join(home.configDir, 'other', 'skills');
+  const legacyFile = path.join(home.configDir, 'runtimes.json');
+  const legacy = {
+    version: 1,
+    runtimes: [
+      {
+        key: 'pi',
+        kind: 'agent',
+        discoveryRoot: piRoot,
+        parkingRoot: path.join(home.configDir, 'custom-pi', '.skillspub-off', 'skills'),
+        projectPath: '.pi/agent/skills',
+      },
+      {
+        key: 'other',
+        kind: 'agent',
+        discoveryRoot: genericRoot,
+        parkingRoot: path.join(home.configDir, 'other', '.skillspub-off', 'skills'),
+        projectPath: '.other/skills',
+      },
+    ],
+  };
+  fs.writeFileSync(legacyFile, JSON.stringify(legacy, null, 2) + '\n');
+  const stateFile = path.join(home.configDir, 'state.json');
+  fs.writeFileSync(stateFile, '{"baseIntent":{"kept":"off"}}\n');
+  const before = fs.readFileSync(legacyFile, 'utf8');
 
-  const [runtime] = loadRuntimes(home);
-
-  assert.equal(runtime.key, 'shared');
-  assert.equal(runtime.kind, 'shared');
-  assert.equal(runtime.discoveryRoot, discoveryRoot);
-  assert.equal(
-    runtime.parkingRoot,
-    path.join(path.dirname(discoveryRoot), '.skillspub-off', 'skills'),
+  assert.deepEqual(
+    loadTargets(home).map(({ key, kind, discoveryRoot }) => ({ key, kind, discoveryRoot })),
+    [
+      { key: 'pi', kind: 'harness', discoveryRoot: piRoot },
+      { key: 'other', kind: 'generic', discoveryRoot: genericRoot },
+    ],
   );
-  assert.equal(runtime.lockFile, path.join(path.dirname(discoveryRoot), '.skill-lock.json'));
-  assert.ok(fs.existsSync(path.join(home.configDir, 'runtimes.json')));
+  const plan = planTargetMigration(home);
+  assert.deepEqual(plan.overrides, [{ key: 'pi', discoveryRoot: piRoot, parkingRoot: path.join(home.configDir, 'custom-pi', '.skillspub-off', 'skills') }]);
+  assert.deepEqual(plan.genericTargets.map(({ key, kind, discoveryRoot }) => ({ key, kind, discoveryRoot })), [
+    { key: 'other', kind: 'generic', discoveryRoot: genericRoot },
+  ]);
+  assert.equal(fs.existsSync(path.join(home.configDir, 'targets.json')), false);
+  assert.equal(fs.readFileSync(legacyFile, 'utf8'), before);
+
+  applyTargetMigration(home, plan);
+
+  assert.equal(fs.existsSync(legacyFile), false);
+  assert.equal(fs.readFileSync(plan.backupFile!, 'utf8'), before);
+  assert.equal(fs.readFileSync(stateFile, 'utf8'), '{"baseIntent":{"kept":"off"}}\n');
+  assert.deepEqual(
+    loadTargets(home).map(({ key, kind, discoveryRoot }) => ({ key, kind, discoveryRoot })),
+    [
+      { key: 'claude', kind: 'harness', discoveryRoot: path.join(os.homedir(), '.claude', 'skills') },
+      { key: 'shared', kind: 'shared', discoveryRoot: path.join(os.homedir(), '.agents', 'skills') },
+      { key: 'pi', kind: 'harness', discoveryRoot: piRoot },
+      { key: 'other', kind: 'generic', discoveryRoot: genericRoot },
+    ],
+  );
+  assert.equal(planTargetMigration(home).status, 'already-migrated');
+});
+
+test('Target migration refuses malformed or ambiguous legacy data without partial writes', () => {
+  const malformed = tmpHome();
+  const malformedFile = path.join(malformed.configDir, 'runtimes.json');
+  fs.writeFileSync(malformedFile, '{broken');
+
+  assert.throws(() => planTargetMigration(malformed), /cannot read Runtime registry/);
+  assert.equal(fs.readFileSync(malformedFile, 'utf8'), '{broken');
+  assert.equal(fs.existsSync(path.join(malformed.configDir, 'targets.json')), false);
+  assert.equal(fs.existsSync(`${malformedFile}.v1.bak`), false);
+
+  const ambiguous = tmpHome();
+  const root = path.join(ambiguous.configDir, 'shared', 'skills');
+  const ambiguousFile = path.join(ambiguous.configDir, 'runtimes.json');
+  const content = JSON.stringify({
+    version: 1,
+    runtimes: [
+      {
+        key: 'pi', kind: 'agent', discoveryRoot: root,
+        parkingRoot: path.join(ambiguous.configDir, 'shared', '.skillspub-off', 'skills'),
+        projectPath: '.pi/agent/skills',
+      },
+      {
+        key: 'custom', kind: 'agent', discoveryRoot: root,
+        parkingRoot: path.join(ambiguous.configDir, 'custom', '.skillspub-off', 'skills'),
+        projectPath: '.custom/skills',
+      },
+    ],
+  });
+  fs.writeFileSync(ambiguousFile, content);
+
+  assert.throws(() => planTargetMigration(ambiguous), /ambiguous Skill Target discovery root/);
+  assert.equal(fs.readFileSync(ambiguousFile, 'utf8'), content);
+  assert.equal(fs.existsSync(path.join(ambiguous.configDir, 'targets.json')), false);
+  assert.equal(fs.existsSync(`${ambiguousFile}.v1.bak`), false);
+
+  const unsafe = tmpHome();
+  const unsafeFile = path.join(unsafe.configDir, 'runtimes.json');
+  fs.writeFileSync(unsafeFile, JSON.stringify({
+    version: 1,
+    runtimes: [{
+      key: '../outside', kind: 'agent',
+      discoveryRoot: path.join(unsafe.configDir, 'custom', 'skills'),
+      parkingRoot: path.join(unsafe.configDir, 'custom', '.skillspub-off', 'skills'),
+      projectPath: '.custom/skills',
+    }],
+  }));
+
+  assert.throws(() => planTargetMigration(unsafe), /invalid Runtime entry/);
+  assert.equal(fs.existsSync(path.join(unsafe.configDir, 'targets.json')), false);
+  assert.equal(fs.existsSync(`${unsafeFile}.v1.bak`), false);
+
+  const aliases = tmpHome();
+  const actualRoot = path.join(aliases.configDir, 'actual', 'skills');
+  const aliasRoot = path.join(aliases.configDir, 'alias-skills');
+  fs.mkdirSync(actualRoot, { recursive: true });
+  fs.symlinkSync(actualRoot, aliasRoot, 'dir');
+  const aliasFile = path.join(aliases.configDir, 'runtimes.json');
+  fs.writeFileSync(aliasFile, JSON.stringify({
+    version: 1,
+    runtimes: [
+      {
+        key: 'pi', kind: 'agent', discoveryRoot: actualRoot,
+        parkingRoot: path.join(aliases.configDir, 'actual', '.skillspub-off', 'skills'),
+        projectPath: '.pi/agent/skills',
+      },
+      {
+        key: 'custom', kind: 'agent', discoveryRoot: aliasRoot,
+        parkingRoot: path.join(aliases.configDir, 'custom', '.skillspub-off', 'skills'),
+        projectPath: '.custom/skills',
+      },
+    ],
+  }));
+
+  assert.throws(() => planTargetMigration(aliases), /ambiguous Skill Target discovery root/);
+  assert.equal(fs.existsSync(path.join(aliases.configDir, 'targets.json')), false);
+  assert.equal(fs.existsSync(`${aliasFile}.v1.bak`), false);
 });
 
 test('scan refuses to overwrite malformed state', () => {

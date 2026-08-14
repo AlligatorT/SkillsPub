@@ -30,6 +30,10 @@ import {
   type PresetScope,
 } from './reconcile.ts';
 import {
+  scanGlobalInventory,
+  scanProjectInventory,
+} from './inventory.ts';
+import {
   addPresetSelectors,
   addResourceTags,
   createPreset,
@@ -541,6 +545,10 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     projectPath ? projectTuiSnapshot(home, projectPath) : tuiSnapshot(home);
   const [snapshot, setSnapshot] = useState<TuiSnapshot>(takeSnapshot);
   const planScope: PresetScope = projectPath ? { projectPath } : {};
+  const prepareMutation = () => {
+    if (projectPath) scanProjectInventory(home, projectPath);
+    else scanGlobalInventory(home);
+  };
   const [tab, setTab] = useState<Tab>('agent');
   const [focusColumn, setFocusColumn] = useState<0 | 1>(0);
   const [agentIndex, setAgentIndex] = useState(0);
@@ -696,6 +704,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
           const value = draft.value.trim();
           if (value) {
             try {
+              prepareMutation();
               if (draft.kind === 'tag') {
                 addResourceTags(home, selector, [value]);
                 setFeedback(`Tagged ${row.name}: ${value}`);
@@ -734,6 +743,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         if (input === 'x' && !onActionRow && tags[manage.index] !== undefined) {
           const tag = tags[manage.index];
           try {
+            prepareMutation();
             removeResourceTags(home, selector, [tag]);
             refresh({rowId: row.id});
             setFeedback(`Removed tag ${tag} from ${row.name}`);
@@ -750,6 +760,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         const name = presetNames[manage.index];
         if (name !== undefined) {
           try {
+            prepareMutation();
             const member = (snapshot.catalog.presets[name]?.selectors ?? []).includes(selector);
             if (member) removePresetSelectors(home, name, [selector]);
             else addPresetSelectors(home, name, [selector]);
@@ -808,6 +819,12 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         if (value && batch) {
           const markedRows = rows.filter(
           (row) => row.realPath && batch.marks.has(markKey(home.configDir, row.realPath)));
+          try {
+            prepareMutation();
+          } catch (err) {
+            setFeedback((err as Error).message);
+            return setBatchTag(null);
+          }
           let count = 0;
           const failures: string[] = [];
           for (const row of markedRows) {
@@ -1140,7 +1157,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
 }
 
 export async function runTui(
-  home: Home = defaultHome(),
+  home: Home = defaultHome({ migrate: false }),
   options: { projectPath?: string } = {},
 ): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {

@@ -109,6 +109,19 @@ async function renderApp(
   return { stdin, stdout, send, flush, unmount: () => app.unmount() };
 }
 
+test('TUI startup reads legacy configuration without creating a Target registry or state', async () => {
+  const { home } = setup();
+  const before = fs.readdirSync(home.configDir).sort();
+
+  const t = await renderApp(home);
+  t.unmount();
+
+  assert.deepEqual(fs.readdirSync(home.configDir).sort(), before);
+  assert.equal(fs.existsSync(path.join(home.configDir, 'targets.json')), false);
+  assert.equal(fs.existsSync(path.join(home.configDir, 'runtimes.json')), false);
+  assert.equal(fs.existsSync(path.join(home.configDir, 'state.json')), false);
+});
+
 test('initial projection: first agent selected, all relationship kinds shown, absent excluded', async () => {
   const { home } = setup();
   const t = await renderApp(home);

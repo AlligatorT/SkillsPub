@@ -4,7 +4,10 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { defaultHome } from './core.ts';
 import {
+  applyTargetMigration,
   loadRuntimes,
+  loadTargets,
+  planTargetMigration,
   applyDoctorRepairs,
   doctorGlobalInventory,
   doctorProjectInventory,
@@ -60,17 +63,19 @@ import {
 
 const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the source of truth)
 
-  skillspub ls [--agent A] [--tag T]   skill × agent matrix (+ untagged/deadlink hints)
-  skillspub on|off <selector> <target...> [--yes]  update Agent or Runtime relationships
-  skillspub status <skill>             per-agent state of one skill
+  skillspub ls [--target T] [--tag T]  skill × Target matrix (+ untagged/deadlink hints)
+  skillspub on|off <selector> <target...> [--yes]  update Skill Target relationships
+  skillspub status <skill>             per-Target state of one skill
   skillspub bundle ls|show|create|add|rm ...
   skillspub tag add|rm|ls ...          manage global resource Tags
   skillspub preset create|add|rm|ls|show|activate|deactivate|reconcile|delete ...
   skillspub shared find|describe|add|update|remove ...  manage the Shared Runtime via skills@1.5.21
-  skillspub scan                       explicitly scan Global Runtime inventory
+  skillspub scan                       explicitly scan Global Skill Target inventory
   skillspub doctor [--repair --yes]    diagnose; explicitly confirm safe repairs
-  skillspub project <path> scan|doctor|shared|preset ...  operate on the exact Project Runtime roots
-  skillspub runtimes                   Runtime registry (~/.config/skillspub/runtimes.json)
+  skillspub project <path> scan|doctor|shared|preset ...  operate on the exact Project Skill Targets
+  skillspub targets                    list resolved Skill Targets
+  skillspub migrate targets [--yes]    preview or migrate runtimes.json to targets.json
+  skillspub runtimes                   Legacy Runtime compatibility view
   skillspub tui [--project [path]]     interactive full-screen skill browser
                                        (--project: project-scope view, cwd when path omitted)
 `;
@@ -134,9 +139,13 @@ function refuseAmbiguousName(rows: Row[], name: string): void {
 function cmdLs(home: ReturnType<typeof defaultHome>, args: string[]): void {
   const { values } = parseArgs({
     args,
-    options: { agent: { type: 'string' }, tag: { type: 'string' } },
+    options: { target: { type: 'string' }, agent: { type: 'string' }, tag: { type: 'string' } },
   });
-  if (values.tag && !values.agent) {
+  if (values.target && values.agent)
+    throw new Error('usage: skillspub ls [--target T] [--tag T]');
+  if (values.agent) console.error('warning: --agent is deprecated; use --target');
+  const target = values.target ?? values.agent;
+  if (values.tag && !target) {
     const report = scanGlobalInventory(home, undefined, { persist: false });
     let selected: Set<string>;
     try {
@@ -169,15 +178,15 @@ function cmdLs(home: ReturnType<typeof defaultHome>, args: string[]): void {
   }
   const report = scanGlobalInventory(home, undefined, { persist: false });
   const agents = viewAgents(report);
-  if (values.agent && !agents.some((agent) => agent.name === values.agent))
-    throw new Error(`unknown agent: ${values.agent}`);
+  if (target && !agents.some((agent) => agent.name === target))
+    throw new Error(`unknown target: ${target}`);
   const { tags } = readViewState(home);
   const rows = filterRows(
     projectRows(report),
-    { agent: values.agent, tag: values.tag },
+    { agent: target, tag: values.tag },
     tags,
   );
-  const cols = values.agent ? [values.agent] : agents.map((agent) => agent.name);
+  const cols = target ? [target] : agents.map((agent) => agent.name);
   if (rows.length === 0) {
     console.log('no skills found');
     return;
@@ -275,7 +284,7 @@ function cmdStatus(
 }
 
 function cmdRuntimes(home: ReturnType<typeof defaultHome>): void {
-  for (const runtime of loadRuntimes(home)) {
+  for (const runtime of loadRuntimes(home, { persist: false })) {
     console.log([
       runtime.key,
       runtime.kind,
@@ -285,18 +294,65 @@ function cmdRuntimes(home: ReturnType<typeof defaultHome>): void {
   }
 }
 
+function cmdTargets(home: ReturnType<typeof defaultHome>, args: string[]): void {
+  if (args.length > 0) throw new Error('usage: skillspub targets');
+  for (const target of loadTargets(home)) {
+    console.log([
+      target.key,
+      target.kind,
+      target.discoveryRoot,
+      target.parkingRoot,
+    ].join('\t'));
+  }
+}
+
+function printTargetMigration(home: ReturnType<typeof defaultHome>): ReturnType<typeof planTargetMigration> {
+  const plan = planTargetMigration(home);
+  if (plan.status === 'already-migrated') {
+    console.log('Target registry already migrated.');
+    return plan;
+  }
+  console.log('Target migration plan:');
+  if (plan.overrides.length === 0) console.log('  no Target Definition overrides');
+  else for (const override of plan.overrides)
+    console.log(`  override\t${override.key}`);
+  if (plan.genericTargets.length === 0) console.log('  no Generic Targets');
+  else for (const target of plan.genericTargets)
+    console.log(`  generic\t${target.key}`);
+  console.log(`  write\t${plan.targetFile}`);
+  console.log(`  backup\t${plan.backupFile}`);
+  return plan;
+}
+
+function cmdMigrate(home: ReturnType<typeof defaultHome>, args: string[]): void {
+  const [subject, ...rest] = args;
+  if (subject !== 'targets' || rest.some((arg) => arg !== '--yes'))
+    throw new Error('usage: skillspub migrate targets [--yes]');
+  const plan = printTargetMigration(home);
+  if (plan.status === 'already-migrated') return;
+  if (!rest.includes('--yes')) return;
+  applyTargetMigration(home, plan);
+  console.log(`Migrated Target registry: ${plan.targetFile}`);
+}
+
+function prepareGlobalMutation(home: ReturnType<typeof defaultHome>): void {
+  scanGlobalInventory(home);
+}
+
 function cmdTag(home: ReturnType<typeof defaultHome>, args: string[]): void {
   const [action, resource, ...names] = args;
   switch (action) {
     case 'add': {
       if (!resource || names.length === 0)
         throw new Error('usage: skillspub tag add <resource> <tag...>');
+      prepareGlobalMutation(home);
       const added = addResourceTags(home, resource, names);
       console.log(`added ${added} tag${added === 1 ? '' : 's'} to ${resource}`);
       break;
     }
     case 'rm': {
       if (!resource) throw new Error('usage: skillspub tag rm <resource> [<tag...>]');
+      prepareGlobalMutation(home);
       const removed = removeResourceTags(home, resource, names);
       console.log(`removed ${removed} tag${removed === 1 ? '' : 's'} from ${resource}`);
       break;
@@ -391,6 +447,7 @@ function cmdPreset(
     }
     case 'create': {
       if (!name) throw new Error('usage: skillspub preset create <name> [<selector...>]');
+      prepareGlobalMutation(home);
       const count = createPreset(home, name, rest);
       console.log(`created preset ${name} with ${count} selector${count === 1 ? '' : 's'}`);
       break;
@@ -398,12 +455,14 @@ function cmdPreset(
     case 'add': {
       if (!name || rest.length === 0)
         throw new Error('usage: skillspub preset add <name> <selector...>');
+      prepareGlobalMutation(home);
       const added = addPresetSelectors(home, name, rest);
       console.log(`added ${added} selector${added === 1 ? '' : 's'} to ${name}`);
       break;
     }
     case 'rm': {
       if (!name) throw new Error('usage: skillspub preset rm <name> [<selector...>]');
+      prepareGlobalMutation(home);
       const removed = removePresetSelectors(home, name, rest);
       console.log(removed === undefined
         ? `removed preset ${name}`
@@ -471,6 +530,7 @@ function cmdBundle(home: ReturnType<typeof defaultHome>, args: string[]): void {
     }
     case 'create': {
       if (!name) throw new Error('usage: skillspub bundle create <name> [<skill>...]');
+      prepareGlobalMutation(home);
       const count = createBundle(home, name, selectors);
       console.log(`created bundle ${name} with ${count} member${count === 1 ? '' : 's'}`);
       break;
@@ -478,12 +538,14 @@ function cmdBundle(home: ReturnType<typeof defaultHome>, args: string[]): void {
     case 'add': {
       if (!name || selectors.length === 0)
         throw new Error('usage: skillspub bundle add <name> <skill...>');
+      prepareGlobalMutation(home);
       const added = addBundleMembers(home, name, selectors);
       console.log(`added ${added} member${added === 1 ? '' : 's'} to ${name}`);
       break;
     }
     case 'rm': {
       if (!name) throw new Error('usage: skillspub bundle rm <name> [<skill>...]');
+      prepareGlobalMutation(home);
       const removed = removeBundleMembers(home, name, selectors);
       console.log(removed === undefined
         ? `removed bundle ${name}`
@@ -647,13 +709,7 @@ async function main(
   stdoutIsTty = Boolean(process.stdout.isTTY),
 ): Promise<void> {
   const [cmd, ...rest] = args;
-  const readOnlyShared = (command: string | undefined) =>
-    command === 'find' || command === 'describe';
-  const readOnly = cmd === 'doctor' ||
-    (cmd === 'shared' && readOnlyShared(rest[0])) ||
-    (cmd === 'project' && (rest[1] === 'doctor' ||
-      (rest[1] === 'shared' && readOnlyShared(rest[2]))));
-  const home = defaultHome({ migrate: !readOnly });
+  const home = defaultHome({ migrate: false });
   try {
     if (shouldRunTui(cmd, stdinIsTty, stdoutIsTty)) {
       let projectPath: string | undefined;
@@ -691,7 +747,7 @@ async function main(
         break;
       case 'scan':
         if (rest.length > 0) throw new Error('usage: skillspub scan');
-        printScan(scanGlobalInventory(home));
+        printScan(scanGlobalInventory(home, undefined, { persist: false }));
         break;
       case 'doctor':
         cmdDoctor(home, rest);
@@ -700,7 +756,7 @@ async function main(
         const [projectPath, projectCommand, ...projectArgs] = rest;
         if (!projectPath) throw new Error('usage: skillspub project <path> scan|doctor|shared|preset');
         if (projectCommand === 'scan' && projectArgs.length === 0)
-          printScan(scanProjectInventory(home, projectPath));
+          printScan(scanProjectInventory(home, projectPath, undefined, { persist: false }));
         else if (projectCommand === 'doctor') cmdDoctor(home, projectArgs, projectPath);
         else if (projectCommand === 'shared') cmdShared(home, projectArgs, projectPath);
         else if (projectCommand === 'preset') cmdPreset(home, projectArgs, projectPath);
@@ -710,6 +766,12 @@ async function main(
       case 'runtimes':
         if (rest.length > 0) throw new Error('usage: skillspub runtimes');
         cmdRuntimes(home);
+        break;
+      case 'targets':
+        cmdTargets(home, rest);
+        break;
+      case 'migrate':
+        cmdMigrate(home, rest);
         break;
       default:
         process.stderr.write(USAGE);

@@ -349,7 +349,7 @@ export interface TuiSnapshot {
 
 /** Read the live disk state. Call again after every mutation (ADR-0001). */
 export function tuiSnapshot(home: Home): TuiSnapshot {
-  const report = scanGlobalInventory(home);
+  const report = scanGlobalInventory(home, undefined, { persist: false });
   return {
     agents: viewAgents(report),
     rows: projectRows(report),
@@ -360,7 +360,7 @@ export function tuiSnapshot(home: Home): TuiSnapshot {
 /** Project-scope snapshot (ADR-0010): agent columns are the project runtimes only;
  *  rows are the project + parent + global union, inherited cells marked read-only. */
 export function projectTuiSnapshot(home: Home, projectPath: string): TuiSnapshot {
-  const report = scanProjectInventory(home, projectPath);
+  const report = scanProjectInventory(home, projectPath, undefined, { persist: false });
   return {
     agents: report.runtimes
       .filter((runtime) => runtime.scope === 'project')
