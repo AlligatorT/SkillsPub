@@ -196,6 +196,8 @@ test('target migration previews, confirms, and backs up the legacy Runtime regis
   assert.equal(preview.status, 0, preview.stderr);
   assert.match(preview.stdout, /Target migration plan:/);
   assert.match(preview.stdout, /override\tpi/);
+  assert.match(preview.stdout, /disabled\tclaude/);
+  assert.match(preview.stdout, /disabled\tshared/);
   assert.match(preview.stdout, /generic\tother/);
   assert.equal(fs.existsSync(path.join(configDir, 'targets.json')), false);
   assert.equal(fs.readFileSync(legacyFile, 'utf8'), legacy);

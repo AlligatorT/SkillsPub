@@ -458,15 +458,20 @@ test('Target migration previews legacy Runtime overrides and Generic Targets wit
   fs.writeFileSync(stateFile, '{"baseIntent":{"kept":"off"}}\n');
   const before = fs.readFileSync(legacyFile, 'utf8');
 
+  const expectedTargets = [
+    { key: 'pi', kind: 'harness', discoveryRoot: piRoot },
+    { key: 'other', kind: 'generic', discoveryRoot: genericRoot },
+  ];
   assert.deepEqual(
     loadTargets(home).map(({ key, kind, discoveryRoot }) => ({ key, kind, discoveryRoot })),
-    [
-      { key: 'pi', kind: 'harness', discoveryRoot: piRoot },
-      { key: 'other', kind: 'generic', discoveryRoot: genericRoot },
-    ],
+    expectedTargets,
   );
   const plan = planTargetMigration(home);
-  assert.deepEqual(plan.overrides, [{ key: 'pi', discoveryRoot: piRoot, parkingRoot: path.join(home.configDir, 'custom-pi', '.skillspub-off', 'skills') }]);
+  assert.deepEqual(plan.overrides, [
+    { key: 'pi', discoveryRoot: piRoot, parkingRoot: path.join(home.configDir, 'custom-pi', '.skillspub-off', 'skills') },
+    { key: 'claude', disabled: true },
+    { key: 'shared', disabled: true },
+  ]);
   assert.deepEqual(plan.genericTargets.map(({ key, kind, discoveryRoot }) => ({ key, kind, discoveryRoot })), [
     { key: 'other', kind: 'generic', discoveryRoot: genericRoot },
   ]);
@@ -480,14 +485,58 @@ test('Target migration previews legacy Runtime overrides and Generic Targets wit
   assert.equal(fs.readFileSync(stateFile, 'utf8'), '{"baseIntent":{"kept":"off"}}\n');
   assert.deepEqual(
     loadTargets(home).map(({ key, kind, discoveryRoot }) => ({ key, kind, discoveryRoot })),
-    [
-      { key: 'claude', kind: 'harness', discoveryRoot: path.join(os.homedir(), '.claude', 'skills') },
-      { key: 'shared', kind: 'shared', discoveryRoot: path.join(os.homedir(), '.agents', 'skills') },
-      { key: 'pi', kind: 'harness', discoveryRoot: piRoot },
-      { key: 'other', kind: 'generic', discoveryRoot: genericRoot },
-    ],
+    expectedTargets,
   );
   assert.equal(planTargetMigration(home).status, 'already-migrated');
+});
+
+test('Target migration rolls back only a newly written registry when the legacy backup fails', () => {
+  const writeLegacy = (home: ReturnType<typeof tmpHome>) => {
+    const root = path.join(home.configDir, 'pi', 'skills');
+    fs.writeFileSync(path.join(home.configDir, 'runtimes.json'), JSON.stringify({
+      version: 1,
+      runtimes: [{
+        key: 'pi', kind: 'agent', discoveryRoot: root,
+        parkingRoot: path.join(home.configDir, 'pi', '.skillspub-off', 'skills'),
+        projectPath: '.pi/agent/skills',
+      }],
+    }));
+  };
+  const failBackup = (plan: ReturnType<typeof planTargetMigration>) => {
+    const rename = fs.renameSync;
+    fs.renameSync = ((from, to) => {
+      if (from === plan.legacyFile) throw new Error('injected legacy backup failure');
+      return rename(from, to);
+    }) as typeof fs.renameSync;
+    try {
+      assert.throws(() => applyTargetMigration({ configDir: path.dirname(plan.targetFile) }, plan),
+        /injected legacy backup failure/);
+    } finally {
+      fs.renameSync = rename;
+    }
+  };
+
+  const fresh = tmpHome();
+  writeLegacy(fresh);
+  const freshPlan = planTargetMigration(fresh);
+  failBackup(freshPlan);
+  assert.equal(fs.existsSync(freshPlan.targetFile), false);
+  assert.equal(fs.existsSync(freshPlan.backupFile!), false);
+
+  const existing = tmpHome();
+  writeLegacy(existing);
+  const initialPlan = planTargetMigration(existing);
+  fs.writeFileSync(initialPlan.targetFile, JSON.stringify({
+    version: 1,
+    overrides: initialPlan.overrides,
+    genericTargets: initialPlan.genericTargets,
+  }));
+  const existingPlan = planTargetMigration(existing);
+  assert.equal(existingPlan.writeTarget, false);
+  const before = fs.readFileSync(existingPlan.targetFile, 'utf8');
+  failBackup(existingPlan);
+  assert.equal(fs.readFileSync(existingPlan.targetFile, 'utf8'), before);
+  assert.equal(fs.existsSync(existingPlan.backupFile!), false);
 });
 
 test('Target migration refuses malformed or ambiguous legacy data without partial writes', () => {
