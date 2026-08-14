@@ -60,7 +60,7 @@ Target Definition 是 Harness 或公共标准的路径/能力规则；结合 hom
 
 Harness-specific Targets 由对应 Adapter 定义。Generic Target 可由用户指定路径，SkillsPub 只承诺目录管理。当前不建立 Consumer/Profile 类型，但 Target 结构不得假设一个 Harness 永远只有一个身份或 Target。
 
-Project view 显示完整继承链。只有当前精确目录可写；父级和 Global Relationships 显示来源并锁定。相同名称来自多个 roots 时分别显示，不做覆盖或合并假设。
+Project view 把 project、parent 与 Global 继承收敛成每个 Skill × Target 一个有效条目，并显示获胜来源目录。只有当前精确目录可写。交互见下方 TUI「Status and actions」。
 
 ## Entry behavior
 

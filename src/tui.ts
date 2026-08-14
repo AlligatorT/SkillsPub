@@ -113,6 +113,10 @@ function sortLabel(sort: SortOrder): string {
   return sort[0].toUpperCase() + sort.slice(1);
 }
 
+function inheritedOn(info?: SkillInfo): boolean {
+  return Boolean(info?.readOnly && info.presence === 'on');
+}
+
 /** Visible window [start, start+height) that keeps `selected` on screen. */
 function windowStart(length: number, selected: number, height: number): number {
   return Math.max(
@@ -643,19 +647,23 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   }, [selectedRow, snapshot.catalog, rows]);
   /** Re-read disk, then re-anchor selection: mutation moves entries, so locate
    *  the fresh row/relationship by (runtimeId, slot) or stable row id. */
-  const refresh = (keep?: { rowId?: string; runtimeId?: string; slot?: string }) => {
+  const refresh = (keep?: { rowId?: string; runtimeId?: string; slot?: string; agent?: string }) => {
     const next = takeSnapshot();
     setSnapshot(next);
     if (!keep) return;
-    const row = keep.rowId !== undefined
-      ? next.rows.find((candidate) => candidate.id === keep.rowId)
-      : next.rows.find((candidate) => candidate.relationships.some((rel) =>
-          rel.runtimeId === keep.runtimeId && rel.slot === keep.slot));
+    const row = keep.runtimeId !== undefined
+      ? next.rows.find((candidate) => candidate.relationships.some((rel) =>
+          rel.runtimeId === keep.runtimeId && rel.slot === keep.slot))
+      : keep.rowId !== undefined
+        ? next.rows.find((candidate) => candidate.id === keep.rowId)
+        : undefined;
     if (row) setInstanceId(row.id);
     const rel = keep.runtimeId !== undefined
       ? row?.relationships.find((candidate) =>
           candidate.runtimeId === keep.runtimeId && candidate.slot === keep.slot)
-      : undefined;
+      : keep.agent
+        ? row?.relationships.find((candidate) => candidate.agent === keep.agent)
+        : undefined;
     if (rel) setRelationshipKey(rel.info.path);
   };
 
@@ -780,7 +788,10 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
             failures.push((err as Error).message);
           }
         }
-        refresh();
+        refresh({
+          rowId: selectedRow?.id,
+          agent: selectedAgent?.name,
+        });
         setFeedback(
           `Batch ${batchConfirm.intent} @ ${batchConfirm.runtimeName}: ${applied} applied` +
           (failures.length > 0 ? `, ${failures.length} failed` : ''),
@@ -868,12 +879,17 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         const plans: ActivationPlan[] = [];
         const errors: string[] = [];
         for (const row of markedRows) {
+          if (intent === 'on' && inheritedOn(row.agents[runtime.name])) continue;
+          if (intent === 'off' && (!row.agents[runtime.name] || inheritedOn(row.agents[runtime.name])))
+            continue;
           try {
             plans.push(planActivation(home, `skill:${row.id}`, [runtime.name], intent, planScope));
           } catch (err) {
             errors.push(`${row.name}: ${(err as Error).message}`);
           }
         }
+        if (plans.length === 0 && errors.length === 0)
+          return setFeedback(`Batch ${intent}: skipped already-effective entries`);
         return setBatchConfirm({intent, runtimeName: runtime.name, plans, errors});
       }
       if (input === 't' || input === 'T')
@@ -931,19 +947,30 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       }
       return;
     }
-    if (input === ' ' && actionable && selectedInfo && selectedRel) {
-      if (selectedRel.readOnly)
-        return setFeedback(`read-only: inherited from ${selectedRel.scope} — i links it into this project`);
+    if (input === ' ' && actionable) {
+      if (inheritedOn(selectedInfo))
+        return setFeedback(`read-only: inherited from ${selectedRel?.scope}`);
+      const canEnable = Boolean(projectPath) && selectedRow.realPath &&
+        (!selectedInfo || selectedInfo.readOnly);
+      if (!selectedInfo && !canEnable) return;
+      if (!selectedRow.realPath && !selectedInfo)
+        return setFeedback('cannot enable a broken relationship');
       try {
-        applyActivationPlan(home, planToggle(home, selectedRel.runtimeId, selectedRel.slot, planScope));
-        refresh({runtimeId: selectedRel.runtimeId, slot: selectedRel.slot});
-        setFeedback(`${selectedRow.name} @ ${selectedAgent.name}: ${selectedInfo.underOff ? 'on' : 'off'}`);
+        if (selectedInfo && !selectedInfo.readOnly && selectedRel) {
+          applyActivationPlan(home, planToggle(home, selectedRel.runtimeId, selectedRel.slot, planScope));
+          refresh({runtimeId: selectedRel.runtimeId, slot: selectedRel.slot, rowId: selectedRow.id});
+          setFeedback(`${selectedRow.name} @ ${selectedAgent.name}: ${selectedInfo.underOff ? 'on' : 'off'}`);
+        } else if (canEnable) {
+          applyActivationPlan(home, planActivation(home, `skill:${selectedRow.id}`, [selectedAgent.name], 'on', planScope));
+          refresh({rowId: selectedRow.id, agent: selectedAgent.name});
+          setFeedback(`${selectedRow.name} @ ${selectedAgent.name}: on`);
+        }
       } catch (err) {
         setFeedback((err as Error).message);
       }
       return;
     }
-    if (input === 'i' && actionable && !selectedInfo) {
+    if (input === 'i' && actionable && !selectedInfo && !projectPath) {
       if (!selectedRow.realPath) return setFeedback('Link unavailable: selected skill has no directory');
       return setConfirmation({
         kind: 'link',
@@ -984,11 +1011,13 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         ? 'skills'
         : 'agents';
   const actionHint = actionable
-    ? selectedInfo
-      ? ` space ${selectedInfo.underOff ? 'on' : 'off'}${selectedInfo.linked ? '  u unlink' : ''}`
-      : selectedRow.realPath
-        ? ' i link'
-        : ''
+    ? inheritedOn(selectedInfo)
+      ? ''
+      : selectedInfo && !selectedInfo.readOnly
+        ? ` space ${selectedInfo.underOff ? 'on' : 'off'}${selectedInfo.linked ? '  u unlink' : ''}`
+        : selectedRow.realPath
+          ? projectPath ? ' space on' : ' i link'
+          : ''
     : '';
 
   return h(
@@ -1117,11 +1146,10 @@ export async function runTui(
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     throw new Error('skillspub tui requires an interactive terminal');
   }
-  process.stdout.write('\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l');
-  try {
-    const app = render(h(App, {home, projectPath: options.projectPath}), {exitOnCtrlC: false, patchConsole: false});
-    await app.waitUntilExit();
-  } finally {
-    process.stdout.write('\x1b[?25h\x1b[?1049l');
-  }
+  const app = render(h(App, {home, projectPath: options.projectPath}), {
+    exitOnCtrlC: false,
+    patchConsole: false,
+    alternateScreen: true,
+  });
+  await app.waitUntilExit();
 }
