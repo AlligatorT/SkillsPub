@@ -40,6 +40,7 @@ export interface GenericTarget extends SkillTarget {
 
 export interface TargetDefinitionOverride {
   key: string;
+  disabled?: true;
   discoveryRoot?: string;
   parkingRoot?: string;
   projectPath?: string;
@@ -286,8 +287,13 @@ function targetsFromRegistry(registry: TargetRegistryFile, file: string): SkillT
       throw new Error(`duplicate Target Definition override: ${override.key}`);
     overrides.set(override.key, override);
   }
-  const targets = definitions.map((definition) =>
-    resolveTarget({ ...definition, ...overrides.get(definition.key) }, file));
+  const targets: SkillTarget[] = [];
+  for (const definition of definitions) {
+    const override = overrides.get(definition.key);
+    if (override?.disabled) continue;
+    const { disabled: _, ...fields } = override ?? {};
+    targets.push(resolveTarget({ ...definition, ...fields }, file));
+  }
   const generics = registry.genericTargets.map((target) =>
     resolveTarget(target, file));
   if (generics.some((target) => target.kind !== 'generic'))
@@ -310,6 +316,11 @@ function readTargetRegistry(file: string): TargetRegistryFile | undefined {
     if (!isRecord(override) || typeof override.key !== 'string')
       throw new Error(`invalid Target Definition override in ${file}`);
     const result: TargetDefinitionOverride = { key: override.key };
+    if (override.disabled !== undefined) {
+      if (override.disabled !== true)
+        throw new Error(`invalid Target Definition override in ${file}`);
+      result.disabled = true;
+    }
     for (const field of ['discoveryRoot', 'parkingRoot', 'projectPath', 'lockFile'] as const) {
       if (override[field] === undefined) continue;
       if (typeof override[field] !== 'string')
@@ -467,6 +478,7 @@ function targetRegistryFromLegacy(runtimes: Runtime[], file: string): TargetRegi
       genericTargets.push(target as GenericTarget);
       continue;
     }
+    definitions.delete(target.key);
     const base = resolveTarget(definition, file);
     const override: TargetDefinitionOverride = { key: target.key };
     for (const field of ['discoveryRoot', 'parkingRoot', 'projectPath', 'lockFile'] as const) {
@@ -474,6 +486,7 @@ function targetRegistryFromLegacy(runtimes: Runtime[], file: string): TargetRegi
     }
     if (Object.keys(override).length > 1) overrides.push(override);
   }
+  overrides.push(...[...definitions.keys()].map((key) => ({ key, disabled: true as const })));
   const registry = { version: 1 as const, overrides, genericTargets };
   targetsFromRegistry(registry, file);
   return registry;
@@ -484,8 +497,9 @@ function canonicalTargetRegistry(registry: TargetRegistryFile): string {
     version: 1,
     overrides: [...registry.overrides]
       .sort((a, b) => a.key.localeCompare(b.key))
-      .map(({ key, discoveryRoot, parkingRoot, projectPath, lockFile }) => ({
+      .map(({ key, disabled, discoveryRoot, parkingRoot, projectPath, lockFile }) => ({
         key,
+        ...(disabled ? { disabled: true } : {}),
         ...(discoveryRoot === undefined ? {} : { discoveryRoot }),
         ...(parkingRoot === undefined ? {} : { parkingRoot }),
         ...(projectPath === undefined ? {} : { projectPath }),
@@ -596,10 +610,15 @@ export function applyTargetMigration(home: Home, plan: TargetMigrationPlan): voi
     throw new Error('Target migration changed after preview; preview again');
   const registry = registryFromPlan(fresh);
   if (fresh.writeTarget) writeTargetRegistry(fresh.targetFile, registry);
-  const written = readTargetRegistry(fresh.targetFile);
-  if (!written || canonicalTargetRegistry(written) !== canonicalTargetRegistry(registry))
-    throw new Error(`Target registry validation failed: ${fresh.targetFile}`);
-  fs.renameSync(fresh.legacyFile, fresh.backupFile!);
+  try {
+    const written = readTargetRegistry(fresh.targetFile);
+    if (!written || canonicalTargetRegistry(written) !== canonicalTargetRegistry(registry))
+      throw new Error(`Target registry validation failed: ${fresh.targetFile}`);
+    fs.renameSync(fresh.legacyFile, fresh.backupFile!);
+  } catch (error) {
+    if (fresh.writeTarget) fs.unlinkSync(fresh.targetFile);
+    throw error;
+  }
 }
 
 export function normalizeSlotName(name: string): string {

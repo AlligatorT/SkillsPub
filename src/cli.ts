@@ -315,7 +315,7 @@ function printTargetMigration(home: ReturnType<typeof defaultHome>): ReturnType<
   console.log('Target migration plan:');
   if (plan.overrides.length === 0) console.log('  no Target Definition overrides');
   else for (const override of plan.overrides)
-    console.log(`  override\t${override.key}`);
+    console.log(`  ${override.disabled ? 'disabled' : 'override'}\t${override.key}`);
   if (plan.genericTargets.length === 0) console.log('  no Generic Targets');
   else for (const target of plan.genericTargets)
     console.log(`  generic\t${target.key}`);
