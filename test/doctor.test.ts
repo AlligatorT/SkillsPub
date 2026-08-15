@@ -7,13 +7,13 @@ import {
   applyDoctorRepairs,
   doctorGlobalInventory,
   doctorProjectInventory,
-  loadRuntimes,
+  loadTargets,
   scanGlobalInventory,
-  type Runtime,
+  type SkillTarget,
 } from '../src/inventory.ts';
 import type { Home } from '../src/core.ts';
 
-function setup(): { home: Home; runtime: Runtime } {
+function setup(): { home: Home; runtime: SkillTarget } {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-doctor-'));
   const discoveryRoot = path.join(configDir, 'runtime', 'skills');
   const parkingRoot = path.join(configDir, 'runtime', '.skillspub-off', 'skills');
@@ -30,10 +30,10 @@ function setup(): { home: Home; runtime: Runtime } {
   };
 }
 
-test('read-only Runtime loading does not create a registry', () => {
+test('read-only Target loading does not create a registry', () => {
   const home = { configDir: fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-doctor-config-')) };
 
-  assert.ok(loadRuntimes(home, { persist: false }).length > 0);
+  assert.ok(loadTargets(home).length > 0);
   assert.equal(fs.existsSync(path.join(home.configDir, 'runtimes.json')), false);
 });
 
@@ -53,7 +53,7 @@ test('Doctor diagnoses a broken link and plans removal without changing disk or 
     kind: 'remove-broken-link',
     path: link,
     from: '/missing/skill',
-    runtimeId: 'global:shared',
+    targetId: 'global:shared',
     slot: 'broken',
   }]);
   assert.equal(fs.lstatSync(link).isSymbolicLink(), true);
@@ -69,6 +69,19 @@ test('Project Doctor does not create Project state or parking directories', () =
 
   assert.equal(report.projectPath, fs.realpathSync(project));
   assert.equal(fs.existsSync(path.join(project, '.skillspub')), false);
+});
+
+test('Doctor reads legacy runtime inventory metadata', () => {
+  const { home, runtime } = setup();
+  const slot = `global:${runtime.key}\0parked`;
+  fs.writeFileSync(path.join(home.configDir, 'state.json'), JSON.stringify({
+    baseIntent: { [slot]: 'off' },
+    runtimeInventory: { slots: { [slot]: { resourceIds: ['/missing/parked'] } } },
+  }));
+
+  const report = doctorGlobalInventory(home, [runtime]);
+
+  assert.equal(report.findings.some(({ code }) => code === 'parking-entry-missing'), true);
 });
 
 test('Doctor removes only explicitly applied broken symlink repairs', () => {
@@ -191,10 +204,10 @@ test('Doctor never offers destructive repair for an unreadable symlink target', 
 test('Doctor previews and repairs a managed Link whose local source moved to parking', () => {
   const { home, runtime: consumer } = setup();
   consumer.key = 'consumer';
-  consumer.kind = 'agent';
-  const source: Runtime = {
+  consumer.kind = 'harness';
+  const source: SkillTarget = {
     key: 'source',
-    kind: 'agent',
+    kind: 'harness',
     discoveryRoot: path.join(home.configDir, 'source', 'skills'),
     parkingRoot: path.join(home.configDir, 'source', '.skillspub-off', 'skills'),
     projectPath: '.source/skills',
@@ -225,9 +238,9 @@ test('Doctor previews and repairs a managed Link whose local source moved to par
 test('Doctor rejects a managed Link repair when the target changes after preview', () => {
   const { home, runtime: consumer } = setup();
   consumer.key = 'consumer';
-  const source: Runtime = {
+  const source: SkillTarget = {
     key: 'source',
-    kind: 'agent',
+    kind: 'harness',
     discoveryRoot: path.join(home.configDir, 'source', 'skills'),
     parkingRoot: path.join(home.configDir, 'source', '.skillspub-off', 'skills'),
     projectPath: '.source/skills',
@@ -254,9 +267,9 @@ test('Doctor rejects a managed Link repair when the target changes after preview
 test('Doctor does not retarget to a different resource placed in the matching parking Slot', () => {
   const { home, runtime: consumer } = setup();
   consumer.key = 'consumer';
-  const source: Runtime = {
+  const source: SkillTarget = {
     key: 'source',
-    kind: 'agent',
+    kind: 'harness',
     discoveryRoot: path.join(home.configDir, 'source', 'skills'),
     parkingRoot: path.join(home.configDir, 'source', '.skillspub-off', 'skills'),
     projectPath: '.source/skills',
@@ -281,9 +294,9 @@ test('Doctor does not retarget to a different resource placed in the matching pa
 test('Doctor does not retarget an untracked external Link', () => {
   const { home, runtime: consumer } = setup();
   consumer.key = 'consumer';
-  const source: Runtime = {
+  const source: SkillTarget = {
     key: 'source',
-    kind: 'agent',
+    kind: 'harness',
     discoveryRoot: path.join(home.configDir, 'source', 'skills'),
     parkingRoot: path.join(home.configDir, 'source', '.skillspub-off', 'skills'),
     projectPath: '.source/skills',
@@ -312,7 +325,7 @@ test('Doctor reports both sides of a known npx lock/file mismatch', () => {
   }));
   const slotId = 'global:shared\0managed';
   fs.writeFileSync(path.join(home.configDir, 'state.json'), JSON.stringify({
-    runtimeInventory: {
+    targetInventory: {
       slots: { [slotId]: { provenance: { source: 'owner/repo' } } },
     },
   }));
@@ -336,14 +349,14 @@ test('Project Doctor reports stale references, missing parking, and Orphaned Pre
     tags: { '/missing/tag-resource': ['stale'], [unlinked]: ['kept'] },
     presets: { kept: { selectors: ['skill:/missing/preset-resource', `skill:${unlinked}`] } },
   }));
-  const runtimeId = `project:${fs.realpathSync(project)}:${runtime.key}`;
-  const parkedId = `${runtimeId}\0parked`;
-  const claimedId = `${runtimeId}\0claimed`;
+  const targetId = `project:${fs.realpathSync(project)}:${runtime.key}`;
+  const parkedId = `${targetId}\0parked`;
+  const claimedId = `${targetId}\0claimed`;
   const projectState = JSON.stringify({
     baseIntent: { [parkedId]: 'off', [claimedId]: 'off' },
     presetActivations: ['deleted'],
     lastClaims: { deleted: [claimedId] },
-    runtimeInventory: { slots: { [parkedId]: { resourceIds: ['/missing/parked'] } } },
+    targetInventory: { slots: { [parkedId]: { resourceIds: ['/missing/parked'] } } },
   });
   fs.writeFileSync(projectStateFile, projectState);
 

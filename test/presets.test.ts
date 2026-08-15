@@ -17,7 +17,7 @@ import {
   planPresetReconcile,
   activatePreset,
 } from '../src/reconcile.ts';
-import { scanGlobalInventory, scanProjectInventory, type Runtime } from '../src/inventory.ts';
+import { scanGlobalInventory, scanProjectInventory, type SkillTarget } from '../src/inventory.ts';
 
 function setup() {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-presets-'));
@@ -27,7 +27,7 @@ function setup() {
     fs.mkdirSync(path.join(discoveryRoot, name), { recursive: true });
     fs.writeFileSync(path.join(discoveryRoot, name, 'SKILL.md'), `# ${name}`);
   }
-  const runtime: Runtime = {
+  const runtime: SkillTarget = {
     key: 'shared',
     kind: 'shared',
     discoveryRoot,
@@ -178,10 +178,10 @@ test('project activate stores claims in project state only', () => {
     fs.readFileSync(path.join(project, '.skillspub', 'state.json'), 'utf8'),
   );
   const globalState = JSON.parse(fs.readFileSync(path.join(configDir, 'state.json'), 'utf8'));
-  const runtimeId = `project:${fs.realpathSync(project)}:shared`;
+  const targetId = `project:${fs.realpathSync(project)}:shared`;
   assert.ok(projectState.presetActivations.tools.includes('shared'));
-  assert.deepEqual(projectState.claims[`${runtimeId}\0one`], ['preset:tools']);
-  assert.equal(globalState.claims?.[`${runtimeId}\0one`], undefined);
+  assert.deepEqual(projectState.claims[`${targetId}\0one`], ['preset:tools']);
+  assert.equal(globalState.claims?.[`${targetId}\0one`], undefined);
   assert.equal(globalState.presetActivations?.tools, undefined);
   assert.equal(
     fs.realpathSync(path.join(project, '.agents', 'skills', 'one')),

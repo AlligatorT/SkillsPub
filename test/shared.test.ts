@@ -100,7 +100,7 @@ function writeLock(file: string, skills: Record<string, object>) {
   fs.writeFileSync(file, JSON.stringify({ version: 3, skills }));
 }
 
-test('pinned skills@1.5.21 writes a local-source Global add only to the Shared Runtime', () => {
+test('pinned skills@1.5.21 writes a local-source Global add only to the Shared Target', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-upstream-contract-'));
   const home = path.join(root, 'home');
   const source = path.join(root, 'source', 'actual-contract');
@@ -163,7 +163,7 @@ test('shared find preserves source + name candidates and falls back to raw outpu
   assert.deepEqual(calls()[0].args, ['--yes', PACKAGE, 'find', 'test query']);
 });
 
-test('shared add writes only the Global or exact Project Shared Runtime', () => {
+test('shared add writes only the Global or exact Project Shared Target', () => {
   const global = setup();
   const added = global.run(
     ['shared', 'add', 'owner/repo', '--skill', 'Example'],
@@ -357,7 +357,7 @@ test('mutation preflight rejects malformed policy state and non-v3 installer loc
   assert.ok(fs.existsSync(path.join(staleLock.home, '.agents', 'skills', 'managed', 'SKILL.md')));
 });
 
-test('Shared Runtime operation lock prevents concurrent mutation', () => {
+test('Shared Target operation lock prevents concurrent mutation', () => {
   const { home, run, calls } = setup();
   const lock = path.join(home, '.agents', '.skill-lock.json');
   writeSkill(path.join(home, '.agents', 'skills'), 'managed');
@@ -390,7 +390,7 @@ test('active Preset claims keep updated skills ON and block remove', () => {
 
   const removed = run(['shared', 'remove', 'claimed']);
   assert.equal(removed.status, 1);
-  assert.match(removed.stderr, /cannot remove claimed Runtime Slot/);
+  assert.match(removed.stderr, /cannot remove claimed Target Slot/);
   assert.ok(fs.existsSync(path.join(discovery, 'claimed', 'SKILL.md')));
 });
 
@@ -415,7 +415,7 @@ test('orphaned Preset lastClaims also keep updated skills ON and block remove', 
 
   const removed = run(['shared', 'remove', 'orphaned']);
   assert.equal(removed.status, 1);
-  assert.match(removed.stderr, /cannot remove claimed Runtime Slot/);
+  assert.match(removed.stderr, /cannot remove claimed Target Slot/);
 });
 
 test('shared remove passes only managed names and leaves external entries untouched', () => {

@@ -4,15 +4,15 @@ import type { Home } from './core.ts';
 import {
   normalizeSlotName,
   readStateFile,
-  runtimeSlotId,
+  targetSlotId,
   scanGlobalInventory,
   scanProjectInventory,
   writeStateFile,
   type Activation,
   type InventoryResource,
   type InventoryScanReport,
-  type RuntimeRelationship,
-  type ScannedRuntime,
+  type TargetRelationship,
+  type ScannedTarget,
 } from './inventory.ts';
 import {
   assertPresetName,
@@ -39,15 +39,15 @@ export interface PresetReconcilePlan extends ActivationPlan {
 
 export interface ActivationTarget {
   slotId: string;
-  runtimeId: string;
-  runtimeKey: string;
+  targetId: string;
+  targetKey: string;
   slot: string;
   /** Skill resource identity; empty for a broken-link-only target. */
   resourceId: string;
   from: Activation | 'missing';
   intent: Activation;
   to: Activation;
-  relationship?: RuntimeRelationship;
+  relationship?: TargetRelationship;
   destination?: string;
   /** remove-link: unlink the symlink Relationship instead of moving it. */
   remove?: boolean;
@@ -81,7 +81,7 @@ function assertWritableParent(file: string): void {
   try {
     fs.accessSync(directory, fs.constants.W_OK);
   } catch {
-    throw new Error(`Runtime Slot parent is not writable: ${directory}`);
+    throw new Error(`Target Slot parent is not writable: ${directory}`);
   }
 }
 
@@ -90,7 +90,7 @@ function slotConflict(
   candidates: Array<{ resourceId?: string; path?: string }>,
 ): Error {
   return new Error(
-    `Runtime Slot ${slotId.replace('\0', '/')} is ambiguous or occupied:\n${candidates
+    `Target Slot ${slotId.replace('\0', '/')} is ambiguous or occupied:\n${candidates
       .map((candidate) =>
         `  - ${candidate.resourceId ? `skill:${candidate.resourceId}` : 'broken link'}${candidate.path ? `: ${candidate.path}` : ''}`)
       .join('\n')}`,
@@ -106,12 +106,12 @@ interface ActivationContext {
 function selectedRelationship(
   context: ActivationContext,
   resource: InventoryResource,
-  runtime: ScannedRuntime,
+  target: ScannedTarget,
   slotName: string,
-): RuntimeRelationship | undefined {
-  const slotId = `${runtime.id}\0${slotName}`;
+): TargetRelationship | undefined {
+  const slotId = `${target.id}\0${slotName}`;
   const relationships = context.report.slots.find((candidate) =>
-    candidate.runtimeId === runtime.id && candidate.name === slotName)
+    candidate.targetId === target.id && candidate.name === slotName)
     ?.relationships ?? [];
   const selected = relationships.find((candidate) => candidate.resourceId === resource.id);
   if (relationships.length === 0 || (relationships.length === 1 && selected)) return selected;
@@ -126,32 +126,32 @@ function activationDestination({
   relationship,
   from,
   to,
-  runtime,
+  target,
   slotName,
 }: {
-  relationship: RuntimeRelationship | undefined;
+  relationship: TargetRelationship | undefined;
   from: Activation | 'missing';
   to: Activation;
-  runtime: ScannedRuntime;
+  target: ScannedTarget;
   slotName: string;
 }): string | undefined {
   if (relationship && from !== to) {
-    const root = to === 'on' ? runtime.discoveryRoot : runtime.parkingRoot;
+    const root = to === 'on' ? target.discoveryRoot : target.parkingRoot;
     return path.join(root, path.basename(relationship.path));
   }
   return !relationship && to === 'on'
-    ? path.join(runtime.discoveryRoot, slotName)
+    ? path.join(target.discoveryRoot, slotName)
     : undefined;
 }
 
 function preflightTarget(
-  relationship: RuntimeRelationship | undefined,
+  relationship: TargetRelationship | undefined,
   from: Activation | 'missing',
   to: Activation,
   destination: string | undefined,
 ): void {
   if (destination && lexists(destination))
-    throw new Error(`Runtime Slot path already exists: ${destination}`);
+    throw new Error(`Target Slot path already exists: ${destination}`);
   if (relationship && from !== to) {
     if (!lexists(relationship.path))
       throw new Error(`relationship disappeared during preview: ${relationship.path}`);
@@ -163,27 +163,27 @@ function preflightTarget(
 function activationTarget(
   context: ActivationContext,
   resource: InventoryResource,
-  runtime: ScannedRuntime,
+  target: ScannedTarget,
   slotName: string,
 ): ActivationTarget {
-  const slotId = `${runtime.id}\0${slotName}`;
+  const slotId = `${target.id}\0${slotName}`;
   const to = context.intent === 'off' && (context.claims[slotId]?.length ?? 0) > 0
     ? 'on'
     : context.intent;
-  const relationship = selectedRelationship(context, resource, runtime, slotName);
+  const relationship = selectedRelationship(context, resource, target, slotName);
   const from = relationship?.activation ?? 'missing';
   const destination = activationDestination({
     relationship,
     from,
     to,
-    runtime,
+    target,
     slotName,
   });
   preflightTarget(relationship, from, to, destination);
   return {
     slotId,
-    runtimeId: runtime.id,
-    runtimeKey: runtime.key,
+    targetId: target.id,
+    targetKey: target.key,
     slot: slotName,
     resourceId: resource.id,
     from,
@@ -197,10 +197,10 @@ function activationTarget(
 function activationTargets(
   context: ActivationContext,
   resource: InventoryResource,
-  runtime: ScannedRuntime,
+  target: ScannedTarget,
 ): ActivationTarget[] {
-  return resourceSlots(resource, runtime)
-    .map((slot) => activationTarget(context, resource, runtime, slot));
+  return resourceSlots(resource, target)
+    .map((slot) => activationTarget(context, resource, target, slot));
 }
 
 function uniqueTargets(targets: ActivationTarget[]): ActivationTarget[] {
@@ -262,38 +262,38 @@ function resolvePlanSelector(
   return { resourceIds: [matches[0].id], staleResourceIds: [] };
 }
 
-/** Scan for a mutation scope: project scopes see project/parent/global runtimes. */
+/** Scan for a mutation scope: project scopes see project/parent/global targets. */
 function mutationReport(home: Home, scope: PresetScope): InventoryScanReport {
   return scope.projectPath
     ? scanProjectInventory(home, scope.projectPath, undefined, { persist: false })
     : scanGlobalInventory(home, undefined, { persist: false });
 }
 
-/** Resolve one writable Runtime by key or id; project scans prefer the project-scope match. */
-function resolveWritableRuntime(
+/** Resolve one writable Target by key or id; project scans prefer the project-scope match. */
+function resolveWritableTarget(
   report: InventoryScanReport,
   name: string,
-): InventoryScanReport['runtimes'][number] {
-  let matches = report.runtimes.filter((runtime) =>
-    runtime.key === name || runtime.id === name);
-  if (matches.length > 1) matches = matches.filter((runtime) => runtime.scope === 'project');
-  if (matches.length !== 1) throw new Error(`unknown Runtime: ${name}`);
-  const runtime = matches[0];
-  if (!runtime.writable) throw new Error(`Runtime is read-only here: ${runtime.key}`);
-  return runtime;
+): InventoryScanReport['targets'][number] {
+  let matches = report.targets.filter((target) =>
+    target.key === name || target.id === name);
+  if (matches.length > 1) matches = matches.filter((target) => target.scope === 'project');
+  if (matches.length !== 1) throw new Error(`unknown Target: ${name}`);
+  const target = matches[0];
+  if (!target.writable) throw new Error(`Target is read-only here: ${target.key}`);
+  return target;
 }
 
 export function planActivation(
   home: Home,
   selector: string,
-  runtimeNames: string[],
+  targetNames: string[],
   intent: Activation,
   scope: PresetScope = {},
 ): ActivationPlan {
-  if (runtimeNames.length === 0)
-    throw new Error(`usage: skillspub ${intent === 'on' ? 'on' : 'off'} <selector> <runtime...>`);
+  if (targetNames.length === 0)
+    throw new Error(`usage: skillspub ${intent === 'on' ? 'on' : 'off'} <selector> <target...>`);
   const report = mutationReport(home, scope);
-  const selected = runtimeNames.map((name) => resolveWritableRuntime(report, name));
+  const selected = targetNames.map((name) => resolveWritableTarget(report, name));
   const claims = readClaims(readStateFile(report.stateFile));
   const { resourceIds, staleResourceIds } = resolvePlanSelector(home, selector, report);
   if (staleResourceIds.length > 0) {
@@ -307,7 +307,7 @@ export function planActivation(
   const targets = resourceIds.flatMap((id) => {
     const resource = resourceById.get(id);
     return resource
-      ? selected.flatMap((runtime) => activationTargets(context, resource, runtime))
+      ? selected.flatMap((target) => activationTargets(context, resource, target))
       : [];
   });
 
@@ -318,57 +318,57 @@ export function planActivation(
 
 function slotRelationship(
   report: InventoryScanReport,
-  runtimeId: string,
+  targetId: string,
   slot: string,
-): RuntimeRelationship {
+): TargetRelationship {
   const relationships = report.slots.find((candidate) =>
-    candidate.runtimeId === runtimeId && candidate.name === slot)
+    candidate.targetId === targetId && candidate.name === slot)
     ?.relationships ?? [];
   if (relationships.length === 0)
-    throw new Error(`Runtime Slot not found: ${runtimeId.replace('global:', '')}/${slot}`);
-  if (relationships.length > 1) throw slotConflict(`${runtimeId}\0${slot}`, relationships);
+    throw new Error(`Target Slot not found: ${targetId.replace('global:', '')}/${slot}`);
+  if (relationships.length > 1) throw slotConflict(`${targetId}\0${slot}`, relationships);
   return relationships[0];
 }
 
-function selectedRuntime(
+function selectedTarget(
   report: InventoryScanReport,
-  runtimeId: string,
-): ScannedRuntime {
-  const runtime = report.runtimes.find((candidate) => candidate.id === runtimeId);
-  if (!runtime) throw new Error(`unknown Runtime: ${runtimeId}`);
-  if (!runtime.writable) throw new Error(`Runtime is read-only here: ${runtime.key}`);
-  return runtime;
+  targetId: string,
+): ScannedTarget {
+  const target = report.targets.find((candidate) => candidate.id === targetId);
+  if (!target) throw new Error(`unknown Target: ${targetId}`);
+  if (!target.writable) throw new Error(`Target is read-only here: ${target.key}`);
+  return target;
 }
 
 interface SlotMutation {
   report: InventoryScanReport;
-  runtime: ScannedRuntime;
-  relationship: RuntimeRelationship;
+  target: ScannedTarget;
+  relationship: TargetRelationship;
   slotId: string;
 }
 
 function selectSlotMutation(
   home: Home,
-  runtimeId: string,
+  targetId: string,
   slot: string,
   scope: PresetScope = {},
 ): SlotMutation {
   const report = mutationReport(home, scope);
-  const relationship = slotRelationship(report, runtimeId, slot);
+  const relationship = slotRelationship(report, targetId, slot);
   if (relationship.readOnly)
-    throw new Error(`Runtime Slot is read-only here: ${runtimeId}/${slot}`);
-  const runtime = selectedRuntime(report, runtimeId);
-  return { report, runtime, relationship, slotId: runtimeSlotId(runtimeId, slot) };
+    throw new Error(`Target Slot is read-only here: ${targetId}/${slot}`);
+  const target = selectedTarget(report, targetId);
+  return { report, target, relationship, slotId: targetSlotId(targetId, slot) };
 }
 
-/** Flip one existing Relationship, selected by exact Runtime Slot. Works for broken links too. */
+/** Flip one existing Relationship, selected by exact Target Slot. Works for broken links too. */
 export function planToggle(
   home: Home,
-  runtimeId: string,
+  targetId: string,
   slot: string,
   scope: PresetScope = {},
 ): ActivationPlan {
-  const { report, runtime, relationship, slotId } = selectSlotMutation(home, runtimeId, slot, scope);
+  const { report, target, relationship, slotId } = selectSlotMutation(home, targetId, slot, scope);
   const from = relationship.activation;
   const intent: Activation = from === 'off' ? 'on' : 'off';
   const claims = readClaims(readStateFile(report.stateFile));
@@ -376,15 +376,15 @@ export function planToggle(
   // Claimed Slots stay ON: nothing moves, only Base intent is recorded.
   const destination = from !== to
     ? path.join(
-        to === 'on' ? runtime.discoveryRoot : runtime.parkingRoot,
+        to === 'on' ? target.discoveryRoot : target.parkingRoot,
         path.basename(relationship.path),
       )
     : undefined;
   preflightTarget(relationship, from, to, destination);
   const targets = [{
     slotId,
-    runtimeId,
-    runtimeKey: runtime.key,
+    targetId,
+    targetKey: target.key,
     slot,
     resourceId: relationship.resourceId ?? '',
     from,
@@ -397,15 +397,15 @@ export function planToggle(
   return { report, targets, staleResourceIds: [], stateFile: report.stateFile };
 }
 
-/** Create the missing Link from one existing skill resource into a Runtime Slot. */
+/** Create the missing Link from one existing skill resource into a Target Slot. */
 export function planLink(
   home: Home,
   resourceId: string,
-  runtimeName: string,
+  targetName: string,
   scope: PresetScope = {},
 ): ActivationPlan {
   const report = mutationReport(home, scope);
-  const runtime = resolveWritableRuntime(report, runtimeName);
+  const target = resolveWritableTarget(report, targetName);
   const resource = report.resources.find((candidate) => candidate.id === resourceId);
   if (!resource) throw new Error(`skill not found on disk: ${resourceId}`);
   const context: ActivationContext = {
@@ -413,7 +413,7 @@ export function planLink(
     intent: 'on',
     claims: readClaims(readStateFile(report.stateFile)),
   };
-  const targets = uniqueTargets(activationTargets(context, resource, runtime));
+  const targets = uniqueTargets(activationTargets(context, resource, target));
   preflightDependentLinks(report, targets);
   return { report, targets, staleResourceIds: [], stateFile: report.stateFile };
 }
@@ -421,11 +421,11 @@ export function planLink(
 /** Remove exactly one symlink Relationship. Local skill directories are never deleted. */
 export function planUnlink(
   home: Home,
-  runtimeId: string,
+  targetId: string,
   slot: string,
   scope: PresetScope = {},
 ): ActivationPlan {
-  const { report, runtime, relationship, slotId } = selectSlotMutation(home, runtimeId, slot, scope);
+  const { report, target, relationship, slotId } = selectSlotMutation(home, targetId, slot, scope);
   if (relationship.form !== 'link')
     throw new Error(`cannot unlink ${relationship.path}: local skill directories are never deleted`);
   assertUnlinkAllowed(report.stateFile, slotId);
@@ -436,8 +436,8 @@ export function planUnlink(
     report,
     targets: [{
       slotId,
-      runtimeId,
-      runtimeKey: runtime.key,
+      targetId,
+      targetKey: target.key,
       slot,
       resourceId: relationship.resourceId ?? '',
       from: relationship.activation,
@@ -591,7 +591,7 @@ function targetSatisfied(
   moved: Map<string, string>,
 ): boolean {
   const relationships = actual.slots.find((candidate) =>
-    candidate.runtimeId === target.runtimeId && candidate.name === target.slot)
+    candidate.targetId === target.targetId && candidate.name === target.slot)
     ?.relationships ?? [];
   if (target.remove)
     return !relationships.some((relationship) =>
@@ -613,7 +613,7 @@ export function remainingDrift(
   return plan.targets.flatMap((target) =>
     targetSatisfied(target, actual, moved)
       ? []
-      : [`${target.runtimeId}/${target.slot}`]);
+      : [`${target.targetId}/${target.slot}`]);
 }
 
 function removePlanLinks(plan: ActivationPlan): void {
@@ -686,28 +686,28 @@ function scopeScan(home: Home, scope: PresetScope = {}): {
   return { report, stateFile, catalogState, policyState: catalogState };
 }
 
-function resolveRuntimeKeys(
+function resolveTargetKeys(
   report: InventoryScanReport,
-  runtimeNames: string[],
-): ScannedRuntime[] {
-  if (runtimeNames.length === 0) throw new Error('at least one Runtime is required');
-  return runtimeNames.map((name) => {
-    const matches = report.runtimes.filter((runtime) => {
-      if (runtime.key !== name && runtime.id !== name) return false;
-      if (report.scope === 'project') return runtime.scope === 'project';
-      return runtime.scope === 'global';
+  targetNames: string[],
+): ScannedTarget[] {
+  if (targetNames.length === 0) throw new Error('at least one Target is required');
+  return targetNames.map((name) => {
+    const matches = report.targets.filter((target) => {
+      if (target.key !== name && target.id !== name) return false;
+      if (report.scope === 'project') return target.scope === 'project';
+      return target.scope === 'global';
     });
-    if (matches.length !== 1) throw new Error(`unknown Runtime: ${name}`);
+    if (matches.length !== 1) throw new Error(`unknown Target: ${name}`);
     return matches[0];
   });
 }
 
 function resourceSlots(
   resource: InventoryResource,
-  runtime: ScannedRuntime,
+  target: ScannedTarget,
 ): string[] {
   const existing = [...new Set(resource.relationships.flatMap((relationship) =>
-    relationship.runtimeId === runtime.id ? [relationship.slot] : []))];
+    relationship.targetId === target.id ? [relationship.slot] : []))];
   return existing.length > 0 ? existing : [normalizeSlotName(resource.name)];
 }
 
@@ -730,16 +730,16 @@ function expandPresetClaims(
   const staleResourceIds = new Set<string>();
   const resourceById = new Map(report.resources.map((resource) => [resource.id, resource]));
 
-  for (const [preset, runtimeKeys] of Object.entries(activations)) {
+  for (const [preset, targetKeys] of Object.entries(activations)) {
     const definition = presets[preset];
     if (!definition) {
       if (previousLastClaims[preset]) lastClaims[preset] = [...previousLastClaims[preset]];
       continue;
     }
-    const runtimes = runtimeKeys.length > 0
-      ? resolveRuntimeKeys(report, runtimeKeys)
-      : report.runtimes.filter((runtime) =>
-        report.scope === 'project' ? runtime.scope === 'project' : runtime.scope === 'global');
+    const targets = targetKeys.length > 0
+      ? resolveTargetKeys(report, targetKeys)
+      : report.targets.filter((target) =>
+        report.scope === 'project' ? target.scope === 'project' : target.scope === 'global');
     const slots = new Set<string>();
     for (const selector of definition.selectors) {
       const expanded = expandSelector(home, selector, report);
@@ -750,9 +750,9 @@ function expandPresetClaims(
           staleResourceIds.add(resourceId);
           continue;
         }
-        for (const runtime of runtimes) {
-          for (const slot of resourceSlots(resource, runtime)) {
-            const slotId = `${runtime.id}\0${slot}`;
+        for (const target of targets) {
+          for (const slot of resourceSlots(resource, target)) {
+            const slotId = `${target.id}\0${slot}`;
             const set = claims.get(slotId) ?? new Set<string>();
             set.add(claimId(preset));
             claims.set(slotId, set);
@@ -803,17 +803,17 @@ function buildReconcileTargets(
   for (const slotId of slotIds) {
     const separator = slotId.indexOf('\0');
     if (separator < 0) continue;
-    const runtimeId = slotId.slice(0, separator);
+    const targetId = slotId.slice(0, separator);
     const slot = slotId.slice(separator + 1);
-    const runtime = report.runtimes.find((candidate) => candidate.id === runtimeId);
-    if (!runtime) continue;
+    const target = report.targets.find((candidate) => candidate.id === targetId);
+    if (!target) continue;
     const claimed = (claims[slotId]?.length ?? 0) > 0 || frozen.has(slotId);
     const intent = baseIntent[slotId];
     // no claim and no base intent: leave Actual alone unless we previously claimed it
     if (!claimed && intent === undefined && !previousClaims[slotId]?.length) continue;
 
     const relationships = report.slots.find((candidate) =>
-      candidate.runtimeId === runtimeId && candidate.name === slot)?.relationships ?? [];
+      candidate.targetId === targetId && candidate.name === slot)?.relationships ?? [];
     if (relationships.length > 1) throw slotConflict(slotId, relationships);
 
     const desired: Activation = claimed
@@ -832,12 +832,12 @@ function buildReconcileTargets(
     if (!relationship) {
       if (desired === 'off') continue;
       baseIntentDefaults[slotId] = 'off';
-      const destination = path.join(runtime.discoveryRoot, slot);
+      const destination = path.join(target.discoveryRoot, slot);
       preflightTarget(undefined, 'missing', desired, destination);
       targets.push({
         slotId,
-        runtimeId,
-        runtimeKey: runtime.key,
+        targetId,
+        targetKey: target.key,
         slot,
         resourceId: resource?.id ?? resourceId,
         from: 'missing',
@@ -856,14 +856,14 @@ function buildReconcileTargets(
       relationship,
       from,
       to: desired,
-      runtime,
+      target,
       slotName: slot,
     });
     preflightTarget(relationship, from, desired, destination);
     targets.push({
       slotId,
-      runtimeId,
-      runtimeKey: runtime.key,
+      targetId,
+      targetKey: target.key,
       slot,
       resourceId: resource?.id ?? resourceId,
       from,
@@ -906,9 +906,9 @@ function planFromActivations(
     claims: expanded.claims,
     lastClaims: expanded.lastClaims,
     presetActivations: Object.fromEntries(
-      Object.entries(activations).map(([name, runtimes]) => [
+      Object.entries(activations).map(([name, targets]) => [
         name,
-        [...runtimes].sort((a, b) => a.localeCompare(b)),
+        [...targets].sort((a, b) => a.localeCompare(b)),
       ]),
     ),
     baseIntentDefaults,
@@ -918,7 +918,7 @@ function planFromActivations(
 export function planPresetReconcile(
   home: Home,
   name?: string,
-  runtimeNames?: string[],
+  targetNames?: string[],
   scope: PresetScope = {},
 ): PresetReconcilePlan {
   const { policyState, catalogState } = scopeScan(home, scope);
@@ -929,10 +929,10 @@ export function planPresetReconcile(
       throw new Error(`unknown preset: ${name}`);
     if (!activations[name])
       throw new Error(`preset is not active: ${name}`);
-    if (runtimeNames && runtimeNames.length > 0) {
+    if (targetNames && targetNames.length > 0) {
       const active = new Set(activations[name]);
-      for (const runtime of runtimeNames)
-        if (!active.has(runtime)) throw new Error(`preset is not active on Runtime: ${runtime}`);
+      for (const target of targetNames)
+        if (!active.has(target)) throw new Error(`preset is not active on Target: ${target}`);
     }
   }
   // Always recompute claims from every active Preset so multi-preset Slots stay correct.
@@ -942,16 +942,16 @@ export function planPresetReconcile(
 export function activatePreset(
   home: Home,
   name: string,
-  runtimeNames: string[],
+  targetNames: string[],
   scope: PresetScope = {},
 ): PresetReconcilePlan {
   assertPresetName(name);
   const { report, catalogState, policyState } = scopeScan(home, scope);
   if (!readPresets(catalogState)[name]) throw new Error(`unknown preset: ${name}`);
-  resolveRuntimeKeys(report, runtimeNames);
+  resolveTargetKeys(report, targetNames);
   const activations = readPresetActivations(policyState);
   const current = new Set(activations[name] ?? []);
-  for (const runtime of runtimeNames) current.add(runtime);
+  for (const target of targetNames) current.add(target);
   return planFromActivations(home, {
     ...activations,
     [name]: [...current],
@@ -961,18 +961,18 @@ export function activatePreset(
 export function deactivatePreset(
   home: Home,
   name: string,
-  runtimeNames: string[],
+  targetNames: string[],
   scope: PresetScope = {},
 ): PresetReconcilePlan {
   assertPresetName(name);
   const { report, policyState } = scopeScan(home, scope);
-  resolveRuntimeKeys(report, runtimeNames);
+  resolveTargetKeys(report, targetNames);
   const activations = readPresetActivations(policyState);
   if (!(name in activations) &&
     !readStringListRecord(policyState.lastClaims, 'lastClaims')[name])
     throw new Error(`preset is not active: ${name}`);
   const remaining = new Set(activations[name] ?? []);
-  for (const runtime of runtimeNames) remaining.delete(runtime);
+  for (const target of targetNames) remaining.delete(target);
   const next = { ...activations };
   if (remaining.size === 0) delete next[name];
   else next[name] = [...remaining];
@@ -1044,11 +1044,11 @@ function assertUnlinkAllowed(stateFile: string, slotIdOrName: string): void {
     : Object.keys(claims).filter((slotId) => slotId.endsWith(`\0${slotIdOrName}`));
   const check = (slotId: string): void => {
     if ((claims[slotId]?.length ?? 0) > 0)
-      throw new Error(`cannot unlink claimed Runtime Slot ${slotId.replace('\0', '/')}`);
+      throw new Error(`cannot unlink claimed Target Slot ${slotId.replace('\0', '/')}`);
     for (const [preset, slots] of Object.entries(lastClaims))
       if (slots.includes(slotId))
         throw new Error(
-          `cannot unlink claimed Runtime Slot ${slotId.replace('\0', '/')} (${preset})`,
+          `cannot unlink claimed Target Slot ${slotId.replace('\0', '/')} (${preset})`,
         );
   };
   if (slotIdOrName.includes('\0')) check(slotIdOrName);
@@ -1058,7 +1058,7 @@ function assertUnlinkAllowed(stateFile: string, slotIdOrName: string): void {
       for (const slotId of slots)
         if (slotId.endsWith(`\0${slotIdOrName}`))
           throw new Error(
-            `cannot unlink claimed Runtime Slot ${slotId.replace('\0', '/')} (${preset})`,
+            `cannot unlink claimed Target Slot ${slotId.replace('\0', '/')} (${preset})`,
           );
   }
 }

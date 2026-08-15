@@ -5,13 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   applyTargetMigration,
-  loadRuntimes,
   loadTargets,
   normalizeSlotName,
   planTargetMigration,
   scanGlobalInventory,
   scanProjectInventory,
-  type Runtime,
+  type SkillTarget,
 } from '../src/inventory.ts';
 import type { Home } from '../src/core.ts';
 
@@ -34,7 +33,7 @@ function readJson(file: string): unknown {
   }
 }
 
-test('global scan records Runtime Relationships without moving disk state', () => {
+test('global scan records Target Relationships without moving disk state', () => {
   const home = tmpHome();
   const discoveryRoot = path.join(home.configDir, 'runtime', 'skills');
   const parkingRoot = path.join(home.configDir, 'runtime', '.skillspub-off', 'skills');
@@ -48,7 +47,7 @@ test('global scan records Runtime Relationships without moving disk state', () =
   assert.doesNotThrow(() =>
     fs.symlinkSync(source, path.join(parkingRoot, 'linked')));
   mkSkill(parkingRoot, 'local-off');
-  const runtimes: Runtime[] = [{
+  const runtimes: SkillTarget[] = [{
     key: 'shared',
     kind: 'shared',
     discoveryRoot,
@@ -72,17 +71,55 @@ test('global scan records Runtime Relationships without moving disk state', () =
   assert.ok(fs.lstatSync(path.join(parkingRoot, 'linked')).isSymbolicLink());
 
   const state = JSON.parse(fs.readFileSync(path.join(home.configDir, 'state.json'), 'utf8'));
-  assert.equal(state.runtimeInventory.version, 1);
-  assert.equal(Object.keys(state.runtimeInventory.resources).length, 4);
+  assert.equal(state.targetInventory.version, 1);
+  assert.equal(state.runtimeInventory, undefined);
+  assert.equal(Object.keys(state.targetInventory.resources).length, 4);
   const resourceId = fs.realpathSync(path.join(discoveryRoot, 'local'));
   assert.doesNotThrow(() =>
     scanGlobalInventory(home, runtimes, { now: '2026-08-04T00:00:00.000Z' }));
   const repeated = JSON.parse(fs.readFileSync(path.join(home.configDir, 'state.json'), 'utf8'));
-  assert.equal(repeated.runtimeInventory.resources[resourceId].firstSeenAt, '2026-08-03T00:00:00.000Z');
-  assert.equal(repeated.runtimeInventory.resources[resourceId].lastSeenAt, '2026-08-04T00:00:00.000Z');
+  assert.equal(repeated.targetInventory.resources[resourceId].firstSeenAt, '2026-08-03T00:00:00.000Z');
+  assert.equal(repeated.targetInventory.resources[resourceId].lastSeenAt, '2026-08-04T00:00:00.000Z');
 });
 
-test('normalized entry names compete for one Runtime Slot without merging Variants', () => {
+test('scan rewrites legacy runtime inventory metadata as Target metadata', () => {
+  const home = tmpHome();
+  const discoveryRoot = path.join(home.configDir, 'shared', 'skills');
+  const parkingRoot = path.join(home.configDir, 'shared', '.skillspub-off', 'skills');
+  const resource = mkSkill(discoveryRoot, 'example');
+  const resourceId = fs.realpathSync(resource);
+  fs.writeFileSync(path.join(home.configDir, 'state.json'), JSON.stringify({
+    runtimeInventory: {
+      version: 1,
+      resources: {
+        [resourceId]: {
+          name: 'example',
+          hash: 'stale',
+          firstSeenAt: '2026-08-01T00:00:00.000Z',
+          lastSeenAt: '2026-08-02T00:00:00.000Z',
+        },
+      },
+      slots: {},
+    },
+  }));
+
+  scanGlobalInventory(home, [{
+    key: 'shared',
+    kind: 'shared',
+    discoveryRoot,
+    parkingRoot,
+    projectPath: '.agents/skills',
+  }], { now: '2026-08-03T00:00:00.000Z' });
+
+  const state = readJson(path.join(home.configDir, 'state.json')) as {
+    runtimeInventory?: unknown;
+    targetInventory: { resources: Record<string, { firstSeenAt: string }> };
+  };
+  assert.equal(state.runtimeInventory, undefined);
+  assert.equal(state.targetInventory.resources[resourceId].firstSeenAt, '2026-08-01T00:00:00.000Z');
+});
+
+test('normalized entry names compete for one Target Slot without merging Variants', () => {
   const home = tmpHome();
   const discoveryRoot = path.join(home.configDir, 'runtime', 'skills');
   const parkingRoot = path.join(home.configDir, 'runtime', '.skillspub-off', 'skills');
@@ -96,7 +133,7 @@ test('normalized entry names compete for one Runtime Slot without merging Varian
 
   const report = scanGlobalInventory(home, [{
     key: 'agent',
-    kind: 'agent',
+    kind: 'harness',
     discoveryRoot,
     parkingRoot,
     projectPath: '.agent/skills',
@@ -125,9 +162,9 @@ test('resource hash frames paths and bytes so distinct directory states differ',
   const parkingRoot = path.join(home.configDir, 'runtime', '.skillspub-off', 'skills');
   const resource = mkSkill(discoveryRoot, 'example');
   fs.writeFileSync(path.join(resource, 'x'), 'bc');
-  const runtime: Runtime = {
+  const runtime: SkillTarget = {
     key: 'agent',
-    kind: 'agent',
+    kind: 'harness',
     discoveryRoot,
     parkingRoot,
     projectPath: '.agent/skills',
@@ -162,7 +199,7 @@ test('scan separates structural anomalies, metadata flags, and external changes'
     },
     ghost: { source: 'owner/repo', skillPath: 'skills/ghost' },
   } }));
-  const runtime: Runtime = {
+  const runtime: SkillTarget = {
     key: 'shared',
     kind: 'shared',
     discoveryRoot,
@@ -249,7 +286,7 @@ test('Project scan reads current, parent, and Global roots but writes only exact
     tags: { [fs.realpathSync(projectSkill)]: ['project'] },
     bundles: { manual: ['kept'] },
   }));
-  const runtimes = loadRuntimes(home);
+  const runtimes = loadTargets(home);
   assert.equal(
     runtimes[0].lockFile,
     path.join(path.dirname(globalRoot), '.skill-lock.json'),
@@ -262,7 +299,7 @@ test('Project scan reads current, parent, and Global roots but writes only exact
   assert.equal(report.projectPath, exact);
   assert.equal(report.stateFile, path.join(exact, '.skillspub', 'state.json'));
   assert.deepEqual(
-    report.runtimes.map(({ scope, writable, sourceDirectory }) => ({ scope, writable, sourceDirectory })),
+    report.targets.map(({ scope, writable, sourceDirectory }) => ({ scope, writable, sourceDirectory })),
     [
       { scope: 'project', writable: true, sourceDirectory: exact },
       { scope: 'parent', writable: false, sourceDirectory: fs.realpathSync(projectParent) },
@@ -278,7 +315,7 @@ test('Project scan reads current, parent, and Global roots but writes only exact
       { name: 'global-skill', activation: 'on', readOnly: true },
     ],
   );
-  assert.ok(report.missing.some(({ runtimeId }) => runtimeId.startsWith('global:')));
+  assert.ok(report.missing.some(({ targetId }) => targetId.startsWith('global:')));
   assert.equal(
     report.findings.some(({ code, resourceId }) =>
       code === 'untagged' && resourceId === fs.realpathSync(projectSkill)),
@@ -293,7 +330,7 @@ test('Project scan reads current, parent, and Global roots but writes only exact
   );
 });
 
-test('one resource keeps independent provenance for each occupied Runtime Slot', () => {
+test('one resource keeps independent provenance for each occupied Target Slot', () => {
   const home = tmpHome();
   const source = mkSkill(path.join(home.configDir, 'sources'), 'shared');
   const runtimes = ['one', 'two'].map((key) => {
@@ -334,7 +371,7 @@ test('Project scan does not duplicate a Global root that is also an ancestor roo
   const globalParking = path.join(home.configDir, '.agents', '.skillspub-off', 'skills');
   fs.mkdirSync(project, { recursive: true });
   mkSkill(globalRoot, 'global-skill');
-  const runtime: Runtime = {
+  const runtime: SkillTarget = {
     key: 'shared',
     kind: 'shared',
     discoveryRoot: globalRoot,
@@ -351,7 +388,7 @@ test('Project scan does not duplicate a Global root that is also an ancestor roo
     1,
   );
   assert.equal(
-    report.runtimes.filter(({ discoveryRoot }) => discoveryRoot === globalRoot).length,
+    report.targets.filter(({ discoveryRoot }) => discoveryRoot === globalRoot).length,
     1,
   );
 });
@@ -366,7 +403,7 @@ test('malformed installer lock is structural, not an external source replacement
     version: 3,
     skills: { example: { source: 'owner/repo' } },
   }));
-  const runtime: Runtime = {
+  const runtime: SkillTarget = {
     key: 'shared',
     kind: 'shared',
     discoveryRoot,
@@ -383,7 +420,7 @@ test('malformed installer lock is structural, not an external source replacement
   assert.equal(report.findings.some(({ code }) => code === 'source-changed'), false);
   const invalidState = readJson(report.stateFile) as {
     bundles: Record<string, string[]>;
-    runtimeInventory: {
+    targetInventory: {
       slots: Record<string, { provenance?: { source?: string } }>;
     };
   };
@@ -391,7 +428,7 @@ test('malformed installer lock is structural, not an external source replacement
     fs.realpathSync(path.join(discoveryRoot, 'example')),
   ]);
   assert.equal(
-    Object.values(invalidState.runtimeInventory.slots)
+    Object.values(invalidState.targetInventory.slots)
       .some((slot) => slot.provenance?.source === 'owner/repo'),
     true,
   );
@@ -628,7 +665,7 @@ test('scan refuses to overwrite malformed state', () => {
   assert.throws(
     () => scanGlobalInventory(home, [{
       key: 'agent',
-      kind: 'agent',
+      kind: 'harness',
       discoveryRoot,
       parkingRoot,
       projectPath: '.agent/skills',

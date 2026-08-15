@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  loadRuntimes,
+  loadTargets,
   normalizeManagedSkillName,
   readManagedSkillLock,
   readStateFile,
@@ -12,8 +12,8 @@ import {
   writeStateFile,
   type InventoryScanReport,
   type ManagedSkill,
-  type RuntimeRelationship,
-  type ScannedRuntime,
+  type TargetRelationship,
+  type ScannedTarget,
   type SkillProvenance,
 } from './inventory.ts';
 import type { Home } from './core.ts';
@@ -35,7 +35,7 @@ export interface SharedCommandResult {
 interface Target {
   home: Home;
   projectPath?: string;
-  runtime: ScannedRuntime;
+  target: ScannedTarget;
   report: InventoryScanReport;
   cwd: string;
   lockFile: string;
@@ -101,34 +101,34 @@ function runSkills(
 }
 
 function scan(home: Home, projectPath?: string, persist = false): InventoryScanReport {
-  const runtimes = loadRuntimes(home, { persist });
+  const targets = loadTargets(home);
   return projectPath
-    ? scanProjectInventory(home, projectPath, runtimes, { persist })
-    : scanGlobalInventory(home, runtimes, { persist });
+    ? scanProjectInventory(home, projectPath, targets, { persist })
+    : scanGlobalInventory(home, targets, { persist });
 }
 
 function resolveTarget(home: Home, projectPath?: string): Target {
   const exactProject = projectPath ? fs.realpathSync(projectPath) : undefined;
   const report = scan(home, exactProject);
-  const matches = report.runtimes.filter((runtime) =>
-    runtime.kind === 'shared' && runtime.key === 'shared' && runtime.writable &&
-    (exactProject ? runtime.scope === 'project' : runtime.scope === 'global'));
+  const matches = report.targets.filter((target) =>
+    target.kind === 'shared' && target.key === 'shared' && target.writable &&
+    (exactProject ? target.scope === 'project' : target.scope === 'global'));
   if (matches.length !== 1)
-    throw new Error(`expected exactly one writable Shared Runtime named "shared"; found ${matches.length}`);
-  const runtime = matches[0];
+    throw new Error(`expected exactly one writable Shared Target named "shared"; found ${matches.length}`);
+  const target = matches[0];
   const canonicalRoot = exactProject
     ? path.join(exactProject, '.agents', 'skills')
     : path.join(os.homedir(), '.agents', 'skills');
-  if (path.resolve(runtime.discoveryRoot) !== canonicalRoot)
-    throw new Error(`Shared Runtime must use canonical root ${canonicalRoot}`);
-  if (!runtime.lockFile) throw new Error('Shared Runtime has no installer lock');
+  if (path.resolve(target.discoveryRoot) !== canonicalRoot)
+    throw new Error(`Shared Target must use canonical root ${canonicalRoot}`);
+  if (!target.lockFile) throw new Error('Shared Target has no installer lock');
   return {
     home,
     projectPath: exactProject,
-    runtime,
+    target,
     report,
     cwd: exactProject ?? process.cwd(),
-    lockFile: runtime.lockFile,
+    lockFile: target.lockFile,
   };
 }
 
@@ -142,14 +142,14 @@ function validateSource(source: string): void {
   if (!source || source.startsWith('-')) throw new Error('source is required');
 }
 
-function relationship(target: Target, slot: string): RuntimeRelationship | undefined {
+function relationship(target: Target, slot: string): TargetRelationship | undefined {
   const relationships = target.report.relationships.filter((item) =>
-    item.runtimeId === target.runtime.id && item.slot === slot);
+    item.targetId === target.target.id && item.slot === slot);
   if (relationships.length > 1)
-    throw new Error(`Runtime Slot ${target.runtime.id}/${slot} has ON/OFF or normalized-name conflicts`);
+    throw new Error(`Target Slot ${target.target.id}/${slot} has ON/OFF or normalized-name conflicts`);
   const found = relationships[0];
   if (found?.form === 'link' && !found.realPath)
-    throw new Error(`Runtime Slot ${target.runtime.id}/${slot} is a broken link`);
+    throw new Error(`Target Slot ${target.target.id}/${slot} is a broken link`);
   return found;
 }
 
@@ -198,7 +198,7 @@ function withOperationLock<T>(target: Target, operation: () => T): T {
     descriptor = fs.openSync(lock, 'wx');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'EEXIST')
-      throw new Error(`Shared Runtime operation already in progress: ${lock}`);
+      throw new Error(`Shared Target operation already in progress: ${lock}`);
     throw error;
   }
   try {
@@ -255,10 +255,10 @@ function baseIntents(state: Record<string, unknown>): Record<string, 'on' | 'off
 function desiredActivation(
   target: Target,
   skill: ManagedSkill,
-  current: RuntimeRelationship,
+  current: TargetRelationship,
 ): 'on' | 'off' {
   const state = readStateFile(target.report.stateFile);
-  const id = `${target.runtime.id}\0${skill.slot}`;
+  const id = `${target.target.id}\0${skill.slot}`;
   const claims = claimedSlots(state);
   const intents = baseIntents(state);
   if (claims.has(id)) return 'on';
@@ -271,7 +271,7 @@ function validatePolicyState(target: Target): void {
   baseIntents(state);
 }
 
-function move(relationship: RuntimeRelationship, destinationRoot: string): void {
+function move(relationship: TargetRelationship, destinationRoot: string): void {
   const destination = path.join(destinationRoot, relationship.name);
   if (fs.existsSync(destination) || fs.lstatSync(destination, { throwIfNoEntry: false }))
     throw new Error(`path conflict: ${destination}`);
@@ -294,7 +294,7 @@ function ensureVisible(target: Target, skills: ManagedSkill[]): void {
     const current = relationship(target, skill.slot);
     if (!current) throw new Error(`installer lock/file mismatch: ${skill.name}`);
     if (current.activation === 'off') {
-      move(current, target.runtime.discoveryRoot);
+      move(current, target.target.discoveryRoot);
       target.report = scan(target.home, target.projectPath);
     }
   }
@@ -303,18 +303,18 @@ function ensureVisible(target: Target, skills: ManagedSkill[]): void {
 function restoreDesired(target: Target, desired: Map<string, 'on' | 'off'>): string[] {
   const drift: string[] = [];
   for (const [slot, activation] of desired) {
-    let current: RuntimeRelationship | undefined;
+    let current: TargetRelationship | undefined;
     try {
       target.report = scan(target.home, target.projectPath);
       current = relationship(target, slot);
       if (!current) {
-        drift.push(`${target.runtime.id}/${slot}: missing`);
+        drift.push(`${target.target.id}/${slot}: missing`);
         continue;
       }
       if (current.activation !== activation)
-        move(current, activation === 'on' ? target.runtime.discoveryRoot : target.runtime.parkingRoot);
+        move(current, activation === 'on' ? target.target.discoveryRoot : target.target.parkingRoot);
     } catch (error) {
-      drift.push(`${target.runtime.id}/${slot}: ${(error as Error).message}`);
+      drift.push(`${target.target.id}/${slot}: ${(error as Error).message}`);
     }
   }
   return drift;
@@ -323,17 +323,17 @@ function restoreDesired(target: Target, desired: Map<string, 'on' | 'off'>): str
 function finalActual(target: Target, slots: string[], drift: string[]): string {
   try {
     target.report = scan(target.home, target.projectPath, true);
-    return actualSummary(target.report, target.runtime.id, slots);
+    return actualSummary(target.report, target.target.id, slots);
   } catch (error) {
     drift.push(`final rescan: ${(error as Error).message}`);
     return 'unavailable';
   }
 }
 
-function actualSummary(report: InventoryScanReport, runtimeId: string, slots: string[]): string {
+function actualSummary(report: InventoryScanReport, targetId: string, slots: string[]): string {
   return slots.map((slot) => {
     const states = report.relationships
-      .filter((item) => item.runtimeId === runtimeId && item.slot === slot)
+      .filter((item) => item.targetId === targetId && item.slot === slot)
       .map((item) => `${item.activation}/${item.form}`);
     return `${slot}=${states.join('+') || 'missing'}`;
   }).join(', ');
@@ -343,7 +343,7 @@ function updateBaseIntent(target: Target, slots: string[], value?: 'on'): void {
   const state = readStateFile(target.report.stateFile);
   const baseIntent = { ...baseIntents(state) };
   for (const slot of slots) {
-    const id = `${target.runtime.id}\0${slot}`;
+    const id = `${target.target.id}\0${slot}`;
     if (value) baseIntent[id] = value;
     else delete baseIntent[id];
   }
@@ -371,7 +371,7 @@ export function sharedDescribe(home: Home, source: string, projectPath?: string)
   if (result.status !== 0) throw new Error(`skills description lookup failed (exit ${result.status})`);
 }
 
-/** One guarded Shared Runtime operation: snapshot Desired state, make Slots visible,
+/** One guarded Shared Target operation: snapshot Desired state, make Slots visible,
  *  run the skills CLI under the operation lock, restore Desired state, report Drift.
  *  add/update/remove below are only select/args/check/after over this template. */
 interface SharedOp {
@@ -463,7 +463,7 @@ export function sharedAdd(
     select(target) {
       const existing = relationship(target, slot);
       const slotInfo = target.report.slots.find((item) =>
-        item.runtimeId === target.runtime.id && item.name === slot);
+        item.targetId === target.target.id && item.name === slot);
       if (existing) {
         const current = provenanceLabel(slotInfo?.provenance);
         if (!sameSource(source, name, slotInfo?.provenance)) {
@@ -471,7 +471,7 @@ export function sharedAdd(
           if (!replace) throw new Error('source replacement requires --replace');
         }
       } else {
-        for (const root of [target.runtime.discoveryRoot, target.runtime.parkingRoot]) {
+        for (const root of [target.target.discoveryRoot, target.target.parkingRoot]) {
           const candidate = path.join(root, slot);
           if (fs.lstatSync(candidate, { throwIfNoEntry: false }))
             throw new Error(`path conflict: ${candidate}`);
@@ -486,17 +486,17 @@ export function sharedAdd(
     slots: () => [slot],
     check(target, selected, drift, { result, failure, actual }) {
       const installed = actual !== 'unavailable' && target.report.relationships.some((item) =>
-        item.runtimeId === target.runtime.id && item.slot === slot);
+        item.targetId === target.target.id && item.slot === slot);
       const runFailed = failure || !result || result.status !== 0;
       if (runFailed && selected.length === 0 && installed)
-        drift.push(`${target.runtime.id}/${slot}: expected missing`);
+        drift.push(`${target.target.id}/${slot}: expected missing`);
       if (!runFailed && !installed) throw new Error(`exit ${result?.status ?? 1}`);
     },
     after(target, selected, actual) {
       const managed = readManagedSkillLock(target.lockFile)
         .find((skill) => skill.slot === slot);
       if (managed && !sameSource(source, name, managed.provenance))
-        throw new Error(`skills add failed (installer lock source changed)\nActual: ${actual}\nRemaining drift: ${target.runtime.id}/${slot}: unverified provenance`);
+        throw new Error(`skills add failed (installer lock source changed)\nActual: ${actual}\nRemaining drift: ${target.target.id}/${slot}: unverified provenance`);
       if (selected.length === 0) updateBaseIntent(target, [slot], 'on');
     },
   });
@@ -529,8 +529,8 @@ export function sharedRemove(
       const state = readStateFile(target.report.stateFile);
       const claims = claimedSlots(state);
       for (const skill of selected) {
-        const id = `${target.runtime.id}\0${skill.slot}`;
-        if (claims.has(id)) throw new Error(`cannot remove claimed Runtime Slot ${target.runtime.id}/${skill.slot}`);
+        const id = `${target.target.id}\0${skill.slot}`;
+        if (claims.has(id)) throw new Error(`cannot remove claimed Target Slot ${target.target.id}/${skill.slot}`);
       }
       return selected;
     },
@@ -539,7 +539,7 @@ export function sharedRemove(
     check(target, selected, _drift, { result, failure }) {
       target.report = scan(home, projectPath);
       const remaining = selected.filter((skill) => target.report.relationships.some((item) =>
-        item.runtimeId === target.runtime.id && item.slot === skill.slot));
+        item.targetId === target.target.id && item.slot === skill.slot));
       const runFailed = failure || !result || result.status !== 0;
       if (!runFailed && remaining.length > 0) throw new Error(`exit ${result?.status ?? 1}`);
     },

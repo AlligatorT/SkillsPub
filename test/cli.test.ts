@@ -44,6 +44,21 @@ test('ls prints matrix, off moves skill, status shows per-agent state', () => {
   assert.ok(fs.existsSync(path.join(skills, 'grilling', 'SKILL.md')));
 });
 
+test('ls uses --target and preserves --agent as a deprecated alias', () => {
+  const { configDir } = setup();
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+
+  const target = run(['ls', '--target', 'a']);
+  const legacy = run(['ls', '--agent', 'a']);
+  assert.equal(target.status, 0, target.stderr);
+  assert.equal(legacy.status, 0, legacy.stderr);
+  assert.equal(legacy.stdout, target.stdout);
+  assert.match(legacy.stderr, /--agent is deprecated; use --target/);
+});
+
 test('variants are listed distinctly and ambiguous mutations fail', () => {
   const {run, configDir} = setup();
   const other = path.join(configDir, 'other');
@@ -356,7 +371,7 @@ test('bundle membership never merges same-name resource variants', () => {
   assert.match(run(['bundle', 'show', 'tools']).stdout, /same[\s\S]*same/);
 });
 
-test('bundle selectors preview Runtime Slots, move relationships, and update Base intent', () => {
+test('bundle selectors preview Target Slots, move relationships, and update Base intent', () => {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-bundle-toggle-'));
   const discoveryRoot = path.join(configDir, 'shared', 'skills');
   const parkingRoot = path.join(configDir, 'shared', '.skillspub-off', 'skills');
@@ -439,7 +454,7 @@ test('bundle activation preflight rejects same-Slot variants without changing st
   const result = run(['off', 'bundle:conflict', 'one']);
 
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /Runtime Slot global:one\/same is ambiguous or occupied/);
+  assert.match(result.stderr, /Target Slot global:one\/same is ambiguous or occupied/);
   for (const selector of selectors) {
     assert.match(result.stderr, new RegExp(selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
@@ -529,7 +544,7 @@ test('creating a missing Relationship requires explicit confirmation', () => {
   assert.equal(fs.realpathSync(path.join(targetRoot, 'example')), fs.realpathSync(skill));
 });
 
-test('Tag commands use resource identity for filtering and planned Runtime mutations', () => {
+test('Tag commands use resource identity for filtering and planned Target mutations', () => {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-tags-'));
   const runtimes = ['one', 'two'].map((key) => {
     const discoveryRoot = path.join(configDir, key, 'skills');
