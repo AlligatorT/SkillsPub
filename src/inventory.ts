@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Home } from './core.ts';
-import { piAdapter } from './harnesses/pi.ts';
+import { harnessAdapters } from './harnesses/registry.ts';
 import {
   readNpxSkillsLock,
   type NpxManagedSkill,
@@ -13,8 +13,12 @@ import { sharedTargetDefinition } from './targets/shared.ts';
 
 export type TargetScope = 'global' | 'project' | 'parent';
 export type Activation = 'on' | 'off';
-export type ResourceForm = 'local' | 'link';
+export type ResourceForm = 'local' | 'link' | 'mirror';
 export type TargetKind = 'harness' | 'shared' | 'generic';
+export interface RelationshipCapability {
+  support: 'managed' | 'discoverable' | 'unsupported';
+  link: 'supported' | 'unsupported';
+}
 
 /** Built-in path rules; user configuration stores only their field overrides. */
 export interface TargetDefinition {
@@ -24,6 +28,7 @@ export interface TargetDefinition {
   parkingRoot: string;
   projectPath: string;
   lockFile?: string;
+  relationship?: RelationshipCapability;
 }
 
 /** A concrete, resolved root that can hold Skill Target Slots. */
@@ -34,6 +39,7 @@ export interface SkillTarget {
   parkingRoot: string;
   projectPath: string;
   lockFile?: string;
+  relationship?: RelationshipCapability;
 }
 
 export interface SharedTarget extends SkillTarget {
@@ -70,6 +76,11 @@ export interface ScannedTarget extends SkillTarget {
   sourceDirectory?: string;
 }
 
+export interface ManagedMirror {
+  sourceId: string;
+  hash: string;
+}
+
 export interface TargetRelationship {
   targetId: string;
   targetKey: string;
@@ -81,6 +92,8 @@ export interface TargetRelationship {
   target?: string;
   realPath?: string;
   resourceId?: string;
+  mirror?: ManagedMirror;
+  diverged?: boolean;
   inspectionError?: string;
   readOnly: boolean;
 }
@@ -211,7 +224,7 @@ export function defaultTargetDefinitions(): TargetDefinition[] {
       projectPath: '.claude/skills',
     },
     sharedTargetDefinition(),
-    piAdapter.targetDefinition(),
+    ...harnessAdapters().map((adapter) => adapter.targetDefinition()),
   ];
 }
 
@@ -627,6 +640,7 @@ function scanRoot(
   target: ScannedTarget,
   root: string,
   activation: Activation,
+  mirrors: Map<string, ManagedMirror>,
 ): TargetRelationship[] {
   let entries: fs.Dirent[];
   try {
@@ -640,7 +654,11 @@ function scanRoot(
   for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     if (entry.name.startsWith('.')) continue;
     const entryPath = path.join(root, entry.name);
-    const form: ResourceForm = entry.isSymbolicLink() ? 'link' : 'local';
+    const slot = normalizeSlotName(entry.name);
+    const mirror = entry.isSymbolicLink()
+      ? undefined
+      : mirrors.get(targetSlotId(target.id, slot));
+    const form: ResourceForm = entry.isSymbolicLink() ? 'link' : mirror ? 'mirror' : 'local';
     let realPath: string | undefined;
     let inspectionError: string | undefined;
     try {
@@ -656,14 +674,15 @@ function scanRoot(
     relationships.push({
       targetId: target.id,
       targetKey: target.key,
-      slot: normalizeSlotName(entry.name),
+      slot,
       name: entry.name,
       activation,
       form,
       path: entryPath,
       target: form === 'link' ? targetOf(entryPath) : undefined,
       realPath,
-      resourceId: realPath,
+      resourceId: mirror?.sourceId ?? realPath,
+      mirror,
       inspectionError,
       readOnly: !target.writable,
     });
@@ -732,7 +751,7 @@ function repoName(provenance: SkillProvenance): string | undefined {
   return match?.[1];
 }
 
-function hashDirectory(root: string): string {
+export function hashDirectory(root: string): string {
   const hash = crypto.createHash('sha256');
   const update = (value: string | Buffer): void => {
     const bytes = typeof value === 'string' ? Buffer.from(value) : value;
@@ -932,15 +951,18 @@ function scanInventoryResources(
 ): { resources: InventoryResource[]; missing: MissingRelationship[] } {
   const grouped = new Map<string, InventoryResource>();
   for (const relationship of relationships) {
-    if (!relationship.realPath) continue;
-    let resource = grouped.get(relationship.realPath);
+    if (!relationship.realPath || !relationship.resourceId) continue;
+    let resource = grouped.get(relationship.resourceId);
     if (!resource) {
+      const source = relationships.find((candidate) =>
+        candidate.resourceId === relationship.resourceId &&
+        candidate.realPath === relationship.resourceId)?.realPath ?? relationship.realPath;
       resource = {
-        id: relationship.realPath,
+        id: relationship.resourceId,
         name: relationship.name,
-        realPath: relationship.realPath,
-        hash: hashDirectory(relationship.realPath),
-        cliCoupled: isCliCoupled(relationship.realPath),
+        realPath: source,
+        hash: hashDirectory(source),
+        cliCoupled: isCliCoupled(source),
         relationships: [],
       };
       grouped.set(resource.id, resource);
@@ -958,6 +980,62 @@ function scanInventoryResources(
       slot: normalizeSlotName(resource.name),
     })));
   return { resources, missing };
+}
+
+function readMirrors(value: unknown): Map<string, ManagedMirror> {
+  if (value === undefined) return new Map();
+  if (!isRecord(value)) throw new Error('invalid state mirrors');
+  const mirrors = new Map<string, ManagedMirror>();
+  for (const [slotId, mirror] of Object.entries(value)) {
+    if (!isRecord(mirror) || typeof mirror.sourceId !== 'string' || typeof mirror.hash !== 'string')
+      throw new Error('invalid state mirrors');
+    mirrors.set(slotId, { sourceId: mirror.sourceId, hash: mirror.hash });
+  }
+  return mirrors;
+}
+
+function findMirrorIssues(
+  relationships: TargetRelationship[],
+  resources: InventoryResource[],
+): ScanFinding[] {
+  const resourcesById = new Map(resources.map((resource) => [resource.id, resource]));
+  const findings: ScanFinding[] = [];
+  for (const relationship of relationships) {
+    if (relationship.form !== 'mirror' || !relationship.mirror || !relationship.realPath) continue;
+    const source = resourcesById.get(relationship.mirror.sourceId);
+    if (!source || source.realPath !== relationship.mirror.sourceId) {
+      findings.push({
+        category: 'structural',
+        code: 'mirror-source-missing',
+        message: `Mirror source is missing: ${relationship.path} -> ${relationship.mirror.sourceId}`,
+        targetId: relationship.targetId,
+        slot: relationship.slot,
+      });
+      continue;
+    }
+    if (hashDirectory(relationship.realPath) !== relationship.mirror.hash) {
+      relationship.diverged = true;
+      findings.push({
+        category: 'structural',
+        code: 'mirror-diverged',
+        message: `Mirror diverged: ${relationship.path}`,
+        resourceId: relationship.mirror.sourceId,
+        targetId: relationship.targetId,
+        slot: relationship.slot,
+      });
+    }
+    if (source.hash !== relationship.mirror.hash) {
+      findings.push({
+        category: 'change',
+        code: 'mirror-drift',
+        message: `Mirror drift: ${relationship.path} is behind ${source.realPath}`,
+        resourceId: source.id,
+        targetId: relationship.targetId,
+        slot: relationship.slot,
+      });
+    }
+  }
+  return findings;
 }
 
 function findResourceIssues(
@@ -1081,15 +1159,16 @@ function scanInventory({
   projectPath,
 }: ScanInventoryInput): InventoryScanReport {
   const now = options.now ?? new Date().toISOString();
+  const state = readStateFile(stateFile);
+  const mirrors = readMirrors(state.mirrors);
   const relationships = targets.flatMap((target) => {
     assertExternalParking(target);
     return [
-      ...scanRoot(target, target.discoveryRoot, 'on'),
-      ...scanRoot(target, target.parkingRoot, 'off'),
+      ...scanRoot(target, target.discoveryRoot, 'on', mirrors),
+      ...scanRoot(target, target.parkingRoot, 'off', mirrors),
     ];
   });
   const { resources, missing } = scanInventoryResources(relationships, targets);
-  const state = readStateFile(stateFile);
   const previous = previousTargetInventory(state);
   const slotScan = scanTargetSlots(relationships, targets, previous);
 
@@ -1101,6 +1180,7 @@ function scanInventory({
     : {};
   const findings = [
     ...slotScan.findings,
+    ...findMirrorIssues(relationships, resources),
     ...findResourceIssues(resources, previous, tags),
   ];
   if (options.persist !== false) {

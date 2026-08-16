@@ -24,6 +24,7 @@ import {
   applyActivationPlan,
   planActivation,
   planLink,
+  planMirrorAction,
   planToggle,
   planUnlink,
   type ActivationPlan,
@@ -67,7 +68,7 @@ interface BatchConfirm {
 }
 
 interface Confirmation {
-  kind: 'link' | 'unlink';
+  kind: 'link' | 'unlink' | 'mirror-create' | 'mirror-sync' | 'mirror-overwrite' | 'mirror-convert' | 'mirror-remove';
   row: Row;
   target: Target;
   info?: SkillInfo;
@@ -92,8 +93,9 @@ function entriesFor(rows: Row[], targetName: string): RelEntry[] {
 
 /** Fixed-width status column so skill names align; deadlink gets '!' (red + target suffix carry the rest). */
 function statusText(info: SkillInfo): string {
-  const base = `${info.underOff ? '[ OFF ]' : '[ ON ]'} ${info.linked ? 'link' : 'local'}`;
-  const text = info.presence === 'deadlink' ? `${base}!` : base;
+  const form = info.mirrored ? 'mirror' : info.linked ? 'link' : 'local';
+  const base = `${info.underOff ? '[ OFF ]' : '[ ON ]'} ${form}`;
+  const text = info.presence === 'deadlink' ? `${base}!` : info.diverged ? `${base}!` : base;
   return text.padEnd('[ OFF ] local'.length);
 }
 
@@ -110,7 +112,7 @@ function statusColor(info: SkillInfo): string {
 function statusSortValue(info?: SkillInfo): string {
   if (!info) return '3:missing';
   const rank = info.presence === 'on' ? '0' : info.presence === 'off' ? '1' : '2';
-  return `${rank}:${info.linked ? 'link' : 'local'}`;
+  return `${rank}:${info.mirrored ? 'mirror' : info.linked ? 'link' : 'local'}`;
 }
 
 function sortLabel(sort: SortOrder): string {
@@ -493,7 +495,7 @@ function ConfirmationModal({
       paddingX: 1,
       justifyContent: 'center',
     },
-    h(Text, {bold: true}, `${confirmation.kind === 'link' ? 'Link' : 'Unlink'} relationship?`),
+    h(Text, {bold: true}, `${confirmation.kind === 'link' ? 'Link' : confirmation.kind === 'unlink' ? 'Unlink' : confirmation.kind.replace('mirror-', 'Mirror ')} relationship?`),
     h(Text, {wrap: 'wrap'}, ` ${confirmation.source} → ${confirmation.destination}`),
     h(Text, {color: 'yellow'}, ' y confirm  n/esc cancel '),
   );
@@ -871,14 +873,22 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
           ? entries[relationshipIndex + 1] ?? entries[relationshipIndex - 1]
           : undefined;
         try {
-          if (confirmation.kind === 'link') {
+          if (confirmation.kind === 'link' || confirmation.kind === 'mirror-create') {
             applyActivationPlan(home, planLink(home, confirmation.row.id, confirmation.target.name, planScope));
-          } else {
+          } else if (confirmation.kind === 'unlink') {
             applyActivationPlan(home, planUnlink(home, confirmation.targetId, confirmation.slot, planScope));
+          } else {
+            applyActivationPlan(home, planMirrorAction(
+              home,
+              confirmation.targetId,
+              confirmation.slot,
+              confirmation.kind.replace('mirror-', '') as 'sync' | 'overwrite' | 'convert' | 'remove',
+              planScope,
+            ));
           }
           refresh({rowId: confirmation.row.id});
           if (neighbor) setRelationshipKey(neighbor.key);
-          setFeedback(`${confirmation.kind === 'link' ? 'Linked' : 'Unlinked'} ${confirmation.row.name} @ ${confirmation.target.name}`);
+          setFeedback(`${confirmation.kind === 'link' || confirmation.kind === 'mirror-create' ? 'Linked' : confirmation.kind === 'unlink' ? 'Unlinked' : confirmation.kind.replace('mirror-', 'Mirror ')} ${confirmation.row.name} @ ${confirmation.target.name}`);
         } catch (err) {
           setFeedback((err as Error).message);
         }
@@ -926,7 +936,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       }
       if (input === 't' || input === 'T')
         return setBatchTag({action: input === 't' ? 'add' : 'rm', value: ''});
-      if (input === 'i' || input === 'u' || input === 'm')
+      if (input === 'i' || input === 'u' || input === 'r' || input === 'o' || input === 'c' || input === 'm')
         return setFeedback('exit batch mode first (v)');
     }
     if (input === 'v') return setBatch({marks: new Set()});
@@ -993,7 +1003,19 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
           refresh({targetId: selectedRel.targetId, slot: selectedRel.slot, rowId: selectedRow.id});
           setFeedback(`${selectedRow.name} @ ${selectedTarget.name}: ${selectedInfo.underOff ? 'on' : 'off'}`);
         } else if (canEnable) {
-          applyActivationPlan(home, planActivation(home, `skill:${selectedRow.id}`, [selectedTarget.name], 'on', planScope));
+          const plan = planActivation(home, `skill:${selectedRow.id}`, [selectedTarget.name], 'on', planScope);
+          if (plan.targets[0]?.createForm === 'mirror') {
+            return setConfirmation({
+              kind: 'mirror-create',
+              row: selectedRow,
+              target: selectedTarget,
+              targetId: '',
+              slot: '',
+              source: selectedRow.realPath ?? '',
+              destination: path.join(selectedTarget.dir, selectedRow.name),
+            });
+          }
+          applyActivationPlan(home, plan);
           refresh({rowId: selectedRow.id, target: selectedTarget.name});
           setFeedback(`${selectedRow.name} @ ${selectedTarget.name}: on`);
         }
@@ -1004,14 +1026,41 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     }
     if (input === 'i' && actionable && !selectedInfo && !projectPath) {
       if (!selectedRow.realPath) return setFeedback('Link unavailable: selected skill has no directory');
+      try {
+        const plan = planLink(home, selectedRow.id, selectedTarget.name, planScope);
+        return setConfirmation({
+          kind: plan.targets[0]?.createForm === 'mirror' ? 'mirror-create' : 'link',
+          row: selectedRow,
+          target: selectedTarget,
+          targetId: '',
+          slot: '',
+          source: selectedRow.realPath,
+          destination: path.join(selectedTarget.dir, selectedRow.name),
+        });
+      } catch (err) {
+        return setFeedback((err as Error).message);
+      }
+    }
+    if (actionable && selectedInfo?.mirrored && selectedRel &&
+      (input === 'r' || input === 'o' || input === 'c' || input === 'u')) {
+      if (selectedRel.readOnly)
+        return setFeedback(`read-only: inherited from ${selectedRel.scope}`);
+      const kind = input === 'r'
+        ? 'mirror-sync'
+        : input === 'o'
+          ? 'mirror-overwrite'
+          : input === 'c'
+            ? 'mirror-convert'
+            : 'mirror-remove';
       return setConfirmation({
-        kind: 'link',
+        kind,
         row: selectedRow,
         target: selectedTarget,
-        targetId: '',
-        slot: '',
-        source: selectedRow.realPath,
-        destination: path.join(selectedTarget.dir, selectedRow.name),
+        info: selectedInfo,
+        targetId: selectedRel.targetId,
+        slot: selectedRel.slot,
+        source: selectedInfo.path,
+        destination: selectedRow.realPath ?? '?',
       });
     }
     if (input === 'u' && actionable && selectedInfo?.linked && selectedRel) {
@@ -1046,7 +1095,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     ? inheritedOn(selectedInfo)
       ? ''
       : selectedInfo && !selectedInfo.readOnly
-        ? ` space ${selectedInfo.underOff ? 'on' : 'off'}${selectedInfo.linked ? '  u unlink' : ''}`
+        ? ` space ${selectedInfo.underOff ? 'on' : 'off'}${selectedInfo.mirrored ? '  r sync  o overwrite  c convert  u remove' : selectedInfo.linked ? '  u unlink' : ''}`
         : selectedRow.realPath
           ? projectPath ? ' space on' : ' i link'
           : ''

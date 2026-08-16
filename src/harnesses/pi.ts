@@ -215,6 +215,7 @@ export const piAdapter: HarnessAdapter = {
       discoveryRoot: path.join(home, '.pi', 'agent', 'skills'),
       parkingRoot: path.join(home, '.pi', 'agent', '.skillspub-off', 'skills'),
       projectPath: '.pi/skills',
+      relationship: { support: 'discoverable', link: 'supported' },
     };
   },
   inspect(home, targets, projectPath) {

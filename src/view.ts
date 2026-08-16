@@ -10,6 +10,7 @@ import {
   type InventoryScanReport,
   type TargetRelationship,
   type TargetScope,
+  type ResourceForm,
   type SkillProvenance,
 } from './inventory.ts';
 
@@ -28,7 +29,10 @@ export interface SkillInfo {
   presence: Presence;
   path: string;
   realPath?: string;
+  form: ResourceForm;
   linked: boolean;
+  mirrored: boolean;
+  diverged: boolean;
   underOff: boolean;
   /** symlink target, for symlinked skills and dead links */
   target?: string;
@@ -72,7 +76,10 @@ function toInfo(
     presence: relationship.realPath ? relationship.activation : 'deadlink',
     path: relationship.path,
     realPath: relationship.realPath,
+    form: relationship.form,
     linked: relationship.form === 'link',
+    mirrored: relationship.form === 'mirror',
+    diverged: relationship.diverged === true,
     underOff: relationship.activation === 'off',
     target: relationship.target,
     scope: target?.scope,
@@ -131,14 +138,14 @@ export function projectRows(report: InventoryScanReport): Row[] {
   const provenanceBySlot = new Map(report.slots.map((slot) => [slot.id, slot.provenance]));
   const grouped = new Map<string, SkillInstance>();
   for (const relationship of report.relationships) {
-    const id = relationship.realPath ?? `broken:${relationship.path}`;
+    const id = relationship.resourceId ?? relationship.realPath ?? `broken:${relationship.path}`;
     let instance = grouped.get(id);
     if (!instance) {
       instance = {
         id,
         name: relationship.name,
         displayName: relationship.name,
-        realPath: relationship.realPath,
+        realPath: relationship.resourceId ?? relationship.realPath,
         description: readDescription(relationship.realPath),
         provenance: {},
         sourceLabel: 'Source unknown',
