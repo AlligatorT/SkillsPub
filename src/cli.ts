@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { defaultHome } from './core.ts';
 import { inspectHarnesses } from './harnesses/registry.ts';
+import { piAdapter } from './harnesses/pi.ts';
 import {
   applyTargetMigration,
   loadTargets,
@@ -74,7 +75,7 @@ const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the sour
   skillspub doctor [--repair --yes]    diagnose; explicitly confirm safe repairs
   skillspub project <path> scan|doctor|shared|preset ...  operate on the exact Project Skill Targets
   skillspub targets                    list resolved Skill Targets
-  skillspub harnesses                  list detected Harnesses and setup options
+  skillspub harnesses [pi setup|reconcile [--yes]]  inspect or isolate Pi Shared Skills
   skillspub migrate targets [--yes]    preview or migrate runtimes.json to targets.json
   skillspub tui [--project [path]]     interactive full-screen skill browser
                                        (--project: project-scope view, cwd when path omitted)
@@ -305,8 +306,9 @@ function printHarnesses(
     return;
   }
   for (const harness of harnesses) {
-    console.log(`${harness.key}\t${harness.support}\tShared ${harness.sharedConsumption.status}\tLink ${harness.link.supported ? 'supported' : 'unsupported'}`);
+    console.log(`${harness.key}\t${harness.support}\tShared ${harness.sharedConsumption.status}\tIsolation ${harness.isolation.status}\tLink ${harness.link.supported ? 'supported' : 'unsupported'}`);
     console.log(`  Shared: ${harness.sharedConsumption.detail}`);
+    console.log(`  Isolation: ${harness.isolation.detail}`);
     for (const target of harness.targets)
       console.log(`  target\t${target.scope}\t${target.discoveryRoot}`);
     for (const evidence of harness.evidence)
@@ -315,10 +317,30 @@ function printHarnesses(
 }
 
 function cmdHarnesses(home: ReturnType<typeof defaultHome>, args: string[]): void {
-  if (args.length > 0) throw new Error('usage: skillspub harnesses');
-  const report = inspectHarnesses(home, loadTargets(home));
-  printHarnesses('Detected Harnesses:', report.detected);
-  printHarnesses('Available setup:', report.setup);
+  if (args.length === 0) {
+    const report = inspectHarnesses(home, loadTargets(home));
+    printHarnesses('Detected Harnesses:', report.detected);
+    printHarnesses('Available setup:', report.setup);
+    return;
+  }
+  const [harness, action, ...rest] = args;
+  if (harness !== 'pi' || !['setup', 'reconcile'].includes(action ?? '') ||
+    rest.some((arg) => arg !== '--yes'))
+    throw new Error('usage: skillspub harnesses [pi setup|reconcile [--yes]]');
+  const targets = loadTargets(home);
+  if (action === 'setup' && piAdapter.inspect(home, targets).isolation.status === 'drift')
+    throw new Error('Pi Shared isolation has drift; use explicit reconcile.');
+  const plan = piAdapter.planSharedIsolation(home, targets);
+  console.log('Pi isolation plan:');
+  console.log(`  write\t${plan.file}`);
+  console.log(`  exclusion\t${plan.exclusion}`);
+  console.log(`  ${plan.change ? 'add exclusion' : 'already satisfied'}\t${plan.summary}`);
+  if (!rest.includes('--yes')) return;
+  piAdapter.applySharedIsolation(home, plan);
+  const inspection = piAdapter.inspect(home, targets);
+  if (inspection.sharedConsumption.status !== 'excluded')
+    throw new Error(`Pi isolation verification failed: ${inspection.sharedConsumption.detail}`);
+  console.log('Pi Shared isolation verified.');
 }
 
 function printTargetMigration(home: ReturnType<typeof defaultHome>): ReturnType<typeof planTargetMigration> {
@@ -682,6 +704,19 @@ function cmdDoctor(
   printDoctor(diagnose());
 }
 
+function printHarnessDrift(
+  home: ReturnType<typeof defaultHome>,
+  targets: InventoryScanReport['targets'],
+): void {
+  const harnesses = inspectHarnesses(home, targets);
+  const drift = [...harnesses.detected, ...harnesses.setup]
+    .filter((harness) => harness.isolation.status === 'drift');
+  console.log('Harness drift:');
+  if (drift.length === 0) console.log('  none');
+  else for (const harness of drift)
+    console.log(`  - ${harness.name} Shared isolation: ${harness.isolation.detail}`);
+}
+
 function printScan(report: InventoryScanReport): void {
   console.log(report.scope === 'project'
     ? `Project scan: ${report.projectPath}`
@@ -760,10 +795,13 @@ async function main(
       case 'shared':
         cmdShared(home, rest);
         break;
-      case 'scan':
+      case 'scan': {
         if (rest.length > 0) throw new Error('usage: skillspub scan');
-        printScan(scanGlobalInventory(home, undefined, { persist: false }));
+        const report = scanGlobalInventory(home, undefined, { persist: false });
+        printScan(report);
+        printHarnessDrift(home, report.targets);
         break;
+      }
       case 'doctor':
         cmdDoctor(home, rest);
         break;

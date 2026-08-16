@@ -290,10 +290,66 @@ test('harnesses reports detected Pi support and Shared consumption without write
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Detected Harnesses:/);
-  assert.match(result.stdout, /pi\s+discoverable\s+Shared enabled\s+Link supported/);
+  assert.match(result.stdout, /pi\s+managed\s+Shared enabled\s+Isolation unmanaged\s+Link supported/);
   assert.match(result.stdout, /evidence\s+v0\.54\.0/);
   assert.match(result.stdout, /Available setup:\n {2}none/);
   assert.deepEqual(fs.readdirSync(configDir).sort(), before);
+});
+
+test('Pi setup previews, confirms, and explicitly reconciles its managed Shared exclusion', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-pi-isolation-'));
+  const piHome = path.join(configDir, 'pi');
+  const shared = path.join(configDir, 'agents', 'skills');
+  fs.mkdirSync(path.join(piHome, 'agent'), { recursive: true });
+  fs.writeFileSync(path.join(piHome, 'agent', 'settings.json'), JSON.stringify({ theme: 'dark' }));
+  fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [
+      {
+        key: 'pi',
+        discoveryRoot: path.join(piHome, 'agent', 'skills'),
+        parkingRoot: path.join(piHome, 'agent', '.skillspub-off', 'skills'),
+      },
+      {
+        key: 'shared',
+        discoveryRoot: shared,
+        parkingRoot: path.join(configDir, 'agents', '.skillspub-off', 'skills'),
+      },
+    ],
+    genericTargets: [],
+  }));
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+
+  const preview = run(['harnesses', 'pi', 'setup']);
+  assert.equal(preview.status, 0, preview.stderr);
+  assert.match(preview.stdout, /Pi isolation plan:/);
+  assert.match(preview.stdout, /stop consuming Shared/i);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(piHome, 'agent', 'settings.json'), 'utf8')), { theme: 'dark' });
+
+  const applied = run(['harnesses', 'pi', 'setup', '--yes']);
+  assert.equal(applied.status, 0, applied.stderr);
+  assert.match(applied.stdout, /verified/i);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(piHome, 'agent', 'settings.json'), 'utf8')), {
+    theme: 'dark',
+    skills: ['!skills/**'],
+  });
+
+  fs.writeFileSync(path.join(piHome, 'agent', 'settings.json'), JSON.stringify({ theme: 'dark' }));
+  const drift = run(['scan']);
+  assert.equal(drift.status, 0, drift.stderr);
+  assert.match(drift.stdout, /Harness drift:[\s\S]*Pi Shared isolation/);
+
+  const setup = run(['harnesses', 'pi', 'setup', '--yes']);
+  assert.equal(setup.status, 1);
+  assert.match(setup.stderr, /explicit reconcile/i);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(piHome, 'agent', 'settings.json'), 'utf8')), { theme: 'dark' });
+
+  const reconciled = run(['harnesses', 'pi', 'reconcile', '--yes']);
+  assert.equal(reconciled.status, 0, reconciled.stderr);
+  assert.match(reconciled.stdout, /verified/i);
 });
 
 test('project scan does not create Project state', () => {
