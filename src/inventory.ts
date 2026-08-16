@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Home } from './core.ts';
+import { piAdapter } from './harnesses/pi.ts';
+import { sharedTargetDefinition } from './targets/shared.ts';
 
 export type TargetScope = 'global' | 'project' | 'parent';
 export type Activation = 'on' | 'off';
@@ -207,21 +209,8 @@ export function defaultTargetDefinitions(): TargetDefinition[] {
       parkingRoot: path.join(home, '.claude', '.skillspub-off', 'skills'),
       projectPath: '.claude/skills',
     },
-    {
-      key: 'shared',
-      kind: 'shared',
-      discoveryRoot: path.join(home, '.agents', 'skills'),
-      parkingRoot: path.join(home, '.agents', '.skillspub-off', 'skills'),
-      projectPath: '.agents/skills',
-      lockFile: path.join(home, '.agents', '.skill-lock.json'),
-    },
-    {
-      key: 'pi',
-      kind: 'harness',
-      discoveryRoot: path.join(home, '.pi', 'agent', 'skills'),
-      parkingRoot: path.join(home, '.pi', 'agent', '.skillspub-off', 'skills'),
-      projectPath: '.pi/agent/skills',
-    },
+    sharedTargetDefinition(),
+    piAdapter.targetDefinition(),
   ];
 }
 

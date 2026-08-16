@@ -849,6 +849,40 @@ test('unlinking the sole relationship drops out-of-registry sources from the fre
   t.unmount();
 });
 
+test('TUI separates detected Harnesses from setup options and shows Shared consumption', async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-tui-harnesses-'));
+  const piHome = path.join(configDir, 'pi');
+  fs.mkdirSync(path.join(piHome, 'agent'), { recursive: true });
+  fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [
+      {
+        key: 'pi',
+        discoveryRoot: path.join(piHome, 'agent', 'skills'),
+        parkingRoot: path.join(piHome, 'agent', '.skillspub-off', 'skills'),
+      },
+      {
+        key: 'shared',
+        discoveryRoot: path.join(configDir, 'agents', 'skills'),
+        parkingRoot: path.join(configDir, 'agents', '.skillspub-off', 'skills'),
+        lockFile: path.join(configDir, 'agents', '.skill-lock.json'),
+      },
+    ],
+    genericTargets: [],
+  }));
+
+  const t = await renderApp({ configDir });
+  const frame = t.stdout.frame();
+  assert.match(frame, /Detected/);
+  assert.match(frame, /Harnesses/);
+  assert.match(frame, /Pi/);
+  assert.match(frame, /discoverable/);
+  assert.match(frame, /Shared enabled/);
+  assert.match(frame, /Skill Targets/);
+  assert.doesNotMatch(frame, /Claude \[/);
+  t.unmount();
+});
+
 test('footer reflects available navigation actions and modal state', async () => {
   const { home } = setup();
   const t = await renderApp(home);

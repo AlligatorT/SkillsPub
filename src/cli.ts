@@ -3,6 +3,7 @@ import { parseArgs } from 'node:util';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { defaultHome } from './core.ts';
+import { inspectHarnesses } from './harnesses/registry.ts';
 import {
   applyTargetMigration,
   loadTargets,
@@ -73,6 +74,7 @@ const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the sour
   skillspub doctor [--repair --yes]    diagnose; explicitly confirm safe repairs
   skillspub project <path> scan|doctor|shared|preset ...  operate on the exact Project Skill Targets
   skillspub targets                    list resolved Skill Targets
+  skillspub harnesses                  list detected Harnesses and setup options
   skillspub migrate targets [--yes]    preview or migrate runtimes.json to targets.json
   skillspub tui [--project [path]]     interactive full-screen skill browser
                                        (--project: project-scope view, cwd when path omitted)
@@ -291,6 +293,32 @@ function cmdTargets(home: ReturnType<typeof defaultHome>, args: string[]): void 
       target.parkingRoot,
     ].join('\t'));
   }
+}
+
+function printHarnesses(
+  title: string,
+  harnesses: ReturnType<typeof inspectHarnesses>['detected'],
+): void {
+  console.log(title);
+  if (harnesses.length === 0) {
+    console.log('  none');
+    return;
+  }
+  for (const harness of harnesses) {
+    console.log(`${harness.key}\t${harness.support}\tShared ${harness.sharedConsumption.status}\tLink ${harness.link.supported ? 'supported' : 'unsupported'}`);
+    console.log(`  Shared: ${harness.sharedConsumption.detail}`);
+    for (const target of harness.targets)
+      console.log(`  target\t${target.scope}\t${target.discoveryRoot}`);
+    for (const evidence of harness.evidence)
+      console.log(`  evidence\tv${evidence.verifiedVersion}\t${evidence.url}`);
+  }
+}
+
+function cmdHarnesses(home: ReturnType<typeof defaultHome>, args: string[]): void {
+  if (args.length > 0) throw new Error('usage: skillspub harnesses');
+  const report = inspectHarnesses(home, loadTargets(home));
+  printHarnesses('Detected Harnesses:', report.detected);
+  printHarnesses('Available setup:', report.setup);
 }
 
 function printTargetMigration(home: ReturnType<typeof defaultHome>): ReturnType<typeof planTargetMigration> {
@@ -752,6 +780,9 @@ async function main(
       }
       case 'targets':
         cmdTargets(home, rest);
+        break;
+      case 'harnesses':
+        cmdHarnesses(home, rest);
         break;
       case 'migrate':
         cmdMigrate(home, rest);

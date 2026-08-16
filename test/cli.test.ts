@@ -260,6 +260,42 @@ test('read-only Target commands do not migrate a legacy registry', () => {
   assert.equal(fs.existsSync(path.join(configDir, 'state.json')), false);
 });
 
+test('harnesses reports detected Pi support and Shared consumption without writes', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-harnesses-'));
+  const piHome = path.join(configDir, 'pi');
+  const shared = path.join(configDir, 'agents', 'skills');
+  fs.mkdirSync(path.join(piHome, 'agent'), { recursive: true });
+  fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [
+      {
+        key: 'pi',
+        discoveryRoot: path.join(piHome, 'agent', 'skills'),
+        parkingRoot: path.join(piHome, 'agent', '.skillspub-off', 'skills'),
+      },
+      {
+        key: 'shared',
+        discoveryRoot: shared,
+        parkingRoot: path.join(configDir, 'agents', '.skillspub-off', 'skills'),
+        lockFile: path.join(configDir, 'agents', '.skill-lock.json'),
+      },
+    ],
+    genericTargets: [],
+  }));
+  const before = fs.readdirSync(configDir).sort();
+  const result = spawnSync('node', [CLI, 'harnesses'], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Detected Harnesses:/);
+  assert.match(result.stdout, /pi\s+discoverable\s+Shared enabled\s+Link supported/);
+  assert.match(result.stdout, /evidence\s+v0\.54\.0/);
+  assert.match(result.stdout, /Available setup:\n {2}none/);
+  assert.deepEqual(fs.readdirSync(configDir).sort(), before);
+});
+
 test('project scan does not create Project state', () => {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-project-'));
   const project = path.join(configDir, 'project');
