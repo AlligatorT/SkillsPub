@@ -1,0 +1,10 @@
+{
+  "version": 3,
+  "skills": {
+    "Foo@Bar": {
+      "source": "owner/repo",
+      "sourceUrl": "https://github.com/owner/repo.git",
+      "skillPath": "skills/foo-bar"
+    }
+  }
+}

@@ -4,11 +4,16 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { parseSkillsFindOutput } from '../src/shared.ts';
+import {
+  NPX_SKILLS_PACKAGE,
+  parseNpxSkillsFindOutput,
+  readNpxSkillsLock,
+} from '../src/npx-skills.ts';
 
 const CLI = path.join(import.meta.dirname, '../src/cli.ts');
 const ACTUAL_SKILLS_CLI = path.join(import.meta.dirname, '../node_modules/skills/bin/cli.mjs');
-const PACKAGE = 'skills@1.5.21';
+const PACKAGE = NPX_SKILLS_PACKAGE;
+const FIXTURES = path.join(import.meta.dirname, 'fixtures', 'npx-skills');
 
 function setup() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-shared-'));
@@ -140,20 +145,25 @@ test('pinned skills@1.5.21 writes a local-source Global add only to the Shared T
 });
 
 test('shared find preserves source + name candidates and falls back to raw output', () => {
-  const output = [
-    '\u001b[38;5;145mone/repo@same\u001b[0m \u001b[36m12K installs\u001b[0m',
-    '\u001b[38;5;102m└ https://skills.sh/one/repo/same\u001b[0m',
-    '',
-    '\u001b[38;5;145mtwo/repo@same\u001b[0m \u001b[36m8 installs\u001b[0m',
-    '\u001b[38;5;102m└ https://skills.sh/two/repo/same\u001b[0m',
-  ].join('\n');
-  assert.deepEqual(parseSkillsFindOutput(output).candidates, [
+  const output = fs.readFileSync(path.join(FIXTURES, 'find-output.txt'), 'utf8');
+  assert.deepEqual(parseNpxSkillsFindOutput(output).candidates, [
     { source: 'one/repo', name: 'same', installs: '12K installs', detailUrl: 'https://skills.sh/one/repo/same' },
     { source: 'two/repo', name: 'same', installs: '8 installs', detailUrl: 'https://skills.sh/two/repo/same' },
   ]);
-  assert.equal(parseSkillsFindOutput('changed upstream output').candidates.length, 0);
+  assert.equal(parseNpxSkillsFindOutput('changed upstream output').candidates.length, 0);
   const mixed = `Install with npx skills add <owner/repo@skill>\n${output}\nCHANGED RESULT\nCHANGED DETAIL`;
-  assert.equal(parseSkillsFindOutput(mixed).complete, false);
+  assert.equal(parseNpxSkillsFindOutput(mixed).complete, false);
+
+  const lock = readNpxSkillsLock(path.join(FIXTURES, 'lock-v3.json'));
+  assert.deepEqual(lock, [{
+    name: 'Foo@Bar',
+    slot: 'foo-bar',
+    provenance: {
+      source: 'owner/repo',
+      sourceUrl: 'https://github.com/owner/repo.git',
+      skillPath: 'skills/foo-bar',
+    },
+  }]);
 
   const { run, calls } = setup();
   const result = run(['shared', 'find', 'test query'], { NPX_STDOUT: output });
@@ -244,6 +254,18 @@ test('shared add accepts direct sources that upstream does not lock', () => {
   assert.equal(fs.existsSync(path.join(home, '.agents', '.skill-lock.json')), false);
   const state = JSON.parse(fs.readFileSync(path.join(config, 'state.json'), 'utf8'));
   assert.equal(state.baseIntent['global:shared\0direct'], 'on');
+});
+
+test('shared add accepts matching root-level lock provenance without replacement', () => {
+  const { home, run } = setup();
+  const root = path.join(home, '.agents', 'skills');
+  writeSkill(root, 'same', '# old');
+  writeLock(path.join(home, '.agents', '.skill-lock.json'), {
+    same: { source: 'owner/repo', skillPath: 'SKILL.md' },
+  });
+
+  const result = run(['shared', 'add', 'owner/repo', '--skill', 'same']);
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test('shared add previews a source replacement and requires --replace', () => {
