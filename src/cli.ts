@@ -5,7 +5,6 @@ import { fileURLToPath } from 'node:url';
 import { defaultHome } from './core.ts';
 import {
   applyTargetMigration,
-  loadRuntimes,
   loadTargets,
   planTargetMigration,
   applyDoctorRepairs,
@@ -21,7 +20,7 @@ import {
   projectRows,
   readViewState,
   untagged,
-  viewAgents,
+  viewTargets,
   type Row,
 } from './view.ts';
 import {
@@ -69,13 +68,12 @@ const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the sour
   skillspub bundle ls|show|create|add|rm ...
   skillspub tag add|rm|ls ...          manage global resource Tags
   skillspub preset create|add|rm|ls|show|activate|deactivate|reconcile|delete ...
-  skillspub shared find|describe|add|update|remove ...  manage the Shared Runtime via skills@1.5.21
+  skillspub shared find|describe|add|update|remove ...  manage the Shared Target via skills@1.5.21
   skillspub scan                       explicitly scan Global Skill Target inventory
   skillspub doctor [--repair --yes]    diagnose; explicitly confirm safe repairs
   skillspub project <path> scan|doctor|shared|preset ...  operate on the exact Project Skill Targets
   skillspub targets                    list resolved Skill Targets
   skillspub migrate targets [--yes]    preview or migrate runtimes.json to targets.json
-  skillspub runtimes                   Legacy Runtime compatibility view
   skillspub tui [--project [path]]     interactive full-screen skill browser
                                        (--project: project-scope view, cwd when path omitted)
 `;
@@ -95,22 +93,22 @@ function pad(s: string, n: number): string {
   return s + ' '.repeat(Math.max(0, n - s.length));
 }
 
-function relationships(row: Row, agent: string) {
-  return row.relationships.filter((relationship) => relationship.agent === agent);
+function relationships(row: Row, target: string) {
+  return row.relationships.filter((relationship) => relationship.target === target);
 }
 
-function matrixCell(row: Row, agent: string): string {
-  const states = [...new Set(relationships(row, agent).map(({info}) => CELL[info.presence]))];
+function matrixCell(row: Row, target: string): string {
+  const states = [...new Set(relationships(row, target).map(({info}) => CELL[info.presence]))];
   return states.join('/') || '·';
 }
 
-function printMatrix(rows: Row[], agentNames: string[]): void {
+function printMatrix(rows: Row[], targetNames: string[]): void {
   const w = Math.max(5, ...rows.map((r) => r.displayName.length)) + 2;
-  console.log(pad('skill', w) + agentNames.map((a) => pad(a, 9)).join(''));
+  console.log(pad('skill', w) + targetNames.map((a) => pad(a, 9)).join(''));
   for (const r of rows) {
     console.log(
       pad(r.displayName, w) +
-        agentNames.map((agent) => pad(matrixCell(r, agent), 9)).join(''),
+        targetNames.map((target) => pad(matrixCell(r, target), 9)).join(''),
     );
   }
 }
@@ -170,23 +168,23 @@ function cmdLs(home: ReturnType<typeof defaultHome>, args: string[]): void {
         ? resource.name
         : `${resource.name} (${resource.id})`;
       const relationships = resource.relationships
-        .map(({ runtimeId, slot, activation }) => `${runtimeId}/${slot}:${activation}`)
+        .map(({ targetId, slot, activation }) => `${targetId}/${slot}:${activation}`)
         .join(', ');
       console.log(`${name}\tskill:${resource.id}\t${relationships}`);
     }
     return;
   }
   const report = scanGlobalInventory(home, undefined, { persist: false });
-  const agents = viewAgents(report);
-  if (target && !agents.some((agent) => agent.name === target))
+  const targets = viewTargets(report);
+  if (target && !targets.some((candidate) => candidate.name === target))
     throw new Error(`unknown target: ${target}`);
   const { tags } = readViewState(home);
   const rows = filterRows(
     projectRows(report),
-    { agent: target, tag: values.tag },
+    { target, tag: values.tag },
     tags,
   );
-  const cols = target ? [target] : agents.map((agent) => agent.name);
+  const cols = target ? [target] : targets.map((candidate) => candidate.name);
   if (rows.length === 0) {
     console.log('no skills found');
     return;
@@ -195,7 +193,7 @@ function cmdLs(home: ReturnType<typeof defaultHome>, args: string[]): void {
   const dead = rows.flatMap((row) =>
     row.relationships
       .filter(({info}) => info.presence === 'deadlink')
-      .map(({agent, name, info}) => `${agent}/${name} -> ${info.target ?? '?'}`),
+      .map(({target, name, info}) => `${target}/${name} -> ${info.target ?? '?'}`),
   );
   const unt = untagged(rows, tags);
   if (dead.length > 0) console.log(`\n死链 (doctor 清理): ${dead.join(', ')}`);
@@ -211,23 +209,23 @@ function cmdOnOff(
   const [skill, ...names] = args;
   if (!skill || names.length === 0)
     throw new Error(
-      `usage: skillspub ${on ? 'on' : 'off'} <skill> <agent...>`,
+      `usage: skillspub ${on ? 'on' : 'off'} <skill> <target...>`,
     );
   if (!skill.startsWith('bundle:') && !skill.startsWith('tag:') && !skill.startsWith('skill:')) {
     const rows = projectRows(scanGlobalInventory(home, undefined, { persist: false }));
     refuseAmbiguousName(rows, skill);
   }
   const confirmed = names.includes('--yes');
-  const runtimes = names.filter((name) => name !== '--yes');
-  const plan = planActivation(home, skill, runtimes, on ? 'on' : 'off');
+  const targets = names.filter((name) => name !== '--yes');
+  const plan = planActivation(home, skill, targets, on ? 'on' : 'off');
   console.log('Plan:');
-  if (plan.targets.length === 0) console.log('  no current Runtime Slots');
+  if (plan.targets.length === 0) console.log('  no current Target Slots');
   else for (const target of plan.targets) {
     const intent = target.intent === target.to
       ? ''
       : ` (Base intent ${target.intent}; claimed ${target.to})`;
     console.log(
-      `  ${target.runtimeId}/${target.slot}\t${target.from} -> ${target.to}${intent}`,
+      `  ${target.targetId}/${target.slot}\t${target.from} -> ${target.to}${intent}`,
     );
   }
   if (!confirmed && plan.targets.some((target) =>
@@ -256,10 +254,10 @@ function cmdStatus(
   const [skill] = args;
   if (!skill) throw new Error('usage: skillspub status <skill>');
   const report = scanGlobalInventory(home, undefined, { persist: false });
-  const agents = viewAgents(report);
+  const targets = viewTargets(report);
   const matches = matchingInstances(projectRows(report), skill);
   if (matches.length === 0) {
-    console.error(`warning: ${skill} not found in any agent`);
+    console.error(`warning: ${skill} not found in any Target`);
     process.exitCode = 1;
     return;
   }
@@ -269,28 +267,17 @@ function cmdStatus(
       if (index > 0) console.log('');
       console.log(`${instance.displayName}\t${variantLocation(instance)}`);
     }
-    for (const agent of agents) {
-      const found = relationships(instance, agent.name);
+    for (const target of targets) {
+      const found = relationships(instance, target.name);
       if (found.length === 0) {
-        console.log(`${agent.name}\t—`);
+        console.log(`${target.name}\t—`);
         continue;
       }
       for (const {name, info} of found) {
         const extra = info.target ? ` -> ${info.target}` : '';
-        console.log(`${agent.name}\t${CELL[info.presence]}\t${info.path}${extra}${name === skill ? '' : ` (${name})`}`);
+        console.log(`${target.name}\t${CELL[info.presence]}\t${info.path}${extra}${name === skill ? '' : ` (${name})`}`);
       }
     }
-  }
-}
-
-function cmdRuntimes(home: ReturnType<typeof defaultHome>): void {
-  for (const runtime of loadRuntimes(home, { persist: false })) {
-    console.log([
-      runtime.key,
-      runtime.kind,
-      runtime.discoveryRoot,
-      runtime.parkingRoot,
-    ].join('\t'));
   }
 }
 
@@ -381,13 +368,13 @@ function cmdTag(home: ReturnType<typeof defaultHome>, args: string[]): void {
 
 function printPresetPlan(plan: PresetReconcilePlan): void {
   console.log('Plan:');
-  if (plan.targets.length === 0) console.log('  no Runtime Slot changes');
+  if (plan.targets.length === 0) console.log('  no Target Slot changes');
   else for (const target of plan.targets) {
     const intent = target.intent === target.to
       ? ''
       : ` (Base intent ${target.intent}; claimed ${target.to})`;
     console.log(
-      `  ${target.runtimeId}/${target.slot}\t${target.from} -> ${target.to}${intent}`,
+      `  ${target.targetId}/${target.slot}\t${target.from} -> ${target.to}${intent}`,
     );
   }
   if (plan.staleResourceIds.length > 0) {
@@ -471,22 +458,22 @@ function cmdPreset(
     }
     case 'activate': {
       if (!name || rest.length === 0)
-        throw new Error('usage: skillspub preset activate <name> <runtime...>');
+        throw new Error('usage: skillspub preset activate <name> <target...>');
       runPresetPlan(home, activatePreset(home, name, rest, scope), scope);
       break;
     }
     case 'deactivate': {
       if (!name || rest.length === 0)
-        throw new Error('usage: skillspub preset deactivate <name> <runtime...>');
+        throw new Error('usage: skillspub preset deactivate <name> <target...>');
       runPresetPlan(home, deactivatePreset(home, name, rest, scope), scope);
       break;
     }
     case 'reconcile': {
       const presetName = name;
-      const runtimes = rest;
+      const targets = rest;
       runPresetPlan(
         home,
-        planPresetReconcile(home, presetName, runtimes.length > 0 ? runtimes : undefined, scope),
+        planPresetReconcile(home, presetName, targets.length > 0 ? targets : undefined, scope),
         scope,
       );
       break;
@@ -587,7 +574,7 @@ function cmdShared(
       const result = sharedAdd(home, positionals[0], values.skill, Boolean(values.replace), projectPath);
       console.log(`Actual: ${result.actual}`);
       console.log(`Remaining drift: ${result.drift.join(', ') || 'none'}`);
-      console.log('Running Agents must reload/restart to read the final Shared Runtime state.');
+      console.log('Running Harnesses must reload/restart to read the final Shared Target state.');
       break;
     }
     case 'update': {
@@ -596,7 +583,7 @@ function cmdShared(
       const result = sharedUpdate(home, rest, projectPath);
       console.log(`Actual: ${result.actual}`);
       console.log(`Remaining drift: ${result.drift.join(', ') || 'none'}`);
-      console.log('Running Agents must reload/restart to read the final Shared Runtime state.');
+      console.log('Running Harnesses must reload/restart to read the final Shared Target state.');
       break;
     }
     case 'remove': {
@@ -605,7 +592,7 @@ function cmdShared(
       const result = sharedRemove(home, rest, projectPath);
       console.log(`Actual: ${result.actual}`);
       console.log(`Remaining drift: ${result.drift.join(', ') || 'none'}`);
-      console.log('Running Agents must reload/restart to read the final Shared Runtime state.');
+      console.log('Running Harnesses must reload/restart to read the final Shared Target state.');
       break;
     }
     default:
@@ -671,22 +658,22 @@ function printScan(report: InventoryScanReport): void {
   console.log(report.scope === 'project'
     ? `Project scan: ${report.projectPath}`
     : 'Global scan');
-  console.log('Runtime roots:');
-  for (const runtime of report.runtimes) {
-    const source = runtime.scope === 'global' ? 'Global' : runtime.sourceDirectory;
-    const access = runtime.writable ? 'writable' : `read-only from ${source}`;
-    console.log(`  - ${runtime.id} [${access}] ${runtime.discoveryRoot} | OFF ${runtime.parkingRoot}`);
+  console.log('Target roots:');
+  for (const target of report.targets) {
+    const source = target.scope === 'global' ? 'Global' : target.sourceDirectory;
+    const access = target.writable ? 'writable' : `read-only from ${source}`;
+    console.log(`  - ${target.id} [${access}] ${target.discoveryRoot} | OFF ${target.parkingRoot}`);
   }
   console.log('Relationships:');
   if (report.relationships.length === 0) console.log('  none');
   for (const relationship of report.relationships) {
-    const runtime = report.runtimes.find(({ id }) => id === relationship.runtimeId);
-    const source = runtime?.scope === 'global' ? 'Global' : runtime?.sourceDirectory;
+    const target = report.targets.find(({ id }) => id === relationship.targetId);
+    const source = target?.scope === 'global' ? 'Global' : target?.sourceDirectory;
     const access = relationship.readOnly ? `read-only from ${source}` : 'writable';
-    const target = relationship.target ? ` -> ${relationship.target}` : '';
+    const linkTarget = relationship.target ? ` -> ${relationship.target}` : '';
     console.log(
-      `  - ${relationship.name} @ ${relationship.runtimeId}: ` +
-      `${relationship.activation} ${relationship.form} [${access}] ${relationship.path}${target}`,
+      `  - ${relationship.name} @ ${relationship.targetId}: ` +
+      `${relationship.activation} ${relationship.form} [${access}] ${relationship.path}${linkTarget}`,
     );
   }
   console.log(`Missing relationships: ${report.missing.length}`);
@@ -763,10 +750,6 @@ async function main(
         else throw new Error('usage: skillspub project <path> scan|doctor|shared|preset');
         break;
       }
-      case 'runtimes':
-        if (rest.length > 0) throw new Error('usage: skillspub runtimes');
-        cmdRuntimes(home);
-        break;
       case 'targets':
         cmdTargets(home, rest);
         break;

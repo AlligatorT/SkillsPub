@@ -3,20 +3,20 @@ import path from 'node:path';
 import type { Home } from './core.ts';
 import {
   readStateFile,
-  runtimeSlotId,
+  targetSlotId,
   scanGlobalInventory,
   scanProjectInventory,
   type InventoryScanReport,
-  type RuntimeRelationship,
-  type RuntimeScope,
+  type TargetRelationship,
+  type TargetScope,
   type SkillProvenance,
 } from './inventory.ts';
 
-// --- view projection: InventoryScanReport -> skill × agent matrix rows ---
-// The matrix is a projection of the one inventory scan (ADR-0007); agent
-// columns are Runtime keys, presence comes from Relationship activation.
+// --- view projection: InventoryScanReport -> skill × target matrix rows ---
+// The matrix is a projection of the one inventory scan (ADR-0007); target
+// columns are Target keys, presence comes from Relationship activation.
 
-export interface Agent {
+export interface Target {
   name: string;
   dir: string;
 }
@@ -31,19 +31,19 @@ export interface SkillInfo {
   underOff: boolean;
   /** symlink target, for symlinked skills and dead links */
   target?: string;
-  /** Runtime scope this cell comes from (project scans only). */
-  scope?: RuntimeScope;
+  /** Target scope this cell comes from (project scans only). */
+  scope?: TargetScope;
   /** Inherited cells reject mutations (ADR-0007: only the exact project dir is writable). */
   readOnly?: boolean;
 }
 
 export interface SkillRelationship {
-  agent: string;
+  target: string;
   name: string;
   info: SkillInfo;
-  runtimeId: string;
+  targetId: string;
   slot: string;
-  scope?: RuntimeScope;
+  scope?: TargetScope;
   readOnly?: boolean;
 }
 
@@ -57,15 +57,15 @@ export interface SkillInstance {
   provenance: SkillProvenance;
   sourceLabel: string;
   relationships: SkillRelationship[];
-  agents: Record<string, SkillInfo | undefined>;
+  targets: Record<string, SkillInfo | undefined>;
 }
 
 export type Row = SkillInstance;
 export type SortOrder = 'name' | 'status' | 'source';
 
 function toInfo(
-  relationship: RuntimeRelationship,
-  runtime?: InventoryScanReport['runtimes'][number],
+  relationship: TargetRelationship,
+  target?: InventoryScanReport['targets'][number],
 ): SkillInfo {
   return {
     presence: relationship.realPath ? relationship.activation : 'deadlink',
@@ -74,8 +74,8 @@ function toInfo(
     linked: relationship.form === 'link',
     underOff: relationship.activation === 'off',
     target: relationship.target,
-    scope: runtime?.scope,
-    readOnly: runtime ? !runtime.writable : undefined,
+    scope: target?.scope,
+    readOnly: target ? !target.writable : undefined,
   };
 }
 
@@ -89,10 +89,10 @@ function effectiveProjectRelationship(relationships: SkillRelationship[]): Skill
   return project ?? relationships[0];
 }
 
-export function viewAgents(report: InventoryScanReport): Agent[] {
-  return report.runtimes.map((runtime) => ({
-    name: runtime.key,
-    dir: runtime.discoveryRoot,
+export function viewTargets(report: InventoryScanReport): Target[] {
+  return report.targets.map((target) => ({
+    name: target.key,
+    dir: target.discoveryRoot,
   }));
 }
 
@@ -125,8 +125,8 @@ function readDescription(realPath?: string): string | undefined {
 
 /** Project one scan into matrix rows. Pure: no disk or state reads beyond the report. */
 export function projectRows(report: InventoryScanReport): Row[] {
-  const keys = new Map(report.runtimes.map((runtime) => [runtime.id, runtime.key]));
-  const runtimeById = new Map(report.runtimes.map((runtime) => [runtime.id, runtime]));
+  const keys = new Map(report.targets.map((target) => [target.id, target.key]));
+  const targetById = new Map(report.targets.map((target) => [target.id, target]));
   const provenanceBySlot = new Map(report.slots.map((slot) => [slot.id, slot.provenance]));
   const grouped = new Map<string, SkillInstance>();
   for (const relationship of report.relationships) {
@@ -142,36 +142,36 @@ export function projectRows(report: InventoryScanReport): Row[] {
         provenance: {},
         sourceLabel: 'Source unknown',
         relationships: [],
-        agents: {},
+        targets: {},
       };
       grouped.set(id, instance);
     }
-    const agent = keys.get(relationship.runtimeId) ?? relationship.runtimeKey;
-    const runtime = runtimeById.get(relationship.runtimeId);
+    const targetName = keys.get(relationship.targetId) ?? relationship.targetKey;
+    const target = targetById.get(relationship.targetId);
     // Discovery entries scan before parking entries, so ??= prefers ON.
-    instance.agents[agent] ??= toInfo(relationship, runtime);
+    instance.targets[targetName] ??= toInfo(relationship, target);
     instance.relationships.push({
-      agent,
+      target: targetName,
       name: relationship.name,
-      info: toInfo(relationship, runtime),
-      runtimeId: relationship.runtimeId,
+      info: toInfo(relationship, target),
+      targetId: relationship.targetId,
       slot: relationship.slot,
-      scope: runtime?.scope,
-      readOnly: runtime ? !runtime.writable : undefined,
+      scope: target?.scope,
+      readOnly: target ? !target.writable : undefined,
     });
   }
 
   if (report.scope === 'project') {
     for (const instance of grouped.values()) {
-      const byAgent = new Map<string, SkillRelationship[]>();
+      const byTarget = new Map<string, SkillRelationship[]>();
       for (const relationship of instance.relationships) {
-        const list = byAgent.get(relationship.agent) ?? [];
+        const list = byTarget.get(relationship.target) ?? [];
         list.push(relationship);
-        byAgent.set(relationship.agent, list);
+        byTarget.set(relationship.target, list);
       }
-      instance.relationships = [...byAgent.values()].map(effectiveProjectRelationship);
-      instance.agents = Object.fromEntries(
-        instance.relationships.map((relationship) => [relationship.agent, relationship.info]),
+      instance.relationships = [...byTarget.values()].map(effectiveProjectRelationship);
+      instance.targets = Object.fromEntries(
+        instance.relationships.map((relationship) => [relationship.target, relationship.info]),
       );
     }
   }
@@ -186,7 +186,7 @@ export function projectRows(report: InventoryScanReport): Row[] {
   for (const instance of instances) {
     const provenance = instance.relationships
       .map((relationship) =>
-        provenanceBySlot.get(runtimeSlotId(relationship.runtimeId, relationship.slot)))
+        provenanceBySlot.get(targetSlotId(relationship.targetId, relationship.slot)))
       .find((candidate) => candidate && Object.values(candidate).some(Boolean));
     instance.provenance = provenance ?? {};
     instance.sourceLabel = instance.provenance.sourceUrl
@@ -257,11 +257,11 @@ export function sortRows(
 
 export function filterRows(
   rows: Row[],
-  filter: { agent?: string; tag?: string },
+  filter: { target?: string; tag?: string },
   tags: Record<string, string[]>,
 ): Row[] {
   return rows.filter((r) => {
-    if (filter.agent !== undefined && r.agents[filter.agent] === undefined)
+    if (filter.target !== undefined && r.targets[filter.target] === undefined)
       return false;
     if (filter.tag !== undefined && !(tags[r.id] ?? []).includes(filter.tag))
       return false;
@@ -321,7 +321,7 @@ export interface SkillDetail {
   name: string;
   displayName: string;
   description?: string;
-  agents: Record<string, SkillInfo | undefined>;
+  targets: Record<string, SkillInfo | undefined>;
   relationships: SkillRelationship[];
   realPaths: string[];
   source?: string;
@@ -335,7 +335,7 @@ export interface SkillDetail {
 }
 
 export interface TuiSnapshot {
-  agents: Agent[];
+  targets: Target[];
   rows: Row[];
   /** Project root when this is a project-scope snapshot (ADR-0010). */
   project?: string;
@@ -351,20 +351,20 @@ export interface TuiSnapshot {
 export function tuiSnapshot(home: Home): TuiSnapshot {
   const report = scanGlobalInventory(home, undefined, { persist: false });
   return {
-    agents: viewAgents(report),
+    targets: viewTargets(report),
     rows: projectRows(report),
     catalog: readViewState(home),
   };
 }
 
-/** Project-scope snapshot (ADR-0010): agent columns are the project runtimes only;
+/** Project-scope snapshot (ADR-0010): target columns are the project targets only;
  *  rows are the project + parent + global union, inherited cells marked read-only. */
 export function projectTuiSnapshot(home: Home, projectPath: string): TuiSnapshot {
   const report = scanProjectInventory(home, projectPath, undefined, { persist: false });
   return {
-    agents: report.runtimes
-      .filter((runtime) => runtime.scope === 'project')
-      .map((runtime) => ({ name: runtime.key, dir: runtime.discoveryRoot })),
+    targets: report.targets
+      .filter((target) => target.scope === 'project')
+      .map((target) => ({ name: target.key, dir: target.discoveryRoot })),
     rows: projectRows(report),
     catalog: readViewState(home),
     project: report.projectPath,
@@ -399,7 +399,7 @@ export function skillDetail(
     name: instance.name,
     displayName: instance.displayName,
     description: instance.description,
-    agents: instance.agents,
+    targets: instance.targets,
     relationships: instance.relationships,
     realPaths: instance.realPath ? [instance.realPath] : [],
     source: instance.provenance.source,

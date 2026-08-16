@@ -126,8 +126,8 @@ test('initial projection: first agent selected, all relationship kinds shown, ab
   const { home } = setup();
   const t = await renderApp(home);
   const frame = t.stdout.frame();
-  assert.match(frame, /Agent/);
-  assert.match(frame, /Agents/);
+  assert.match(frame, /Target/);
+  assert.match(frame, /Targets/);
   assert.match(frame, /Relationships/);
   assert.match(frame, /Info/);
   // all relationship kinds for agent a, text-first
@@ -465,7 +465,7 @@ test('narrow terminal hides only the passive summary', async () => {
   assert.doesNotMatch(frame, /Info/);
   assert.doesNotMatch(frame, /Source:/);
   // both actionable columns remain
-  assert.match(frame, /Agents/);
+  assert.match(frame, /Targets/);
   assert.match(frame, /\[ ON \] local\s+grilling/);
   // details stay reachable via Enter even with the summary hidden
   await t.send('l');
@@ -509,7 +509,7 @@ test('skill tab lists every live instance/variant and per-agent states', async (
   const frame = t.stdout.frame();
   assert.match(frame, /Skills/);
   // every instance/variant gets a row, not one row per name
-  assert.equal((frame.match(/code-review \(/g) ?? []).length, 2);
+  assert.equal((frame.match(/│ {2}code-review/g) ?? []).length, 2);
   assert.match(frame, /only-b/);
   // first instance is the broken symlink: broken for a, missing for b (registry order)
   assert.match(frame, /a {2}\[ ON \] link!/);
@@ -534,7 +534,7 @@ test('TUI keeps multi-word agent names and statuses readable', async () => {
   const b = path.join(home.configDir, 'b-skills');
   fs.writeFileSync(
     path.join(home.configDir, 'agents.conf'),
-    `claude code = ${a}\ncodex = ${b}\nHermes Agent = ${b}\n`,
+    `claude code = ${a}\ncodex = ${b}\n`,
   );
   const t = await renderApp(home);
   assert.match(t.stdout.frame(), /› claude code/);
@@ -788,7 +788,7 @@ test('Agent projection distinguishes on and off entries with the same name and i
   await t.send('j');
   assert.match(t.stdout.frame(), /› \[ OFF \] link\s+dual/);
 
-  // on+off in one Runtime Slot is an on-off-conflict: unlink refuses the ambiguous Slot
+  // on+off in one Target Slot is an on-off-conflict: unlink refuses the ambiguous Slot
   await t.send('u');
   await t.send('y');
   assert.match(t.stdout.frame(), /ambiguous or occupied/);

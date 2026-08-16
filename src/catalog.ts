@@ -18,7 +18,7 @@ interface PresetDefinition {
 export interface CatalogState extends Record<string, unknown> {
   bundles?: Record<string, string[]>;
   presets?: Record<string, PresetDefinition>;
-  runtimeInventory?: {
+  targetInventory?: {
     resources?: Record<string, ResourceMetadata>;
   };
 }
@@ -68,7 +68,7 @@ export function readTags(state: CatalogState): Record<string, string[]> {
 }
 
 function resources(state: CatalogState): Record<string, ResourceMetadata> {
-  return state.runtimeInventory?.resources ?? {};
+  return state.targetInventory?.resources ?? {};
 }
 
 function assertManualBundle(name: string): void {

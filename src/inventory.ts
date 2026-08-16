@@ -4,8 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Home } from './core.ts';
 
-export type RuntimeKind = 'agent' | 'shared';
-export type RuntimeScope = 'global' | 'project' | 'parent';
+export type TargetScope = 'global' | 'project' | 'parent';
 export type Activation = 'on' | 'off';
 export type ResourceForm = 'local' | 'link';
 export type TargetKind = 'harness' | 'shared' | 'generic';
@@ -57,25 +56,16 @@ export interface TargetMigrationPlan {
   genericTargets: GenericTarget[];
 }
 
-export interface Runtime {
-  key: string;
-  kind: RuntimeKind;
-  discoveryRoot: string;
-  parkingRoot: string;
-  projectPath: string;
-  lockFile?: string;
-}
-
-export interface ScannedRuntime extends Runtime {
+export interface ScannedTarget extends SkillTarget {
   id: string;
-  scope: RuntimeScope;
+  scope: TargetScope;
   writable: boolean;
   sourceDirectory?: string;
 }
 
-export interface RuntimeRelationship {
-  runtimeId: string;
-  runtimeKey: string;
+export interface TargetRelationship {
+  targetId: string;
+  targetKey: string;
   slot: string;
   name: string;
   activation: Activation;
@@ -100,21 +90,21 @@ export interface InventoryResource {
   realPath: string;
   hash: string;
   cliCoupled: boolean;
-  relationships: RuntimeRelationship[];
+  relationships: TargetRelationship[];
 }
 
 export interface InventorySlot {
   id: string;
-  runtimeId: string;
-  runtimeKey: string;
+  targetId: string;
+  targetKey: string;
   name: string;
-  relationships: RuntimeRelationship[];
+  relationships: TargetRelationship[];
   provenance?: SkillProvenance;
 }
 
 export interface MissingRelationship {
   resourceId: string;
-  runtimeId: string;
+  targetId: string;
   slot: string;
 }
 
@@ -125,11 +115,11 @@ export interface ScanFinding {
   code: string;
   message: string;
   resourceId?: string;
-  runtimeId?: string;
+  targetId?: string;
   slot?: string;
 }
 
-export interface RuntimeInventoryMetadata {
+export interface TargetInventoryMetadata {
   version: 1;
   resources: Record<string, {
     name: string;
@@ -147,10 +137,10 @@ export interface RuntimeInventoryMetadata {
 export interface InventoryScanReport {
   scope: 'global' | 'project';
   projectPath?: string;
-  runtimes: ScannedRuntime[];
+  targets: ScannedTarget[];
   resources: InventoryResource[];
   slots: InventorySlot[];
-  relationships: RuntimeRelationship[];
+  relationships: TargetRelationship[];
   missing: MissingRelationship[];
   findings: ScanFinding[];
   stateFile: string;
@@ -164,7 +154,7 @@ export interface DoctorRepair {
   to?: string;
   targetResourceId?: string;
   targetHash?: string;
-  runtimeId: string;
+  targetId: string;
   slot: string;
 }
 
@@ -182,9 +172,19 @@ export interface ScanOptions {
   persist?: boolean;
 }
 
+/** Compatibility input only: runtimes.json is converted during explicit migration. */
+interface LegacyRuntime {
+  key: string;
+  kind: 'agent' | 'shared';
+  discoveryRoot: string;
+  parkingRoot: string;
+  projectPath: string;
+  lockFile?: string;
+}
+
 interface RuntimeRegistryFile {
   version: 1;
-  runtimes: Runtime[];
+  runtimes: LegacyRuntime[];
 }
 
 interface TargetRegistryFile {
@@ -351,7 +351,7 @@ function readTargetRegistry(file: string): TargetRegistryFile | undefined {
   return registry;
 }
 
-function runtimeFromTarget(target: SkillTarget): Runtime {
+function legacyRuntimeFromTarget(target: SkillTarget): LegacyRuntime {
   return {
     key: target.key,
     kind: target.kind === 'shared' ? 'shared' : 'agent',
@@ -362,11 +362,11 @@ function runtimeFromTarget(target: SkillTarget): Runtime {
   };
 }
 
-function defaultRuntimes(): Runtime[] {
-  return defaultTargetDefinitions().map(runtimeFromTarget);
+function defaultLegacyRuntimes(): LegacyRuntime[] {
+  return defaultTargetDefinitions().map(legacyRuntimeFromTarget);
 }
 
-function resolveRuntime(runtime: Runtime, file: string): Runtime {
+function resolveLegacyRuntime(runtime: LegacyRuntime, file: string): LegacyRuntime {
   if (!runtime || typeof runtime.key !== 'string' || !isTargetKey(runtime.key) ||
     (runtime.kind !== 'agent' && runtime.kind !== 'shared') ||
     typeof runtime.discoveryRoot !== 'string' ||
@@ -391,7 +391,7 @@ function resolveRuntime(runtime: Runtime, file: string): Runtime {
   };
 }
 
-function readRuntimeRegistry(file: string): Runtime[] | undefined {
+function readRuntimeRegistry(file: string): LegacyRuntime[] | undefined {
   if (!fs.existsSync(file)) return undefined;
   let parsed: Partial<RuntimeRegistryFile>;
   try {
@@ -401,7 +401,7 @@ function readRuntimeRegistry(file: string): Runtime[] | undefined {
   }
   if (parsed.version !== 1 || !Array.isArray(parsed.runtimes))
     throw new Error(`invalid Runtime registry: ${file}`);
-  const runtimes = parsed.runtimes.map((runtime) => resolveRuntime(runtime, file));
+  const runtimes = parsed.runtimes.map((runtime) => resolveLegacyRuntime(runtime, file));
   const keys = new Set<string>();
   for (const runtime of runtimes) {
     if (keys.has(runtime.key)) throw new Error(`duplicate Runtime key: ${runtime.key}`);
@@ -410,9 +410,9 @@ function readRuntimeRegistry(file: string): Runtime[] | undefined {
   return runtimes;
 }
 
-function legacyRuntimes(file: string): Runtime[] | undefined {
+function legacyRuntimes(file: string): LegacyRuntime[] | undefined {
   if (!fs.existsSync(file)) return undefined;
-  const defaults = new Map(defaultRuntimes().map((runtime) => [runtime.key, runtime]));
+  const defaults = new Map(defaultLegacyRuntimes().map((runtime) => [runtime.key, runtime]));
   return fs.readFileSync(file, 'utf8')
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -425,7 +425,7 @@ function legacyRuntimes(file: string): Runtime[] | undefined {
       const discoveryRoot = expandHome(line.slice(separator + 1).trim());
       const known = defaults.get(key);
       const kind = known?.kind ?? 'agent';
-      return resolveRuntime({
+      return resolveLegacyRuntime({
         key,
         kind,
         discoveryRoot,
@@ -442,7 +442,7 @@ function legacyRuntimes(file: string): Runtime[] | undefined {
     });
 }
 
-function targetFromLegacyRuntime(runtime: Runtime, file: string): SkillTarget {
+function targetFromLegacyRuntime(runtime: LegacyRuntime, file: string): SkillTarget {
   const definition = defaultTargetDefinitions().find(({ key }) => key === runtime.key);
   if (!definition) {
     return resolveTarget({
@@ -467,7 +467,7 @@ function targetFromLegacyRuntime(runtime: Runtime, file: string): SkillTarget {
   }, file);
 }
 
-function targetRegistryFromLegacy(runtimes: Runtime[], file: string): TargetRegistryFile {
+function targetRegistryFromLegacy(runtimes: LegacyRuntime[], file: string): TargetRegistryFile {
   const definitions = new Map(defaultTargetDefinitions().map((definition) => [definition.key, definition]));
   const overrides: TargetDefinitionOverride[] = [];
   const genericTargets: GenericTarget[] = [];
@@ -523,21 +523,12 @@ export function loadTargets(home: Home): SkillTarget[] {
   const registry = readTargetRegistry(file);
   if (registry) return targetsFromRegistry(registry, file);
   const legacy = readRuntimeRegistry(runtimeFile(home))
-    ?? legacyRuntimes(path.join(home.configDir, 'agents.conf'))
-    ?? defaultRuntimes();
+    ?? legacyRuntimes(path.join(home.configDir, 'agents.conf'));
+  if (!legacy) return defaultTargetDefinitions().map((definition) =>
+    resolveTarget(definition, targetFile(home)));
   const targets = legacy.map((runtime) => targetFromLegacyRuntime(runtime, runtimeFile(home)));
   assertUniqueTargets(targets, runtimeFile(home));
   return targets;
-}
-
-export function loadRuntimes(
-  home: Home,
-  _options: { persist?: boolean } = {},
-): Runtime[] {
-  if (fs.existsSync(targetFile(home))) return loadTargets(home).map(runtimeFromTarget);
-  return readRuntimeRegistry(runtimeFile(home))
-    ?? legacyRuntimes(path.join(home.configDir, 'agents.conf'))
-    ?? defaultRuntimes();
 }
 
 export function planTargetMigration(home: Home): TargetMigrationPlan {
@@ -632,11 +623,11 @@ export function normalizeManagedSkillName(name: string): string {
     .substring(0, 255) || 'unnamed-skill';
 }
 
-export function runtimeSlotId(runtimeId: string, slot: string): string {
-  return `${runtimeId}\0${slot}`;
+export function targetSlotId(targetId: string, slot: string): string {
+  return `${targetId}\0${slot}`;
 }
 
-function displayRuntimeSlot(id: string): string {
+function displayTargetSlot(id: string): string {
   return id.replace('\0', '/');
 }
 
@@ -649,10 +640,10 @@ function targetOf(entryPath: string): string | undefined {
 }
 
 function scanRoot(
-  runtime: ScannedRuntime,
+  target: ScannedTarget,
   root: string,
   activation: Activation,
-): RuntimeRelationship[] {
+): TargetRelationship[] {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(root, { withFileTypes: true });
@@ -661,7 +652,7 @@ function scanRoot(
     throw error;
   }
 
-  const relationships: RuntimeRelationship[] = [];
+  const relationships: TargetRelationship[] = [];
   for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     if (entry.name.startsWith('.')) continue;
     const entryPath = path.join(root, entry.name);
@@ -679,8 +670,8 @@ function scanRoot(
         inspectionError = `${code ?? 'I/O'}: ${(error as Error).message}`;
     }
     relationships.push({
-      runtimeId: runtime.id,
-      runtimeKey: runtime.key,
+      targetId: target.id,
+      targetKey: target.key,
       slot: normalizeSlotName(entry.name),
       name: entry.name,
       activation,
@@ -690,16 +681,16 @@ function scanRoot(
       realPath,
       resourceId: realPath,
       inspectionError,
-      readOnly: !runtime.writable,
+      readOnly: !target.writable,
     });
   }
   return relationships;
 }
 
-function assertExternalParking(runtime: Runtime): void {
-  const relative = path.relative(runtime.discoveryRoot, runtime.parkingRoot);
+function assertExternalParking(target: SkillTarget): void {
+  const relative = path.relative(target.discoveryRoot, target.parkingRoot);
   if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative)))
-    throw new Error(`parking root must be outside discovery root for Runtime ${runtime.key}`);
+    throw new Error(`parking root must be outside discovery root for Target ${target.key}`);
 }
 
 interface ProvenanceRead {
@@ -847,21 +838,21 @@ interface ScanInventoryInput {
   scope: 'global' | 'project';
   stateFile: string;
   catalogStateFile: string;
-  runtimes: ScannedRuntime[];
+  targets: ScannedTarget[];
   options: ScanOptions;
   projectPath?: string;
 }
 
-type RelationshipsBySlot = Map<string, RuntimeRelationship[]>;
+type RelationshipsBySlot = Map<string, TargetRelationship[]>;
 
-function groupRuntimeSlots(relationships: RuntimeRelationship[]): {
+function groupTargetSlots(relationships: TargetRelationship[]): {
   bySlot: RelationshipsBySlot;
   findings: ScanFinding[];
 } {
   const bySlot: RelationshipsBySlot = new Map();
   const findings: ScanFinding[] = [];
   for (const relationship of relationships) {
-    const key = runtimeSlotId(relationship.runtimeId, relationship.slot);
+    const key = targetSlotId(relationship.targetId, relationship.slot);
     const groupedRelationships = bySlot.get(key) ?? [];
     groupedRelationships.push(relationship);
     bySlot.set(key, groupedRelationships);
@@ -871,7 +862,7 @@ function groupRuntimeSlots(relationships: RuntimeRelationship[]): {
       message: relationship.inspectionError
         ? `cannot inspect link: ${relationship.path}: ${relationship.inspectionError}`
         : `broken link: ${relationship.path} -> ${relationship.target ?? '?'}`,
-      runtimeId: relationship.runtimeId,
+      targetId: relationship.targetId,
       slot: relationship.slot,
     });
   }
@@ -879,98 +870,98 @@ function groupRuntimeSlots(relationships: RuntimeRelationship[]): {
 }
 
 function scanSlotProvenance(
-  runtimes: ScannedRuntime[],
+  targets: ScannedTarget[],
   bySlot: RelationshipsBySlot,
-  previous: RuntimeInventoryMetadata | undefined,
+  previous: TargetInventoryMetadata | undefined,
 ): {
   provenanceBySlot: Map<string, SkillProvenance>;
-  invalidLockRuntimes: Set<string>;
+  invalidLockTargets: Set<string>;
   findings: ScanFinding[];
 } {
   const provenanceBySlot = new Map<string, SkillProvenance>();
-  const invalidLockRuntimes = new Set<string>();
+  const invalidLockTargets = new Set<string>();
   const findings: ScanFinding[] = [];
-  for (const runtime of runtimes) {
-    const lock = readProvenance(runtime.lockFile);
+  for (const target of targets) {
+    const lock = readProvenance(target.lockFile);
     if (lock.error) {
-      invalidLockRuntimes.add(runtime.id);
+      invalidLockTargets.add(target.id);
       findings.push({
         category: 'structural',
         code: 'invalid-lock',
         message: `cannot read installer lock: ${lock.error}`,
-        runtimeId: runtime.id,
+        targetId: target.id,
       });
       for (const [key, occupants] of bySlot) {
-        if (occupants[0].runtimeId !== runtime.id) continue;
+        if (occupants[0].targetId !== target.id) continue;
         const prior = previous?.slots?.[key]?.provenance;
         if (prior) provenanceBySlot.set(key, prior);
       }
       continue;
     }
     for (const [slot, provenance] of lock.entries) {
-      const key = runtimeSlotId(runtime.id, slot);
+      const key = targetSlotId(target.id, slot);
       const occupants = bySlot.get(key) ?? [];
       if (occupants.length === 0) findings.push({
         category: 'structural',
         code: 'lock-file-missing',
-        message: `lock entry has no Runtime Slot file: ${runtime.key}/${slot}`,
-        runtimeId: runtime.id,
+        message: `lock entry has no Target Slot file: ${target.key}/${slot}`,
+        targetId: target.id,
         slot,
       });
       provenanceBySlot.set(key, provenance);
     }
   }
-  return { provenanceBySlot, invalidLockRuntimes, findings };
+  return { provenanceBySlot, invalidLockTargets, findings };
 }
 
-function findRuntimeSlotIssues(
+function findTargetSlotIssues(
   bySlot: RelationshipsBySlot,
   provenanceBySlot: Map<string, SkillProvenance>,
-  invalidLockRuntimes: Set<string>,
-  previous: RuntimeInventoryMetadata | undefined,
+  invalidLockTargets: Set<string>,
+  previous: TargetInventoryMetadata | undefined,
 ): ScanFinding[] {
   const findings: ScanFinding[] = [];
   for (const [key, occupants] of bySlot) {
     const oldSlot = previous?.slots?.[key];
-    if (oldSlot && !invalidLockRuntimes.has(occupants[0].runtimeId) &&
+    if (oldSlot && !invalidLockTargets.has(occupants[0].targetId) &&
       !sameProvenance(oldSlot.provenance, provenanceBySlot.get(key)))
       findings.push({
         category: 'change',
         code: 'source-changed',
-        message: `Runtime Slot provenance changed: ${displayRuntimeSlot(key)}`,
-        runtimeId: occupants[0].runtimeId,
+        message: `Target Slot provenance changed: ${displayTargetSlot(key)}`,
+        targetId: occupants[0].targetId,
         slot: occupants[0].slot,
       });
     const activations = new Set(occupants.map(({ activation }) => activation));
     if (activations.size > 1) findings.push({
       category: 'structural',
       code: 'on-off-conflict',
-      message: `Runtime Slot is present in ON and OFF roots: ${displayRuntimeSlot(key)}`,
-      runtimeId: occupants[0].runtimeId,
+      message: `Target Slot is present in ON and OFF roots: ${displayTargetSlot(key)}`,
+      targetId: occupants[0].targetId,
       slot: occupants[0].slot,
     });
     if (new Set(occupants.map(({ name }) => name)).size > 1) findings.push({
       category: 'structural',
       code: 'slot-conflict',
-      message: `multiple entry names normalize to Runtime Slot: ${displayRuntimeSlot(key)}`,
-      runtimeId: occupants[0].runtimeId,
+      message: `multiple entry names normalize to Target Slot: ${displayTargetSlot(key)}`,
+      targetId: occupants[0].targetId,
       slot: occupants[0].slot,
     });
   }
   return findings;
 }
 
-function scanRuntimeSlots(
-  relationships: RuntimeRelationship[],
-  runtimes: ScannedRuntime[],
-  previous: RuntimeInventoryMetadata | undefined,
+function scanTargetSlots(
+  relationships: TargetRelationship[],
+  targets: ScannedTarget[],
+  previous: TargetInventoryMetadata | undefined,
 ): { slots: InventorySlot[]; findings: ScanFinding[] } {
-  const grouped = groupRuntimeSlots(relationships);
-  const provenance = scanSlotProvenance(runtimes, grouped.bySlot, previous);
+  const grouped = groupTargetSlots(relationships);
+  const provenance = scanSlotProvenance(targets, grouped.bySlot, previous);
   const slots: InventorySlot[] = [...grouped.bySlot].map(([id, occupants]) => ({
     id,
-    runtimeId: occupants[0].runtimeId,
-    runtimeKey: occupants[0].runtimeKey,
+    targetId: occupants[0].targetId,
+    targetKey: occupants[0].targetKey,
     name: occupants[0].slot,
     relationships: occupants,
     provenance: provenance.provenanceBySlot.get(id),
@@ -980,10 +971,10 @@ function scanRuntimeSlots(
     findings: [
       ...grouped.findings,
       ...provenance.findings,
-      ...findRuntimeSlotIssues(
+      ...findTargetSlotIssues(
         grouped.bySlot,
         provenance.provenanceBySlot,
-        provenance.invalidLockRuntimes,
+        provenance.invalidLockTargets,
         previous,
       ),
     ],
@@ -991,8 +982,8 @@ function scanRuntimeSlots(
 }
 
 function scanInventoryResources(
-  relationships: RuntimeRelationship[],
-  runtimes: ScannedRuntime[],
+  relationships: TargetRelationship[],
+  targets: ScannedTarget[],
 ): { resources: InventoryResource[]; missing: MissingRelationship[] } {
   const grouped = new Map<string, InventoryResource>();
   for (const relationship of relationships) {
@@ -1013,12 +1004,12 @@ function scanInventoryResources(
   }
   const resources = [...grouped.values()].sort((a, b) =>
     a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-  const missing = resources.flatMap((resource) => runtimes
-    .filter((runtime) => !resource.relationships.some((relationship) =>
-      relationship.runtimeId === runtime.id && relationship.slot === normalizeSlotName(resource.name)))
-    .map((runtime) => ({
+  const missing = resources.flatMap((resource) => targets
+    .filter((target) => !resource.relationships.some((relationship) =>
+      relationship.targetId === target.id && relationship.slot === normalizeSlotName(resource.name)))
+    .map((target) => ({
       resourceId: resource.id,
-      runtimeId: runtime.id,
+      targetId: target.id,
       slot: normalizeSlotName(resource.name),
     })));
   return { resources, missing };
@@ -1026,7 +1017,7 @@ function scanInventoryResources(
 
 function findResourceIssues(
   resources: InventoryResource[],
-  previous: RuntimeInventoryMetadata | undefined,
+  previous: TargetInventoryMetadata | undefined,
   tags: Record<string, string[]>,
 ): ScanFinding[] {
   const findings: ScanFinding[] = [];
@@ -1069,12 +1060,25 @@ function findResourceIssues(
   return findings;
 }
 
+function previousTargetInventory(state: Record<string, unknown>): TargetInventoryMetadata | undefined {
+  // Compatibility input only: the renamed metadata is rewritten on the next persisted scan.
+  return (state.targetInventory ?? state.runtimeInventory) as TargetInventoryMetadata | undefined;
+}
+
+function withTargetInventory(
+  state: Record<string, unknown>,
+  metadata: TargetInventoryMetadata,
+): Record<string, unknown> {
+  const { runtimeInventory: _, ...current } = state;
+  return { ...current, targetInventory: metadata };
+}
+
 function buildInventoryMetadata(
   resources: InventoryResource[],
   slots: InventorySlot[],
-  previous: RuntimeInventoryMetadata | undefined,
+  previous: TargetInventoryMetadata | undefined,
   now: string,
-): RuntimeInventoryMetadata {
+): TargetInventoryMetadata {
   return {
     version: 1,
     resources: Object.fromEntries(resources.map((resource) => [resource.id, {
@@ -1127,22 +1131,22 @@ function scanInventory({
   scope,
   stateFile,
   catalogStateFile,
-  runtimes,
+  targets,
   options,
   projectPath,
 }: ScanInventoryInput): InventoryScanReport {
   const now = options.now ?? new Date().toISOString();
-  const relationships = runtimes.flatMap((runtime) => {
-    assertExternalParking(runtime);
+  const relationships = targets.flatMap((target) => {
+    assertExternalParking(target);
     return [
-      ...scanRoot(runtime, runtime.discoveryRoot, 'on'),
-      ...scanRoot(runtime, runtime.parkingRoot, 'off'),
+      ...scanRoot(target, target.discoveryRoot, 'on'),
+      ...scanRoot(target, target.parkingRoot, 'off'),
     ];
   });
-  const { resources, missing } = scanInventoryResources(relationships, runtimes);
+  const { resources, missing } = scanInventoryResources(relationships, targets);
   const state = readStateFile(stateFile);
-  const previous = state.runtimeInventory as RuntimeInventoryMetadata | undefined;
-  const slotScan = scanRuntimeSlots(relationships, runtimes, previous);
+  const previous = previousTargetInventory(state);
+  const slotScan = scanTargetSlots(relationships, targets, previous);
 
   const catalogState = catalogStateFile === stateFile
     ? state
@@ -1158,14 +1162,14 @@ function scanInventory({
     const metadata = buildInventoryMetadata(resources, slotScan.slots, previous, now);
     const nextBundles = buildRepoBundles(catalogState.bundles, resources, slotScan.slots);
     writeStateFile(stateFile, scope === 'global'
-      ? { ...state, bundles: nextBundles, tags, runtimeInventory: metadata }
-      : { ...state, runtimeInventory: metadata });
+      ? { ...withTargetInventory(state, metadata), bundles: nextBundles, tags }
+      : withTargetInventory(state, metadata));
   }
 
   return {
     scope,
     projectPath,
-    runtimes,
+    targets,
     resources,
     slots: slotScan.slots,
     relationships,
@@ -1322,7 +1326,7 @@ function matchingCounterpart(
 }
 
 function replacementTarget(
-  relationship: RuntimeRelationship,
+  relationship: TargetRelationship,
   report: InventoryScanReport,
   state: Record<string, unknown>,
 ): string | undefined {
@@ -1334,15 +1338,13 @@ function replacementTarget(
       realPath ? [[path.resolve(entryPath), realPath] as const] : [])),
     currentHashes: new Map(report.resources.map(({ id, hash }) => [id, hash])),
     priorResourceIds: previousResourceIds(state, relationship),
-    priorResources: isRecord(state.runtimeInventory) && isRecord(state.runtimeInventory.resources)
-      ? state.runtimeInventory.resources
-      : {},
+    priorResources: previousTargetInventory(state)?.resources ?? {},
   };
   const candidates = new Set<string>();
-  for (const runtime of report.runtimes) {
+  for (const scannedTarget of report.targets) {
     for (const [root, counterpart] of [
-      [runtime.discoveryRoot, runtime.parkingRoot],
-      [runtime.parkingRoot, runtime.discoveryRoot],
+      [scannedTarget.discoveryRoot, scannedTarget.parkingRoot],
+      [scannedTarget.parkingRoot, scannedTarget.discoveryRoot],
     ]) {
       const candidate = matchingCounterpart(target, root, counterpart, evidence);
       if (candidate) candidates.add(candidate);
@@ -1467,9 +1469,7 @@ function parkingFindings(
   state: Record<string, unknown>,
 ): ScanFinding[] {
   const currentSlots = new Set(report.slots.map(({ id }) => id));
-  const previousSlots = isRecord(state.runtimeInventory) && isRecord(state.runtimeInventory.slots)
-    ? state.runtimeInventory.slots
-    : {};
+  const previousSlots = previousTargetInventory(state)?.slots ?? {};
   const claimedSlots = new Set<string>();
   collectClaimedSlots(state.claims, claimedSlots);
   collectClaimedSlots(state.lastClaims, claimedSlots);
@@ -1480,8 +1480,8 @@ function parkingFindings(
     return [{
       category: 'structural',
       code: 'parking-entry-missing',
-      message: `parking entry missing: ${displayRuntimeSlot(id)}`,
-      runtimeId: separator < 0 ? undefined : id.slice(0, separator),
+      message: `parking entry missing: ${displayTargetSlot(id)}`,
+      targetId: separator < 0 ? undefined : id.slice(0, separator),
       slot: separator < 0 ? id : id.slice(separator + 1),
     }];
   });
@@ -1491,23 +1491,21 @@ function lockMismatchFindings(
   report: InventoryScanReport,
   state: Record<string, unknown>,
 ): ScanFinding[] {
-  const previous = isRecord(state.runtimeInventory) && isRecord(state.runtimeInventory.slots)
-    ? state.runtimeInventory.slots
-    : {};
+  const previous = previousTargetInventory(state)?.slots ?? {};
   return report.slots.flatMap((slot) => {
     const old = previous[slot.id];
     return isRecord(old) && isRecord(old.provenance) && !slot.provenance ? [{
       category: 'structural',
       code: 'lock-file-mismatch',
-      message: `npx-managed Runtime Slot has a file but no lock entry: ${slot.runtimeKey}/${slot.name}`,
-      runtimeId: slot.runtimeId,
+      message: `npx-managed Target Slot has a file but no lock entry: ${slot.targetKey}/${slot.name}`,
+      targetId: slot.targetId,
       slot: slot.name,
     }] : [];
   });
 }
 
 interface LegacyOffEntry {
-  runtime: ScannedRuntime;
+  target: ScannedTarget;
   name: string;
   entryPath: string;
   destination: string;
@@ -1517,9 +1515,9 @@ interface LegacyOffEntry {
 function legacyOffEntries(report: InventoryScanReport): LegacyOffEntry[] {
   if (report.scope !== 'global') return [];
   const entries: LegacyOffEntry[] = [];
-  for (const runtime of report.runtimes) {
-    if (!runtime.writable) continue;
-    const offDir = path.join(runtime.discoveryRoot, '.off');
+  for (const target of report.targets) {
+    if (!target.writable) continue;
+    const offDir = path.join(target.discoveryRoot, '.off');
     let dirents: fs.Dirent[];
     try {
       dirents = fs.readdirSync(offDir, { withFileTypes: true });
@@ -1539,10 +1537,10 @@ function legacyOffEntries(report: InventoryScanReport): LegacyOffEntry[] {
       }
       if (!keep) continue;
       entries.push({
-        runtime,
+        target,
         name: dirent.name,
         entryPath,
-        destination: path.join(runtime.parkingRoot, dirent.name),
+        destination: path.join(target.parkingRoot, dirent.name),
       });
     }
   }
@@ -1550,11 +1548,11 @@ function legacyOffEntries(report: InventoryScanReport): LegacyOffEntry[] {
 }
 
 function legacyOffFindings(entries: LegacyOffEntry[]): ScanFinding[] {
-  return entries.map(({ runtime, name, entryPath }) => ({
+  return entries.map(({ target, name, entryPath }) => ({
     category: 'structural',
     code: 'legacy-off',
     message: `legacy OFF location: ${entryPath} (repair moves it to the parking area)`,
-    runtimeId: runtime.id,
+    targetId: target.id,
     slot: normalizeSlotName(name),
   }));
 }
@@ -1589,19 +1587,17 @@ function doctorReport(
 
 function previousResourceIds(
   state: Record<string, unknown>,
-  relationship: RuntimeRelationship,
+  relationship: TargetRelationship,
 ): Set<string> {
-  if (!isRecord(state.runtimeInventory) || !isRecord(state.runtimeInventory.slots))
-    return new Set();
-  const slot = state.runtimeInventory.slots[
-    runtimeSlotId(relationship.runtimeId, relationship.slot)
+  const slot = previousTargetInventory(state)?.slots[
+    targetSlotId(relationship.targetId, relationship.slot)
   ];
   if (!isRecord(slot) || !Array.isArray(slot.resourceIds)) return new Set();
   return new Set(slot.resourceIds.filter((id): id is string => typeof id === 'string'));
 }
 
 function retargetDetails(
-  relationship: RuntimeRelationship,
+  relationship: TargetRelationship,
   report: InventoryScanReport,
   state: Record<string, unknown>,
 ): Pick<DoctorRepair, 'to' | 'targetResourceId' | 'targetHash'> | undefined {
@@ -1621,7 +1617,7 @@ function doctorRepairs(
   legacyOff: LegacyOffEntry[],
 ): DoctorRepair[] {
   const legacyRepairs = legacyOff.flatMap(
-    ({ runtime, name, entryPath, destination }) => {
+    ({ target, name, entryPath, destination }) => {
       if (fs.lstatSync(destination, { throwIfNoEntry: false })) return [];
       return [{
         id: `migrate-legacy-off:${entryPath}`,
@@ -1629,7 +1625,7 @@ function doctorRepairs(
         path: entryPath,
         from: entryPath,
         to: destination,
-        runtimeId: runtime.id,
+        targetId: target.id,
         slot: normalizeSlotName(name),
       }];
     },
@@ -1637,7 +1633,7 @@ function doctorRepairs(
   const conflicted = new Set(report.slots.flatMap(({ id, relationships }) =>
     relationships.length > 1 ? [id] : []));
   const linkRepairs = report.relationships.flatMap((relationship) => {
-    const conflict = conflicted.has(runtimeSlotId(relationship.runtimeId, relationship.slot));
+    const conflict = conflicted.has(targetSlotId(relationship.targetId, relationship.slot));
     if (relationship.form !== 'link' || relationship.realPath ||
       relationship.inspectionError || relationship.readOnly || !relationship.target || conflict)
       return [];
@@ -1649,7 +1645,7 @@ function doctorRepairs(
       path: relationship.path,
       from: relationship.target,
       ...retarget,
-      runtimeId: relationship.runtimeId,
+      targetId: relationship.targetId,
       slot: relationship.slot,
     }];
   });
@@ -1658,7 +1654,7 @@ function doctorRepairs(
 
 function globalInventory(
   home: Home,
-  runtimes: Runtime[],
+  targets: SkillTarget[],
   options: ScanOptions,
 ): InventoryScanReport {
   const stateFile = path.join(home.configDir, 'state.json');
@@ -1666,9 +1662,9 @@ function globalInventory(
     scope: 'global',
     stateFile,
     catalogStateFile: stateFile,
-    runtimes: runtimes.map((runtime) => ({
-      ...runtime,
-      id: `global:${runtime.key}`,
+    targets: targets.map((target) => ({
+      ...target,
+      id: `global:${target.key}`,
       scope: 'global',
       writable: true,
     })),
@@ -1678,10 +1674,10 @@ function globalInventory(
 
 export function scanGlobalInventory(
   home: Home,
-  runtimes: Runtime[] = loadRuntimes(home),
+  targets: SkillTarget[] = loadTargets(home),
   options: ScanOptions = {},
 ): InventoryScanReport {
-  return globalInventory(home, runtimes, options);
+  return globalInventory(home, targets, options);
 }
 
 function rootIdentity(root: string): string {
@@ -1692,21 +1688,21 @@ function rootIdentity(root: string): string {
   }
 }
 
-function projectRuntime(
-  runtime: Runtime,
+function projectTarget(
+  target: SkillTarget,
   directory: string,
   scope: 'project' | 'parent',
-): ScannedRuntime {
-  const runtimeKey = runtime.kind === 'shared' ? 'shared' : runtime.key;
+): ScannedTarget {
+  const targetKey = target.kind === 'shared' ? 'shared' : target.key;
   return {
-    ...runtime,
-    id: `${scope}:${directory}:${runtime.key}`,
+    ...target,
+    id: `${scope}:${directory}:${target.key}`,
     scope,
     writable: scope === 'project',
     sourceDirectory: directory,
-    discoveryRoot: path.join(directory, runtime.projectPath),
-    parkingRoot: path.join(directory, '.skillspub', 'off', runtimeKey),
-    lockFile: runtime.kind === 'shared'
+    discoveryRoot: path.join(directory, target.projectPath),
+    parkingRoot: path.join(directory, '.skillspub', 'off', targetKey),
+    lockFile: target.kind === 'shared'
       ? path.join(directory, 'skills-lock.json')
       : undefined,
   };
@@ -1714,10 +1710,10 @@ function projectRuntime(
 
 export function doctorGlobalInventory(
   home: Home,
-  runtimes: Runtime[] = loadRuntimes(home, { persist: false }),
+  targets: SkillTarget[] = loadTargets(home),
 ): DoctorReport {
   const stateFile = path.join(home.configDir, 'state.json');
-  const report = globalInventory(home, runtimes, { persist: false });
+  const report = globalInventory(home, targets, { persist: false });
   const state = readStateFile(stateFile);
   return doctorReport(report, state, state);
 }
@@ -1725,25 +1721,25 @@ export function doctorGlobalInventory(
 function projectInventory({
   home,
   selectedPath,
-  runtimes,
+  targets,
   options,
 }: {
   home: Home;
   selectedPath: string;
-  runtimes: Runtime[];
+  targets: SkillTarget[];
   options: ScanOptions;
 }): InventoryScanReport {
   const projectPath = fs.realpathSync(selectedPath);
   if (!fs.statSync(projectPath).isDirectory())
     throw new Error(`Project path is not a directory: ${selectedPath}`);
 
-  const scanned: ScannedRuntime[] = runtimes.map((runtime) =>
-    projectRuntime(runtime, projectPath, 'project'));
-  const globalRoots = new Set(runtimes.map((runtime) =>
-    rootIdentity(runtime.discoveryRoot)));
+  const scanned: ScannedTarget[] = targets.map((target) =>
+    projectTarget(target, projectPath, 'project'));
+  const globalRoots = new Set(targets.map((target) =>
+    rootIdentity(target.discoveryRoot)));
   for (let directory = path.dirname(projectPath);;) {
-    for (const runtime of runtimes) {
-      const inherited = projectRuntime(runtime, directory, 'parent');
+    for (const target of targets) {
+      const inherited = projectTarget(target, directory, 'parent');
       const exists = fs.existsSync(inherited.discoveryRoot) ||
         fs.existsSync(inherited.parkingRoot);
       if (exists && !globalRoots.has(rootIdentity(inherited.discoveryRoot)))
@@ -1753,9 +1749,9 @@ function projectInventory({
     if (parent === directory) break;
     directory = parent;
   }
-  scanned.push(...runtimes.map((runtime) => ({
-    ...runtime,
-    id: `global:${runtime.key}`,
+  scanned.push(...targets.map((target) => ({
+    ...target,
+    id: `global:${target.key}`,
     scope: 'global' as const,
     writable: false,
   })));
@@ -1764,7 +1760,7 @@ function projectInventory({
     scope: 'project',
     stateFile: path.join(projectPath, '.skillspub', 'state.json'),
     catalogStateFile: path.join(home.configDir, 'state.json'),
-    runtimes: scanned,
+    targets: scanned,
     options,
     projectPath,
   });
@@ -1773,21 +1769,21 @@ function projectInventory({
 export function scanProjectInventory(
   home: Home,
   selectedPath: string,
-  runtimes: Runtime[] = loadRuntimes(home),
+  targets: SkillTarget[] = loadTargets(home),
   options: ScanOptions = {},
 ): InventoryScanReport {
-  return projectInventory({ home, selectedPath, runtimes, options });
+  return projectInventory({ home, selectedPath, targets, options });
 }
 
 export function doctorProjectInventory(
   home: Home,
   selectedPath: string,
-  runtimes: Runtime[] = loadRuntimes(home, { persist: false }),
+  targets: SkillTarget[] = loadTargets(home),
 ): DoctorReport {
   const report = projectInventory({
     home,
     selectedPath,
-    runtimes,
+    targets,
     options: { persist: false },
   });
   return doctorReport(

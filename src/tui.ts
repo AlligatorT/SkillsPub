@@ -13,7 +13,7 @@ import {
   sortRows,
   projectTuiSnapshot,
   tuiSnapshot,
-  type Agent,
+  type Target,
   type Row,
   type SkillInfo,
   type SortOrder,
@@ -44,7 +44,7 @@ import {
 /** Below this width the passive summary column is hidden. */
 const WIDE_MIN = 80;
 
-type Tab = 'agent' | 'skill';
+type Tab = 'target' | 'skill';
 
 interface RelEntry {
   row: Row;
@@ -61,7 +61,7 @@ interface ManageState {
 
 interface BatchConfirm {
   intent: 'on' | 'off';
-  runtimeName: string;
+  targetName: string;
   plans: ActivationPlan[];
   errors: string[];
 }
@@ -69,19 +69,19 @@ interface BatchConfirm {
 interface Confirmation {
   kind: 'link' | 'unlink';
   row: Row;
-  agent: Agent;
+  target: Target;
   info?: SkillInfo;
-  runtimeId: string;
+  targetId: string;
   slot: string;
   source: string;
-  target: string;
+  destination: string;
 }
 
-/** Existing relationships of one agent, in inventory order (absent skills excluded). */
-function entriesFor(rows: Row[], agentName: string): RelEntry[] {
+/** Existing relationships of one target, in inventory order (absent skills excluded). */
+function entriesFor(rows: Row[], targetName: string): RelEntry[] {
   return rows.flatMap((row) =>
     row.relationships
-      .filter((relationship) => relationship.agent === agentName)
+      .filter((relationship) => relationship.target === targetName)
       .map((relationship) => ({
         row,
         relationship,
@@ -182,28 +182,28 @@ function RowLine({
   );
 }
 
-function AgentList({
-  agents,
+function TargetList({
+  targets,
   selected,
   focused,
   width,
   height,
 }: {
-  agents: TuiSnapshot['agents'];
+  targets: TuiSnapshot['targets'];
   selected: number;
   focused: boolean;
   width: number;
   height: number;
 }): ReactNode {
-  const start = windowStart(agents.length, selected, height);
+  const start = windowStart(targets.length, selected, height);
   return h(
     ListColumn,
-    {title: 'Agents', focused, width},
-    ...agents.slice(start, start + height).map((agent, index) =>
+    {title: 'Targets', focused, width},
+    ...targets.slice(start, start + height).map((target, index) =>
       h(
         RowLine,
-        {key: agent.name, active: start + index === selected, focused},
-        agent.name,
+        {key: target.name, active: start + index === selected, focused},
+        target.name,
       ),
     ),
   );
@@ -248,7 +248,7 @@ function RelationshipList({
       );
     }),
     entries.length === 0
-      ? h(Text, {dimColor: true}, '  no skills for this agent')
+      ? h(Text, {dimColor: true}, '  no skills for this target')
       : null,
   );
 }
@@ -292,32 +292,32 @@ function InstanceList({
   );
 }
 
-/** Skill tab: every agent in registry order with its state for the selected instance. */
-function AgentStatusList({
-  agents,
+/** Skill tab: every target in registry order with its state for the selected instance. */
+function TargetStatusList({
+  targets,
   row,
   selected,
   focused,
   width,
   height,
 }: {
-  agents: TuiSnapshot['agents'];
+  targets: TuiSnapshot['targets'];
   row?: Row;
   selected: number;
   focused: boolean;
   width: number;
   height: number;
 }): ReactNode {
-  const start = windowStart(agents.length, selected, height);
+  const start = windowStart(targets.length, selected, height);
   return h(
     ListColumn,
-    {title: 'Agents', focused, width},
-    ...agents.slice(start, start + height).map((agent, index) => {
-      const info = row?.agents[agent.name];
+    {title: 'Targets', focused, width},
+    ...targets.slice(start, start + height).map((target, index) => {
+      const info = row?.targets[target.name];
       return h(
         RowLine,
-        {key: agent.name, active: start + index === selected, focused},
-        `${agent.name}  `,
+        {key: target.name, active: start + index === selected, focused},
+        `${target.name}  `,
         info
           ? h(Text, {color: statusColor(info)}, statusText(info))
           : h(Text, {dimColor: true}, 'missing'),
@@ -403,11 +403,11 @@ function InfoPanel({
 function BatchActivationModal({confirm}: {confirm: BatchConfirm}): ReactNode {
   const lines = confirm.plans.flatMap((plan) =>
     plan.targets.map((target) =>
-      `  ${target.runtimeId}/${target.slot}  ${target.from} -> ${target.to}`));
+      `  ${target.targetId}/${target.slot}  ${target.from} -> ${target.to}`));
   return h(
     Box,
     {flexGrow: 1, flexDirection: 'column', borderStyle: 'round', borderColor: 'yellow', paddingX: 1, justifyContent: 'center'},
-    h(Text, {bold: true}, `Batch ${confirm.intent} @ ${confirm.runtimeName}?`),
+    h(Text, {bold: true}, `Batch ${confirm.intent} @ ${confirm.targetName}?`),
     ...confirm.errors.map((error, index) => h(Text, {key: `err-${index}`, color: 'red'}, `  ${error}`)),
     ...lines.slice(0, 12).map((line, index) => h(Text, {key: `line-${index}`}, line)),
     lines.length > 12 ? h(Text, {dimColor: true}, `  … ${lines.length - 12} more`) : null,
@@ -479,7 +479,7 @@ function ConfirmationModal({
       justifyContent: 'center',
     },
     h(Text, {bold: true}, `${confirmation.kind === 'link' ? 'Link' : 'Unlink'} relationship?`),
-    h(Text, {wrap: 'wrap'}, ` ${confirmation.source} → ${confirmation.target}`),
+    h(Text, {wrap: 'wrap'}, ` ${confirmation.source} → ${confirmation.destination}`),
     h(Text, {color: 'yellow'}, ' y confirm  n/esc cancel '),
   );
 }
@@ -549,13 +549,13 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     if (projectPath) scanProjectInventory(home, projectPath);
     else scanGlobalInventory(home);
   };
-  const [tab, setTab] = useState<Tab>('agent');
+  const [tab, setTab] = useState<Tab>('target');
   const [focusColumn, setFocusColumn] = useState<0 | 1>(0);
-  const [agentIndex, setAgentIndex] = useState(0);
+  const [targetIndex, setTargetIndex] = useState(0);
   const [relationshipKey, setRelationshipKey] = useState<string>();
   // Skill-tab selection is tracked by instance id so tab switches keep identity.
   const [instanceId, setInstanceId] = useState<string>();
-  const [instanceAgentIndex, setInstanceAgentIndex] = useState(0);
+  const [instanceTargetIndex, setInstanceTargetIndex] = useState(0);
   const [query, setQuery] = useState('');
   const [searching, setSearching] = useState(false);
   const [sort, setSort] = useState<SortOrder>('name');
@@ -567,21 +567,21 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   const [batchTag, setBatchTag] = useState<{ action: 'add' | 'rm'; value: string } | null>(null);
   const [feedback, setFeedback] = useState('');
 
-  const agents = snapshot.agents;
-  const agent = agents[Math.min(agentIndex, Math.max(0, agents.length - 1))];
-  const instAgent = Math.min(instanceAgentIndex, Math.max(0, agents.length - 1));
-  const instanceAgent = agents[instAgent];
+  const targets = snapshot.targets;
+  const target = targets[Math.min(targetIndex, Math.max(0, targets.length - 1))];
+  const instTarget = Math.min(instanceTargetIndex, Math.max(0, targets.length - 1));
+  const instanceTarget = targets[instTarget];
   const rows = useMemo(
     () => sortRows(
       searchRows(snapshot.rows, query),
       sort,
-      (row) => statusSortValue(row.agents[(tab === 'agent' ? agent : instanceAgent)?.name ?? '']),
+      (row) => statusSortValue(row.targets[(tab === 'target' ? target : instanceTarget)?.name ?? '']),
     ),
-    [snapshot.rows, query, sort, tab, agent, instanceAgent],
+    [snapshot.rows, query, sort, tab, target, instanceTarget],
   );
   const entries = useMemo(
-    () => (agent ? entriesFor(rows, agent.name) : []),
-    [rows, agent],
+    () => (target ? entriesFor(rows, target.name) : []),
+    [rows, target],
   );
   const relationshipFound = entries.findIndex((entry) => entry.key === relationshipKey);
   const relationshipIndex = relationshipFound === -1 ? 0 : relationshipFound;
@@ -601,19 +601,19 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     : undefined;
   const bodyHeight = Math.max(3, height - 2);
   const listHeight = Math.max(1, bodyHeight - 3);
-  const agentWidth = Math.max(
+  const targetWidth = Math.max(
     18,
-    Math.min(32, Math.max(0, ...agents.map((a) => a.name.length)) + 6),
+    Math.min(32, Math.max(0, ...targets.map((a) => a.name.length)) + 6),
   );
-  const agentStatusWidth = Math.max(
+  const targetStatusWidth = Math.max(
     28,
-    Math.min(40, Math.max(0, ...agents.map((agent) => agent.name.length)) + 24),
+    Math.min(40, Math.max(0, ...targets.map((target) => target.name.length)) + 24),
   );
   // Info is capped (its text wraps); name lists flex with what remains (long names win).
   const infoWidth = wide ? Math.max(28, Math.min(48, Math.floor(width * 0.28))) : 0;
   const instanceWidth = Math.max(
     10,
-    width - agentStatusWidth - infoWidth,
+    width - targetStatusWidth - infoWidth,
   );
   const modalContent = modal
     ? (skillDetail(home, modal.row.id, projectPath)?.content ?? 'SKILL.md unavailable')
@@ -621,17 +621,17 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   const modalLines = modal ? detailLines(modalContent, Math.max(1, width - 8)) : [];
   const modalPage = Math.max(1, height - 6);
 
-  const selectedRow = tab === 'agent' ? entry?.row : instance;
-  const selectedAgent = tab === 'agent' ? agent : agents[instAgent];
-  const selectedInfo = tab === 'agent'
+  const selectedRow = tab === 'target' ? entry?.row : instance;
+  const selectedTarget = tab === 'target' ? target : targets[instTarget];
+  const selectedInfo = tab === 'target'
     ? entry?.relationship.info
-    : selectedRow?.agents[selectedAgent?.name ?? ''];
-  const selectedRel = tab === 'agent'
+    : selectedRow?.targets[selectedTarget?.name ?? ''];
+  const selectedRel = tab === 'target'
     ? entry?.relationship
     : selectedRow?.relationships.find((relationship) =>
-        relationship.agent === selectedAgent?.name &&
+        relationship.target === selectedTarget?.name &&
         relationship.info.path === selectedInfo?.path);
-  const actionable = focusColumn === 1 && selectedRow && selectedAgent;
+  const actionable = focusColumn === 1 && selectedRow && selectedTarget;
   const manageRow = manage ? rows.find((candidate) => candidate.id === manage.rowId) : undefined;
   const membership = useMemo((): Membership | undefined => {
     if (!selectedRow) return undefined;
@@ -654,23 +654,23 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     };
   }, [selectedRow, snapshot.catalog, rows]);
   /** Re-read disk, then re-anchor selection: mutation moves entries, so locate
-   *  the fresh row/relationship by (runtimeId, slot) or stable row id. */
-  const refresh = (keep?: { rowId?: string; runtimeId?: string; slot?: string; agent?: string }) => {
+   *  the fresh row/relationship by (targetId, slot) or stable row id. */
+  const refresh = (keep?: { rowId?: string; targetId?: string; slot?: string; target?: string }) => {
     const next = takeSnapshot();
     setSnapshot(next);
     if (!keep) return;
-    const row = keep.runtimeId !== undefined
+    const row = keep.targetId !== undefined
       ? next.rows.find((candidate) => candidate.relationships.some((rel) =>
-          rel.runtimeId === keep.runtimeId && rel.slot === keep.slot))
+          rel.targetId === keep.targetId && rel.slot === keep.slot))
       : keep.rowId !== undefined
         ? next.rows.find((candidate) => candidate.id === keep.rowId)
         : undefined;
     if (row) setInstanceId(row.id);
-    const rel = keep.runtimeId !== undefined
+    const rel = keep.targetId !== undefined
       ? row?.relationships.find((candidate) =>
-          candidate.runtimeId === keep.runtimeId && candidate.slot === keep.slot)
-      : keep.agent
-        ? row?.relationships.find((candidate) => candidate.agent === keep.agent)
+          candidate.targetId === keep.targetId && candidate.slot === keep.slot)
+      : keep.target
+        ? row?.relationships.find((candidate) => candidate.target === keep.target)
         : undefined;
     if (rel) setRelationshipKey(rel.info.path);
   };
@@ -801,10 +801,10 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         }
         refresh({
           rowId: selectedRow?.id,
-          agent: selectedAgent?.name,
+          target: selectedTarget?.name,
         });
         setFeedback(
-          `Batch ${batchConfirm.intent} @ ${batchConfirm.runtimeName}: ${applied} applied` +
+          `Batch ${batchConfirm.intent} @ ${batchConfirm.targetName}: ${applied} applied` +
           (failures.length > 0 ? `, ${failures.length} failed` : ''),
         );
         return setBatchConfirm(null);
@@ -852,18 +852,18 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     }
     if (confirmation) {
       if (input === 'y') {
-        const neighbor = tab === 'agent'
+        const neighbor = tab === 'target'
           ? entries[relationshipIndex + 1] ?? entries[relationshipIndex - 1]
           : undefined;
         try {
           if (confirmation.kind === 'link') {
-            applyActivationPlan(home, planLink(home, confirmation.row.id, confirmation.agent.name, planScope));
+            applyActivationPlan(home, planLink(home, confirmation.row.id, confirmation.target.name, planScope));
           } else {
-            applyActivationPlan(home, planUnlink(home, confirmation.runtimeId, confirmation.slot, planScope));
+            applyActivationPlan(home, planUnlink(home, confirmation.targetId, confirmation.slot, planScope));
           }
           refresh({rowId: confirmation.row.id});
           if (neighbor) setRelationshipKey(neighbor.key);
-          setFeedback(`${confirmation.kind === 'link' ? 'Linked' : 'Unlinked'} ${confirmation.row.name} @ ${confirmation.agent.name}`);
+          setFeedback(`${confirmation.kind === 'link' ? 'Linked' : 'Unlinked'} ${confirmation.row.name} @ ${confirmation.target.name}`);
         } catch (err) {
           setFeedback((err as Error).message);
         }
@@ -876,7 +876,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       if (input === 'v' || key.escape) return setBatch(null);
       if (key.tab) {
         setBatch({marks: new Set()});
-        return setTab((value) => (value === 'agent' ? 'skill' : 'agent'));
+        return setTab((value) => (value === 'target' ? 'skill' : 'target'));
       }
       if (input === ' ' && selectedRow?.realPath) {
         const marks = new Set(batch.marks);
@@ -888,26 +888,26 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       if (input === ' ') return setFeedback('cannot mark a broken relationship');
       if (input === 'o' || input === 'O') {
         const intent = input === 'o' ? 'on' : 'off';
-        const runtime = selectedAgent;
+        const target = selectedTarget;
         const markedRows = rows.filter(
           (row) => row.realPath && batch.marks.has(markKey(home.configDir, row.realPath)));
-        if (!runtime || markedRows.length === 0)
+        if (!target || markedRows.length === 0)
           return setFeedback('Batch: mark at least one skill with a directory');
         const plans: ActivationPlan[] = [];
         const errors: string[] = [];
         for (const row of markedRows) {
-          if (intent === 'on' && inheritedOn(row.agents[runtime.name])) continue;
-          if (intent === 'off' && (!row.agents[runtime.name] || inheritedOn(row.agents[runtime.name])))
+          if (intent === 'on' && inheritedOn(row.targets[target.name])) continue;
+          if (intent === 'off' && (!row.targets[target.name] || inheritedOn(row.targets[target.name])))
             continue;
           try {
-            plans.push(planActivation(home, `skill:${row.id}`, [runtime.name], intent, planScope));
+            plans.push(planActivation(home, `skill:${row.id}`, [target.name], intent, planScope));
           } catch (err) {
             errors.push(`${row.name}: ${(err as Error).message}`);
           }
         }
         if (plans.length === 0 && errors.length === 0)
           return setFeedback(`Batch ${intent}: skipped already-effective entries`);
-        return setBatchConfirm({intent, runtimeName: runtime.name, plans, errors});
+        return setBatchConfirm({intent, targetName: target.name, plans, errors});
       }
       if (input === 't' || input === 'T')
         return setBatchTag({action: input === 't' ? 'add' : 'rm', value: ''});
@@ -922,21 +922,21 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     if (input === 's')
       return setSort((value) => value === 'name' ? 'status' : value === 'status' ? 'source' : 'name');
     if (input === 'R') {
-      const currentAgent = agent?.name;
-      const currentInstanceAgent = instanceAgent?.name;
+      const currentTarget = target?.name;
+      const currentInstanceTarget = instanceTarget?.name;
       const next = takeSnapshot();
       setSnapshot(next);
-      setAgentIndex(Math.max(0, next.agents.findIndex(({name}) => name === currentAgent)));
-      setInstanceAgentIndex(Math.max(0, next.agents.findIndex(({name}) => name === currentInstanceAgent)));
+      setTargetIndex(Math.max(0, next.targets.findIndex(({name}) => name === currentTarget)));
+      setInstanceTargetIndex(Math.max(0, next.targets.findIndex(({name}) => name === currentInstanceTarget)));
       return;
     }
-    if (key.tab) return setTab((value) => (value === 'agent' ? 'skill' : 'agent'));
+    if (key.tab) return setTab((value) => (value === 'target' ? 'skill' : 'target'));
     if (key.rightArrow || input === 'l') return setFocusColumn(1);
     if (key.leftArrow || input === 'h') return setFocusColumn(0);
     if (key.downArrow || input === 'j') {
-      if (tab === 'agent') {
+      if (tab === 'target') {
         if (focusColumn === 0)
-          setAgentIndex((value) => Math.min(Math.max(0, agents.length - 1), value + 1));
+          setTargetIndex((value) => Math.min(Math.max(0, targets.length - 1), value + 1));
         else {
           const next = entries[Math.min(entries.length - 1, relationshipIndex + 1)];
           if (next) setRelationshipKey(next.key);
@@ -945,13 +945,13 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         const next = rows[Math.min(rows.length - 1, instanceIndex + 1)];
         if (next) setInstanceId(next.id);
       } else {
-        setInstanceAgentIndex((value) => Math.min(Math.max(0, agents.length - 1), value + 1));
+        setInstanceTargetIndex((value) => Math.min(Math.max(0, targets.length - 1), value + 1));
       }
       return;
     }
     if (key.upArrow || input === 'k') {
-      if (tab === 'agent') {
-        if (focusColumn === 0) setAgentIndex((value) => Math.max(0, value - 1));
+      if (tab === 'target') {
+        if (focusColumn === 0) setTargetIndex((value) => Math.max(0, value - 1));
         else {
           const next = entries[Math.max(0, relationshipIndex - 1)];
           if (next) setRelationshipKey(next.key);
@@ -960,7 +960,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         const next = rows[Math.max(0, instanceIndex - 1)];
         if (next) setInstanceId(next.id);
       } else {
-        setInstanceAgentIndex((value) => Math.max(0, value - 1));
+        setInstanceTargetIndex((value) => Math.max(0, value - 1));
       }
       return;
     }
@@ -974,13 +974,13 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         return setFeedback('cannot enable a broken relationship');
       try {
         if (selectedInfo && !selectedInfo.readOnly && selectedRel) {
-          applyActivationPlan(home, planToggle(home, selectedRel.runtimeId, selectedRel.slot, planScope));
-          refresh({runtimeId: selectedRel.runtimeId, slot: selectedRel.slot, rowId: selectedRow.id});
-          setFeedback(`${selectedRow.name} @ ${selectedAgent.name}: ${selectedInfo.underOff ? 'on' : 'off'}`);
+          applyActivationPlan(home, planToggle(home, selectedRel.targetId, selectedRel.slot, planScope));
+          refresh({targetId: selectedRel.targetId, slot: selectedRel.slot, rowId: selectedRow.id});
+          setFeedback(`${selectedRow.name} @ ${selectedTarget.name}: ${selectedInfo.underOff ? 'on' : 'off'}`);
         } else if (canEnable) {
-          applyActivationPlan(home, planActivation(home, `skill:${selectedRow.id}`, [selectedAgent.name], 'on', planScope));
-          refresh({rowId: selectedRow.id, agent: selectedAgent.name});
-          setFeedback(`${selectedRow.name} @ ${selectedAgent.name}: on`);
+          applyActivationPlan(home, planActivation(home, `skill:${selectedRow.id}`, [selectedTarget.name], 'on', planScope));
+          refresh({rowId: selectedRow.id, target: selectedTarget.name});
+          setFeedback(`${selectedRow.name} @ ${selectedTarget.name}: on`);
         }
       } catch (err) {
         setFeedback((err as Error).message);
@@ -992,11 +992,11 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       return setConfirmation({
         kind: 'link',
         row: selectedRow,
-        agent: selectedAgent,
-        runtimeId: '',
+        target: selectedTarget,
+        targetId: '',
         slot: '',
         source: selectedRow.realPath,
-        target: path.join(selectedAgent.dir, selectedRow.name),
+        destination: path.join(selectedTarget.dir, selectedRow.name),
       });
     }
     if (input === 'u' && actionable && selectedInfo?.linked && selectedRel) {
@@ -1005,28 +1005,28 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       return setConfirmation({
         kind: 'unlink',
         row: selectedRow,
-        agent: selectedAgent,
+        target: selectedTarget,
         info: selectedInfo,
-        runtimeId: selectedRel.runtimeId,
+        targetId: selectedRel.targetId,
         slot: selectedRel.slot,
         source: selectedInfo.path,
-        target: selectedInfo.target ?? '?',
+        destination: selectedInfo.target ?? '?',
       });
     }
     if (key.return) {
-      const row = tab === 'agent' ? entry?.row : instance;
+      const row = tab === 'target' ? entry?.row : instance;
       if (row) setModal({row, scroll: 0});
     }
   });
 
   const columnName =
-    tab === 'agent'
+    tab === 'target'
       ? focusColumn === 0
-        ? 'agents'
+        ? 'targets'
         : 'relationships'
       : focusColumn === 0
         ? 'skills'
-        : 'agents';
+        : 'targets';
   const actionHint = actionable
     ? inheritedOn(selectedInfo)
       ? ''
@@ -1043,7 +1043,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     h(
       Text,
       null,
-      h(Text, {inverse: tab === 'agent'}, ' Agent '),
+      h(Text, {inverse: tab === 'target'}, ' Target '),
       ' ',
       h(Text, {inverse: tab === 'skill'}, ' Skill '),
       snapshot.project ? h(Text, {color: 'cyan'}, `  Project: ${snapshot.project}`) : null,
@@ -1078,15 +1078,15 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
             {height: bodyHeight, paddingLeft: 2, paddingRight: 2, paddingTop: 1},
             h(ConfirmationModal, {confirmation}),
           )
-      : tab === 'agent'
+      : tab === 'target'
         ? h(
             Box,
             {height: bodyHeight},
-            h(AgentList, {
-              agents,
-              selected: agentIndex,
+            h(TargetList, {
+              targets,
+              selected: targetIndex,
               focused: focusColumn === 0,
-              width: agentWidth,
+              width: targetWidth,
               height: listHeight,
             }),
             h(RelationshipList, {
@@ -1120,17 +1120,17 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
             wide
               ? h(InfoPanel, {
                   row: instance,
-                  info: instance?.agents[agents[instAgent]?.name ?? ''],
+                  info: instance?.targets[targets[instTarget]?.name ?? ''],
                   membership,
                   width: infoWidth,
                 })
               : null,
-            h(AgentStatusList, {
-              agents,
+            h(TargetStatusList, {
+              targets,
               row: instance,
-              selected: instAgent,
+              selected: instTarget,
               focused: focusColumn === 1,
-              width: agentStatusWidth,
+              width: targetStatusWidth,
               height: listHeight,
             }),
           ),

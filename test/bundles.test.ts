@@ -16,7 +16,7 @@ import {
   planActivation,
   remainingDrift,
 } from '../src/reconcile.ts';
-import { scanGlobalInventory, type Runtime } from '../src/inventory.ts';
+import { scanGlobalInventory, type SkillTarget } from '../src/inventory.ts';
 
 function setup() {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-bundles-'));
@@ -26,7 +26,7 @@ function setup() {
     fs.mkdirSync(path.join(discoveryRoot, name), { recursive: true });
     fs.writeFileSync(path.join(discoveryRoot, name, 'SKILL.md'), `# ${name}`);
   }
-  const runtime: Runtime = {
+  const runtime: SkillTarget = {
     key: 'shared',
     kind: 'shared',
     discoveryRoot,
@@ -119,7 +119,7 @@ test('moving a local resource retargets dependent Links and can link a missing S
   fs.writeFileSync(path.join(source, 'SKILL.md'), '# example');
   fs.mkdirSync(consumerRoot, { recursive: true });
   fs.symlinkSync(source, path.join(consumerRoot, 'example'), 'dir');
-  const runtimes: Runtime[] = [
+  const runtimes: SkillTarget[] = [
     {
       key: 'source', kind: 'shared', discoveryRoot: sourceRoot,
       parkingRoot: sourceParking, projectPath: '.agents/source/skills',
@@ -181,7 +181,7 @@ test('moving a relative Link preserves its target across differently nested root
   fs.writeFileSync(path.join(source, 'SKILL.md'), '# example');
   fs.mkdirSync(discoveryRoot, { recursive: true });
   fs.symlinkSync(path.relative(discoveryRoot, source), path.join(discoveryRoot, 'example'), 'dir');
-  const runtime: Runtime = {
+  const runtime: SkillTarget = {
     key: 'shared', kind: 'shared', discoveryRoot, parkingRoot,
     projectPath: '.agents/skills',
   };
@@ -199,7 +199,7 @@ test('moving a relative Link preserves its target across differently nested root
   assert.equal(fs.realpathSync(parked), fs.realpathSync(source));
 });
 
-test('activation targets the selected Runtime existing alias Slot', () => {
+test('activation targets the selected Target existing alias Slot', () => {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-alias-slot-'));
   const sourceRoot = path.join(configDir, 'source', 'skills');
   const aliasRoot = path.join(configDir, 'alias', 'skills');
@@ -208,7 +208,7 @@ test('activation targets the selected Runtime existing alias Slot', () => {
   fs.writeFileSync(path.join(source, 'SKILL.md'), '# canonical');
   fs.mkdirSync(aliasRoot, { recursive: true });
   fs.symlinkSync(source, path.join(aliasRoot, 'alias'), 'dir');
-  const runtimes: Runtime[] = [
+  const runtimes: SkillTarget[] = [
     {
       key: 'source', kind: 'shared', discoveryRoot: sourceRoot,
       parkingRoot: path.join(configDir, 'source', 'off'), projectPath: '.agents/source',
@@ -239,7 +239,7 @@ test('remaining drift rejects the wrong Variant in the requested Slot', () => {
   const desired = path.join(sourceRoot, 'example');
   fs.mkdirSync(desired, { recursive: true });
   fs.writeFileSync(path.join(desired, 'SKILL.md'), '# desired');
-  const runtimes: Runtime[] = [
+  const runtimes: SkillTarget[] = [
     {
       key: 'source', kind: 'shared', discoveryRoot: sourceRoot,
       parkingRoot: path.join(configDir, 'source', 'off'), projectPath: '.agents/source',

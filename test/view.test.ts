@@ -6,15 +6,15 @@ import {
   searchRows,
   sortRows,
   untagged,
-  viewAgents,
+  viewTargets,
 } from '../src/view.ts';
 import type {
   InventoryScanReport,
-  RuntimeRelationship,
-  ScannedRuntime,
+  TargetRelationship,
+  ScannedTarget,
 } from '../src/inventory.ts';
 
-function runtime(key: string, kind: 'agent' | 'shared' = 'agent'): ScannedRuntime {
+function runtime(key: string, kind: 'harness' | 'shared' = 'harness'): ScannedTarget {
   return {
     key,
     kind,
@@ -27,11 +27,11 @@ function runtime(key: string, kind: 'agent' | 'shared' = 'agent'): ScannedRuntim
   };
 }
 
-function relationship(overrides: Partial<RuntimeRelationship>): RuntimeRelationship {
-  const runtimeId = overrides.runtimeId ?? 'global:claude';
+function relationship(overrides: Partial<TargetRelationship>): TargetRelationship {
+  const targetId = overrides.targetId ?? 'global:claude';
   return {
-    runtimeId,
-    runtimeKey: runtimeId.replace('global:', ''),
+    targetId,
+    targetKey: targetId.replace('global:', ''),
     slot: 'grilling',
     name: 'grilling',
     activation: 'on',
@@ -46,8 +46,8 @@ function relationship(overrides: Partial<RuntimeRelationship>): RuntimeRelations
 
 function report(pieces: {
   scope?: InventoryScanReport['scope'];
-  runtimes?: ScannedRuntime[];
-  relationships?: RuntimeRelationship[];
+  targets?: ScannedTarget[];
+  relationships?: TargetRelationship[];
   slots?: InventoryScanReport['slots'];
 }): InventoryScanReport {
   const relationships = pieces.relationships ?? [];
@@ -65,7 +65,7 @@ function report(pieces: {
   ).values()];
   return {
     scope: pieces.scope ?? 'global',
-    runtimes: pieces.runtimes ?? [runtime('claude'), runtime('pi')],
+    targets: pieces.targets ?? [runtime('claude'), runtime('pi')],
     resources,
     slots: pieces.slots ?? [],
     relationships,
@@ -80,8 +80,8 @@ test('projection maps Relationship activation and form to matrix presence', () =
     relationships: [
       relationship({}),
       relationship({
-        runtimeId: 'global:pi',
-        runtimeKey: 'pi',
+        targetId: 'global:pi',
+        targetKey: 'pi',
         activation: 'off',
         form: 'link',
         path: '/roots/pi/.skillspub-off/skills/grilling',
@@ -102,25 +102,25 @@ test('projection maps Relationship activation and form to matrix presence', () =
   const grilling = rows.find((row) => row.name === 'grilling');
   assert.ok(grilling);
   assert.deepEqual(
-    { on: grilling.agents.claude?.presence, off: grilling.agents.pi?.presence },
+    { on: grilling.targets.claude?.presence, off: grilling.targets.pi?.presence },
     { on: 'on', off: 'off' },
   );
-  assert.equal(grilling.agents.pi?.linked, true);
-  assert.equal(grilling.agents.pi?.underOff, true);
+  assert.equal(grilling.targets.pi?.linked, true);
+  assert.equal(grilling.targets.pi?.underOff, true);
   assert.equal(grilling.relationships.length, 2);
-  assert.equal(grilling.relationships[1].runtimeId, 'global:pi');
+  assert.equal(grilling.relationships[1].targetId, 'global:pi');
   assert.equal(grilling.relationships[1].slot, 'grilling');
 
   const broken = rows.find((row) => row.name === 'broken');
   assert.ok(broken);
   assert.equal(broken.id, 'broken:/roots/claude/skills/broken');
-  assert.equal(broken.agents.claude?.presence, 'deadlink');
-  assert.equal(broken.agents.pi, undefined);
+  assert.equal(broken.targets.claude?.presence, 'deadlink');
+  assert.equal(broken.targets.pi, undefined);
 });
 
 test('agents map prefers the ON occupant of a conflicted slot', () => {
   const rows = projectRows(report({
-    runtimes: [runtime('claude')],
+    targets: [runtime('claude')],
     relationships: [
       relationship({}),
       relationship({
@@ -130,7 +130,7 @@ test('agents map prefers the ON occupant of a conflicted slot', () => {
     ],
   }));
   assert.equal(rows.length, 1);
-  assert.equal(rows[0].agents.claude?.presence, 'on');
+  assert.equal(rows[0].targets.claude?.presence, 'on');
   assert.equal(rows[0].relationships.length, 2);
 });
 
@@ -139,8 +139,8 @@ test('same-name variants are disambiguated with a source suffix', () => {
     relationships: [
       relationship({}),
       relationship({
-        runtimeId: 'global:pi',
-        runtimeKey: 'pi',
+        targetId: 'global:pi',
+        targetKey: 'pi',
         realPath: '/other/grilling',
         resourceId: '/other/grilling',
         path: '/roots/pi/skills/grilling',
@@ -158,8 +158,8 @@ test('slot provenance flows into the projected row', () => {
     relationships: [relationship({})],
     slots: [{
       id: 'global:claude\0grilling',
-      runtimeId: 'global:claude',
-      runtimeKey: 'claude',
+      targetId: 'global:claude',
+      targetKey: 'claude',
       name: 'grilling',
       relationships: [],
       provenance: { source: 'acme/tools', sourceUrl: 'https://skills.sh/acme/tools/grilling' },
@@ -171,9 +171,9 @@ test('slot provenance flows into the projected row', () => {
   assert.equal(rows[0].provenance.skillPath, undefined);
 });
 
-test('view agents come from the runtime registry, keyed by runtime key', () => {
-  const agents = viewAgents(report({ runtimes: [runtime('claude'), runtime('shared', 'shared')] }));
-  assert.deepEqual(agents, [
+test('view targets come from the runtime registry, keyed by runtime key', () => {
+  const targets = viewTargets(report({ targets: [runtime('claude'), runtime('shared', 'shared')] }));
+  assert.deepEqual(targets, [
     { name: 'claude', dir: '/roots/claude/skills' },
     { name: 'shared', dir: '/roots/shared/skills' },
   ]);
@@ -194,7 +194,7 @@ test('search/sort/filter/untagged operate on projected rows', () => {
   }));
   assert.deepEqual(searchRows(rows, 'ZEB').map((row) => row.name), ['zebra']);
   assert.deepEqual(sortRows(rows, 'name').map((row) => row.name), ['grilling', 'zebra']);
-  assert.deepEqual(filterRows(rows, { agent: 'pi' }, {}), []);
+  assert.deepEqual(filterRows(rows, { target: 'pi' }, {}), []);
   assert.deepEqual(filterRows(rows, { tag: 'tools' }, { '/src/zebra': ['tools'] })
     .map((row) => row.name), ['zebra']);
   assert.deepEqual(untagged(rows, { '/src/zebra': ['tools'] }), ['grilling']);
@@ -214,11 +214,11 @@ test('projectRows propagates runtime scope and read-only flags', () => {
     writable: false,
   };
   const rows = projectRows(report({
-    runtimes: [project, global],
-    relationships: [relationship({ runtimeId: 'global:claude', runtimeKey: 'claude' })],
+    targets: [project, global],
+    relationships: [relationship({ targetId: 'global:claude', targetKey: 'claude' })],
   }));
-  assert.equal(rows[0].agents.claude?.scope, 'global');
-  assert.equal(rows[0].agents.claude?.readOnly, true);
+  assert.equal(rows[0].targets.claude?.scope, 'global');
+  assert.equal(rows[0].targets.claude?.readOnly, true);
   assert.equal(rows[0].relationships[0].scope, 'global');
   assert.equal(rows[0].relationships[0].readOnly, true);
 });
@@ -244,24 +244,24 @@ test('project scope keeps one effective cell per Skill and Target', () => {
   };
   const rows = projectRows(report({
     scope: 'project',
-    runtimes: [project, parent, global],
+    targets: [project, parent, global],
     relationships: [
       relationship({
-        runtimeId: 'project:/p:claude',
-        runtimeKey: 'claude',
+        targetId: 'project:/p:claude',
+        targetKey: 'claude',
         activation: 'off',
         path: '/p/.skillspub/off/claude/grilling',
         readOnly: false,
       }),
       relationship({
-        runtimeId: 'parent:/parent:claude',
-        runtimeKey: 'claude',
+        targetId: 'parent:/parent:claude',
+        targetKey: 'claude',
         path: '/parent/.claude/skills/grilling',
         readOnly: true,
       }),
       relationship({
-        runtimeId: 'global:claude',
-        runtimeKey: 'claude',
+        targetId: 'global:claude',
+        targetKey: 'claude',
         path: '/roots/claude/skills/grilling',
         readOnly: true,
       }),
@@ -269,9 +269,9 @@ test('project scope keeps one effective cell per Skill and Target', () => {
   }));
   assert.equal(rows.length, 1);
   assert.equal(rows[0].relationships.length, 1);
-  assert.equal(rows[0].agents.claude?.scope, 'parent');
-  assert.equal(rows[0].agents.claude?.presence, 'on');
-  assert.equal(rows[0].agents.claude?.readOnly, true);
+  assert.equal(rows[0].targets.claude?.scope, 'parent');
+  assert.equal(rows[0].targets.claude?.presence, 'on');
+  assert.equal(rows[0].targets.claude?.readOnly, true);
   assert.equal(rows[0].relationships[0].scope, 'parent');
   assert.equal(rows[0].relationships[0].readOnly, true);
 });
