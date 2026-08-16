@@ -205,7 +205,7 @@ function TargetList({
     ...(harnesses.detected.length === 0
       ? [h(Text, {key: 'none', dimColor: true}, '   none')]
       : harnesses.detected.map((harness) =>
-        h(Text, {key: harness.key}, `   ${harness.name} [${harness.support}] Shared ${harness.sharedConsumption.status}`))),
+        h(Text, {key: harness.key}, `   ${harness.name} [${harness.support}] Shared ${harness.sharedConsumption.status} Isolation ${harness.isolation.status}`))),
     ...(harnesses.setup.length === 0
       ? []
       : [

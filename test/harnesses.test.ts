@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { inspectHarnesses } from '../src/harnesses/registry.ts';
+import { piAdapter } from '../src/harnesses/pi.ts';
 import type { Home } from '../src/core.ts';
 import type { SkillTarget } from '../src/inventory.ts';
 
@@ -42,7 +43,7 @@ test('Harness registry keeps an undetected Pi in setup and does not write state'
 
   assert.deepEqual(report.detected, []);
   assert.equal(report.setup[0]?.key, 'pi');
-  assert.equal(report.setup[0]?.support, 'discoverable');
+  assert.equal(report.setup[0]?.support, 'managed');
   assert.equal(report.setup[0]?.sharedConsumption.status, 'enabled');
   assert.equal(report.setup[0]?.link.supported, true);
   assert.equal(report.setup[0]?.targets[0]?.discoveryRoot, path.join(piHome, 'agent', 'skills'));
@@ -56,8 +57,12 @@ test('Pi inspection resolves Global and Project Pi Targets and observes Shared e
   fs.mkdirSync(path.join(piHome, 'agent'), { recursive: true });
   fs.mkdirSync(path.join(project, '.pi'), { recursive: true });
   fs.writeFileSync(
+    path.join(piHome, 'agent', 'settings.json'),
+    JSON.stringify({ skills: ['!skills/**'] }),
+  );
+  fs.writeFileSync(
     path.join(project, '.pi', 'settings.json'),
-    JSON.stringify({ skills: ['!../../a?ents/skills', '!../.[a]gents/skills'] }),
+    JSON.stringify({ skills: ['!skills/**'] }),
   );
 
   const report = inspectHarnesses(home, targets, project);
@@ -85,4 +90,56 @@ test('Pi reports an unknown Shared relationship for unrecognised settings', () =
 
   assert.equal(pi?.sharedConsumption.status, 'unknown');
   assert.match(pi?.sharedConsumption.detail ?? '', /unsupported skills configuration/i);
+});
+
+test('Pi isolation plans, applies, verifies, and reconciles only its own Shared exclusion', () => {
+  const { home, targets, piHome } = setup();
+  const settings = path.join(piHome, 'agent', 'settings.json');
+  fs.mkdirSync(path.dirname(settings), { recursive: true });
+  fs.writeFileSync(settings, JSON.stringify({ theme: 'dark', skills: ['+local'] }, null, 2));
+
+  const plan = piAdapter.planSharedIsolation(home, targets);
+  assert.match(plan.summary, /stop consuming Shared/i);
+  assert.equal(plan.file, settings);
+  assert.equal(fs.existsSync(path.join(home.configDir, 'state.json')), false);
+
+  piAdapter.applySharedIsolation(home, plan);
+  const applied = JSON.parse(fs.readFileSync(settings, 'utf8'));
+  assert.deepEqual(applied, { theme: 'dark', skills: ['+local', '!skills/**'] });
+  assert.equal(inspectHarnesses(home, targets).detected[0]?.sharedConsumption.status, 'excluded');
+  assert.equal(inspectHarnesses(home, targets).detected[0]?.isolation.status, 'managed');
+
+  fs.writeFileSync(settings, JSON.stringify({ theme: 'dark', skills: ['!**'] }));
+  assert.equal(inspectHarnesses(home, targets).detected[0]?.sharedConsumption.status, 'excluded');
+  assert.equal(inspectHarnesses(home, targets).detected[0]?.isolation.status, 'drift');
+  const reconcile = piAdapter.planSharedIsolation(home, targets);
+  assert.equal(reconcile.change, true);
+  piAdapter.applySharedIsolation(home, reconcile);
+  assert.equal(inspectHarnesses(home, targets).detected[0]?.isolation.status, 'managed');
+});
+
+test('Pi isolation preserves an unowned equivalent exclusion and rejects unsafe writes', () => {
+  const { home, targets, piHome } = setup();
+  const settings = path.join(piHome, 'agent', 'settings.json');
+  fs.mkdirSync(path.dirname(settings), { recursive: true });
+  fs.writeFileSync(settings, JSON.stringify({ theme: 'dark', skills: ['!skills/**'] }));
+
+  const satisfied = piAdapter.planSharedIsolation(home, targets);
+  assert.equal(satisfied.change, false);
+  piAdapter.applySharedIsolation(home, satisfied);
+  assert.equal(fs.existsSync(path.join(home.configDir, 'state.json')), false);
+
+  fs.writeFileSync(settings, JSON.stringify({ theme: 'dark', skills: [] }));
+  const plan = piAdapter.planSharedIsolation(home, targets);
+  fs.writeFileSync(settings, JSON.stringify({ theme: 'light', skills: [] }));
+  assert.throws(() => piAdapter.applySharedIsolation(home, plan), /changed after preview/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(settings, 'utf8')), { theme: 'light', skills: [] });
+
+  fs.writeFileSync(settings, JSON.stringify({ skills: {} }));
+  assert.throws(() => piAdapter.planSharedIsolation(home, targets), /unsupported skills configuration/);
+  assert.equal(fs.readFileSync(settings, 'utf8'), JSON.stringify({ skills: {} }));
+
+  fs.writeFileSync(settings, JSON.stringify({ skills: ['!skills/skillspub-probe/**'] }));
+  assert.equal(inspectHarnesses(home, targets).detected[0]?.sharedConsumption.status, 'enabled');
+  assert.equal(piAdapter.planSharedIsolation(home, targets).change, true);
 });

@@ -876,8 +876,9 @@ test('TUI separates detected Harnesses from setup options and shows Shared consu
   assert.match(frame, /Detected/);
   assert.match(frame, /Harnesses/);
   assert.match(frame, /Pi/);
-  assert.match(frame, /discoverable/);
+  assert.match(frame, /managed/);
   assert.match(frame, /Shared enabled/);
+  assert.match(frame, /Isolation[\s\S]*unmanaged/);
   assert.match(frame, /Skill Targets/);
   assert.doesNotMatch(frame, /Claude \[/);
   t.unmount();
