@@ -9,6 +9,7 @@ import {
   parseNpxSkillsFindOutput,
   readNpxSkillsLock,
 } from '../src/npx-skills.ts';
+import { hashDirectory } from '../src/inventory.ts';
 
 const CLI = path.join(import.meta.dirname, '../src/cli.ts');
 const ACTUAL_SKILLS_CLI = path.join(import.meta.dirname, '../node_modules/skills/bin/cli.mjs');
@@ -438,6 +439,180 @@ test('orphaned Preset lastClaims also keep updated skills ON and block remove', 
   const removed = run(['shared', 'remove', 'orphaned']);
   assert.equal(removed.status, 1);
   assert.match(removed.stderr, /cannot remove claimed Target Slot/);
+});
+
+test('shared remove previews and confirms dependent Link and Mirror cascades', () => {
+  const { home, config, run, calls } = setup();
+  const discovery = path.join(home, '.agents', 'skills');
+  const source = path.join(discovery, 'managed');
+  const consumer = path.join(config, 'consumer');
+  const mirror = path.join(consumer, 'mirror');
+  const linked = path.join(consumer, 'linked');
+  writeSkill(discovery, 'managed');
+  writeLock(path.join(home, '.agents', '.skill-lock.json'), { managed: { source: 'owner/repo' } });
+  fs.mkdirSync(consumer, { recursive: true });
+  fs.symlinkSync(source, linked, 'dir');
+  writeSkill(consumer, 'mirror');
+  fs.writeFileSync(path.join(config, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [],
+    genericTargets: [{
+      key: 'consumer',
+      kind: 'generic',
+      discoveryRoot: consumer,
+      parkingRoot: path.join(config, 'consumer-off'),
+      projectPath: '.consumer',
+    }],
+  }));
+  fs.writeFileSync(path.join(config, 'state.json'), JSON.stringify({
+    mirrors: {
+      'global:consumer\0mirror': { sourceId: fs.realpathSync(source), hash: hashDirectory(source) },
+    },
+  }));
+
+  const preview = run(['shared', 'remove', 'managed']);
+  assert.equal(preview.status, 1);
+  assert.match(preview.stdout, /Removal plan:/);
+  assert.match(preview.stdout, /global:consumer.*linked/);
+  assert.match(preview.stdout, /global:consumer.*mirror/);
+  assert.match(preview.stdout, /projects outside this scan may retain broken Links/);
+  assert.match(preview.stderr, /dependent Relationships will also be deleted.*--yes/);
+  assert.ok(fs.existsSync(source));
+  assert.ok(fs.lstatSync(linked).isSymbolicLink());
+  assert.ok(fs.existsSync(mirror));
+  assert.equal(calls().length, 0);
+
+  const removed = run(['shared', 'remove', 'managed', '--yes']);
+  assert.equal(removed.status, 0, removed.stderr);
+  assert.equal(fs.existsSync(source), false);
+  assert.equal(fs.existsSync(linked), false);
+  assert.equal(fs.existsSync(mirror), false);
+  const state = JSON.parse(fs.readFileSync(path.join(config, 'state.json'), 'utf8'));
+  assert.equal(state.mirrors, undefined);
+});
+
+test('shared remove cascades dependencies while the Shared source is OFF', () => {
+  const { home, config, run } = setup();
+  const parking = path.join(home, '.agents', '.skillspub-off', 'skills');
+  const source = path.join(parking, 'managed');
+  const consumer = path.join(config, 'consumer');
+  writeSkill(parking, 'managed');
+  writeLock(path.join(home, '.agents', '.skill-lock.json'), { managed: { source: 'owner/repo' } });
+  fs.mkdirSync(consumer, { recursive: true });
+  const linked = path.join(consumer, 'linked');
+  fs.symlinkSync(source, linked, 'dir');
+  fs.writeFileSync(path.join(config, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [],
+    genericTargets: [{
+      key: 'consumer',
+      kind: 'generic',
+      discoveryRoot: consumer,
+      parkingRoot: path.join(config, 'consumer-off'),
+      projectPath: '.consumer',
+    }],
+  }));
+  fs.writeFileSync(path.join(config, 'state.json'), JSON.stringify({
+    baseIntent: { 'global:shared\0managed': 'off' },
+  }));
+
+  const removed = run(['shared', 'remove', 'managed', '--yes']);
+  assert.equal(removed.status, 0, removed.stderr);
+  assert.equal(fs.existsSync(source), false);
+  assert.equal(fs.existsSync(linked), false);
+});
+
+test('shared remove preflights dependent claims before changing disk', () => {
+  const { home, config, run, calls } = setup();
+  const discovery = path.join(home, '.agents', 'skills');
+  const source = path.join(discovery, 'managed');
+  const consumer = path.join(config, 'consumer');
+  writeSkill(discovery, 'managed');
+  writeLock(path.join(home, '.agents', '.skill-lock.json'), { managed: { source: 'owner/repo' } });
+  fs.mkdirSync(consumer, { recursive: true });
+  const linked = path.join(consumer, 'linked');
+  fs.symlinkSync(source, linked, 'dir');
+  fs.writeFileSync(path.join(config, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [],
+    genericTargets: [{
+      key: 'consumer',
+      kind: 'generic',
+      discoveryRoot: consumer,
+      parkingRoot: path.join(config, 'consumer-off'),
+      projectPath: '.consumer',
+    }],
+  }));
+  fs.writeFileSync(path.join(config, 'state.json'), JSON.stringify({
+    claims: { 'global:consumer\0linked': ['preset:keep'] },
+  }));
+
+  const refused = run(['shared', 'remove', 'managed', '--yes']);
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /cannot remove claimed Target Slot global:consumer\/linked/);
+  assert.ok(fs.existsSync(source));
+  assert.ok(fs.lstatSync(linked).isSymbolicLink());
+  assert.equal(calls().length, 0);
+});
+
+test('project Shared removal refuses read-only dependent Relationships', () => {
+  const { root, config, run, calls } = setup();
+  const project = path.join(root, 'project');
+  const source = path.join(project, '.agents', 'skills', 'managed');
+  const consumer = path.join(config, 'consumer');
+  writeSkill(path.join(project, '.agents', 'skills'), 'managed');
+  writeLock(path.join(project, 'skills-lock.json'), { managed: { source: 'owner/repo' } });
+  fs.mkdirSync(consumer, { recursive: true });
+  const linked = path.join(consumer, 'linked');
+  fs.symlinkSync(source, linked, 'dir');
+  fs.writeFileSync(path.join(config, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [],
+    genericTargets: [{
+      key: 'consumer',
+      kind: 'generic',
+      discoveryRoot: consumer,
+      parkingRoot: path.join(config, 'consumer-off'),
+      projectPath: '.consumer',
+    }],
+  }));
+
+  const refused = run(['project', project, 'shared', 'remove', 'managed', '--yes']);
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /read-only dependent Relationship/);
+  assert.ok(fs.existsSync(source));
+  assert.ok(fs.lstatSync(linked).isSymbolicLink());
+  assert.equal(calls().length, 0);
+});
+
+test('failed shared remove restores staged dependent Relationships', () => {
+  const { home, config, run, calls } = setup();
+  const discovery = path.join(home, '.agents', 'skills');
+  const source = path.join(discovery, 'managed');
+  const consumer = path.join(config, 'consumer');
+  writeSkill(discovery, 'managed');
+  writeLock(path.join(home, '.agents', '.skill-lock.json'), { managed: { source: 'owner/repo' } });
+  fs.mkdirSync(consumer, { recursive: true });
+  const linked = path.join(consumer, 'linked');
+  fs.symlinkSync(source, linked, 'dir');
+  fs.writeFileSync(path.join(config, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [],
+    genericTargets: [{
+      key: 'consumer',
+      kind: 'generic',
+      discoveryRoot: consumer,
+      parkingRoot: path.join(config, 'consumer-off'),
+      projectPath: '.consumer',
+    }],
+  }));
+
+  const failed = run(['shared', 'remove', 'managed', '--yes'], { NPX_FAIL: '7' });
+  assert.equal(failed.status, 1);
+  assert.match(failed.stderr, /skills remove failed/);
+  assert.ok(fs.existsSync(source));
+  assert.ok(fs.lstatSync(linked).isSymbolicLink());
+  assert.equal(calls().length, 1);
 });
 
 test('shared remove passes only managed names and leaves external entries untouched', () => {

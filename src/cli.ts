@@ -29,6 +29,7 @@ import {
   sharedAdd,
   sharedDescribe,
   sharedFind,
+  planSharedRemove,
   sharedRemove,
   sharedUpdate,
 } from './shared.ts';
@@ -657,9 +658,25 @@ function cmdShared(
       break;
     }
     case 'remove': {
-      if (rest.length === 0 || rest.some((arg) => arg.startsWith('-')))
-        throw new Error('usage: skillspub shared remove <managed-name...>');
-      const result = sharedRemove(home, rest, projectPath);
+      const { values, positionals } = parseArgs({
+        args: rest,
+        options: { yes: { type: 'boolean' } },
+        allowPositionals: true,
+        strict: true,
+      });
+      if (positionals.length === 0)
+        throw new Error('usage: skillspub shared remove <managed-name...> [--yes]');
+      const preview = planSharedRemove(home, positionals, projectPath);
+      console.log('Removal plan:');
+      if (preview.dependencies.length === 0) console.log('  no scanned dependent Relationships');
+      else for (const dependency of preview.dependencies)
+        console.log(`  - ${dependency.targetId}/${dependency.slot}: ${dependency.form} ${dependency.path}`);
+      console.log('Warning: SkillsPub has no central project index; projects outside this scan may retain broken Links.');
+      const result = sharedRemove(home, positionals, {
+        cascadeConfirmed: Boolean(values.yes),
+        projectPath,
+        expected: preview,
+      });
       console.log(`Actual: ${result.actual}`);
       console.log(`Remaining drift: ${result.drift.join(', ') || 'none'}`);
       console.log('Running Harnesses must reload/restart to read the final Shared Target state.');

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  hashDirectory,
   loadTargets,
   readStateFile,
   scanGlobalInventory,
@@ -42,6 +43,24 @@ interface Target {
   report: InventoryScanReport;
   cwd: string;
   lockFile: string;
+}
+
+export interface SharedRemovalDependency {
+  targetId: string;
+  slot: string;
+  form: 'link' | 'mirror';
+  path: string;
+  resourceId: string;
+  fingerprint: string;
+}
+
+export interface SharedRemovalPlan {
+  dependencies: SharedRemovalDependency[];
+}
+
+interface StagedDependencies {
+  rollback(): void;
+  commit(): void;
 }
 
 
@@ -198,6 +217,128 @@ function desiredFor(target: Target, skills: NpxManagedSkill[]): Map<string, 'on'
   return desired;
 }
 
+function dependencyFingerprint(
+  form: SharedRemovalDependency['form'],
+  entryPath: string,
+): string {
+  const stat = fs.lstatSync(entryPath, { throwIfNoEntry: false });
+  if (!stat || (form === 'link' && !stat.isSymbolicLink()))
+    throw new Error(`relationship disappeared during preview: ${entryPath}`);
+  return form === 'link' ? fs.readlinkSync(entryPath) : hashDirectory(entryPath);
+}
+
+function removalDependencies(target: Target, selected: NpxManagedSkill[]): SharedRemovalDependency[] {
+  const sourceIds = new Set(selected.map((skill) => {
+    const current = relationship(target, skill.slot);
+    if (!current?.resourceId) throw new Error(`installer lock/file mismatch: ${skill.name}`);
+    return current.resourceId;
+  }));
+  const relationships = target.report.relationships.filter((item) =>
+    item.targetId !== target.target.id &&
+    (item.form === 'link' || item.form === 'mirror') && item.resourceId &&
+    sourceIds.has(item.resourceId));
+  const readOnly = relationships.find((item) => item.readOnly);
+  if (readOnly)
+    throw new Error(`cannot remove Shared source with read-only dependent Relationship: ${readOnly.path}`);
+  return relationships
+    .map(({ targetId, slot, form, path: entryPath, resourceId }) => {
+      if (!resourceId) throw new Error(`relationship disappeared during preview: ${entryPath}`);
+      const dependencyForm = form as 'link' | 'mirror';
+      return {
+        targetId,
+        slot,
+        form: dependencyForm,
+        path: entryPath,
+        resourceId,
+        fingerprint: dependencyFingerprint(dependencyForm, entryPath),
+      };
+    })
+    .sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function sameDependencies(
+  expected: SharedRemovalDependency[],
+  actual: SharedRemovalDependency[],
+): boolean {
+  return expected.length === actual.length && expected.every((dependency, index) =>
+    JSON.stringify(dependency) === JSON.stringify(actual[index]));
+}
+
+function assertRemovalDependenciesAllowed(target: Target, dependencies: SharedRemovalDependency[]): void {
+  const claims = claimedSlots(readStateFile(target.report.stateFile));
+  for (const dependency of dependencies) {
+    const slotId = `${dependency.targetId}\0${dependency.slot}`;
+    if (claims.has(slotId))
+      throw new Error(`cannot remove claimed Target Slot ${slotId.replace('\0', '/')}`);
+    if (dependencyFingerprint(dependency.form, dependency.path) !== dependency.fingerprint)
+      throw new Error(`relationship changed during preview: ${dependency.path}`);
+  }
+}
+
+function stageDependencies(target: Target, dependencies: SharedRemovalDependency[]): StagedDependencies | undefined {
+  if (dependencies.length === 0) return undefined;
+  assertRemovalDependenciesAllowed(target, dependencies);
+  const root = fs.mkdtempSync(path.join(path.dirname(target.lockFile), '.skillspub-remove-'));
+  const staged: Array<{ from: string; to: string }> = [];
+  const rollback = (): void => {
+    for (const item of staged.toReversed()) fs.renameSync(item.to, item.from);
+    fs.rmSync(root, { recursive: true, force: true });
+  };
+  try {
+    for (const [index, dependency] of dependencies.entries()) {
+      assertRemovalDependenciesAllowed(target, [dependency]);
+      const destination = path.join(root, String(index));
+      fs.renameSync(dependency.path, destination);
+      staged.push({ from: dependency.path, to: destination });
+    }
+  } catch (error) {
+    rollback();
+    throw error;
+  }
+  return {
+    rollback,
+    commit: () => fs.rmSync(root, { recursive: true, force: true }),
+  };
+}
+
+function removeDependencyState(target: Target, dependencies: SharedRemovalDependency[]): void {
+  if (dependencies.length === 0) return;
+  const state = readStateFile(target.report.stateFile);
+  const baseIntent = { ...baseIntents(state) };
+  const mirrors = { ...(state.mirrors as Record<string, unknown> | undefined) };
+  for (const { targetId, slot } of dependencies) {
+    const slotId = `${targetId}\0${slot}`;
+    delete baseIntent[slotId];
+    delete mirrors[slotId];
+  }
+  const { baseIntent: _baseIntent, mirrors: _mirrors, ...remaining } = state;
+  writeStateFile(target.report.stateFile, {
+    ...remaining,
+    ...(Object.keys(baseIntent).length > 0 ? { baseIntent } : {}),
+    ...(Object.keys(mirrors).length > 0 ? { mirrors } : {}),
+  });
+}
+
+export function planSharedRemove(
+  home: Home,
+  names: string[],
+  projectPath?: string,
+): SharedRemovalPlan {
+  if (names.length === 0) throw new Error('usage: skillspub shared remove <managed-name...>');
+  const target = resolveTarget(home, projectPath);
+  validatePolicyState(target);
+  const selected = managedSelection(target, names);
+  const claims = claimedSlots(readStateFile(target.report.stateFile));
+  for (const skill of selected) {
+    const slotId = `${target.target.id}\0${skill.slot}`;
+    if (claims.has(slotId)) throw new Error(`cannot remove claimed Target Slot ${slotId.replace('\0', '/')}`);
+  }
+  desiredFor(target, selected);
+  const dependencies = removalDependencies(target, selected);
+  assertRemovalDependenciesAllowed(target, dependencies);
+  return { dependencies };
+}
+
 function ensureVisible(target: Target, skills: NpxManagedSkill[]): void {
   for (const skill of skills) {
     const current = relationship(target, skill.slot);
@@ -300,6 +441,8 @@ interface SharedOp {
     failure?: Error;
     actual?: string;
   }): void;
+  /** Stages operation-specific filesystem changes after all generic preflight passes. */
+  before?(target: Target, selected: NpxManagedSkill[]): StagedDependencies | undefined;
   /** Runs only on success; a throw here propagates unwrapped. */
   after?(target: Target, selected: NpxManagedSkill[], actual: string): void;
 }
@@ -318,11 +461,13 @@ function guardedSkillsOp(
     const args = op.args(selected, !projectPath);
     let result: NpxSkillsRunResult | undefined;
     let failure: Error | undefined;
+    let staged: StagedDependencies | undefined;
     let drift: string[] = [];
     const restore = (): void => {
       if (desired.size > 0) drift = restoreDesired(target, desired);
     };
     try {
+      staged = op.before?.(target, selected);
       ensureVisible(target, selected);
       result = runNpxSkills(args, target.cwd);
     } catch (error) {
@@ -338,7 +483,10 @@ function guardedSkillsOp(
       } catch (error) {
         checkError = error as Error;
       }
-      if (runFailed || checkError) restore();
+      if (runFailed || checkError) {
+        restore();
+        staged?.rollback();
+      }
       actual = finalActual(target, slots, drift);
     } else {
       restore();
@@ -354,6 +502,7 @@ function guardedSkillsOp(
       throw new Error(`skills ${op.name} failed (${reason})\nActual: ${actual}\nRemaining drift: ${drift.join(', ') || 'none'}`);
     }
     op.after?.(target, selected, actual);
+    staged?.commit();
     return { actual, drift };
   });
 }
@@ -426,24 +575,36 @@ export function sharedUpdate(
 export function sharedRemove(
   home: Home,
   names: string[],
-  projectPath?: string,
+  options: { cascadeConfirmed?: boolean; projectPath?: string; expected?: SharedRemovalPlan } = {},
 ): SharedCommandResult {
-  if (names.length === 0) throw new Error('usage: skillspub shared remove <managed-name...>');
+  const { cascadeConfirmed = false, projectPath, expected } = options;
+  const preview = planSharedRemove(home, names, projectPath);
+  if (expected && !sameDependencies(expected.dependencies, preview.dependencies))
+    throw new Error('dependent Relationships changed after preview');
+  if (preview.dependencies.length > 0 && !cascadeConfirmed)
+    throw new Error('dependent Relationships will also be deleted; rerun with --yes');
+  let dependencies: SharedRemovalDependency[] = [];
   return guardedSkillsOp(home, projectPath, {
     name: 'remove',
     restoreOnFailureOnly: true,
     select(target) {
       const selected = managedSelection(target, names);
-      const state = readStateFile(target.report.stateFile);
-      const claims = claimedSlots(state);
+      const claims = claimedSlots(readStateFile(target.report.stateFile));
       for (const skill of selected) {
-        const id = `${target.target.id}\0${skill.slot}`;
-        if (claims.has(id)) throw new Error(`cannot remove claimed Target Slot ${target.target.id}/${skill.slot}`);
+        const slotId = `${target.target.id}\0${skill.slot}`;
+        if (claims.has(slotId)) throw new Error(`cannot remove claimed Target Slot ${slotId.replace('\0', '/')}`);
       }
       return selected;
     },
     args: (selected, global) =>
       npxSkillsRemoveArgs(selected.map(({ name }) => name), global),
+    before(target, selected) {
+      dependencies = removalDependencies(target, selected);
+      if (!sameDependencies(preview.dependencies, dependencies))
+        throw new Error('dependent Relationships changed after preview');
+      assertRemovalDependenciesAllowed(target, dependencies);
+      return stageDependencies(target, dependencies);
+    },
     check(target, selected, _drift, { result, failure }) {
       target.report = scan(home, projectPath);
       const remaining = selected.filter((skill) => target.report.relationships.some((item) =>
@@ -453,6 +614,7 @@ export function sharedRemove(
     },
     after(target, selected) {
       updateBaseIntent(target, selected.map(({ slot }) => slot));
+      removeDependencyState(target, dependencies);
     },
   });
 }
