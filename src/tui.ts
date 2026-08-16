@@ -184,12 +184,14 @@ function RowLine({
 
 function TargetList({
   targets,
+  harnesses,
   selected,
   focused,
   width,
   height,
 }: {
   targets: TuiSnapshot['targets'];
+  harnesses: TuiSnapshot['harnesses'];
   selected: number;
   focused: boolean;
   width: number;
@@ -199,10 +201,23 @@ function TargetList({
   return h(
     ListColumn,
     {title: 'Targets', focused, width},
+    h(Text, {dimColor: true}, ' Detected Harnesses'),
+    ...(harnesses.detected.length === 0
+      ? [h(Text, {key: 'none', dimColor: true}, '   none')]
+      : harnesses.detected.map((harness) =>
+        h(Text, {key: harness.key}, `   ${harness.name} [${harness.support}] Shared ${harness.sharedConsumption.status}`))),
+    ...(harnesses.setup.length === 0
+      ? []
+      : [
+        h(Text, {key: 'setup', dimColor: true}, ' Setup'),
+        ...harnesses.setup.map((harness) =>
+          h(Text, {key: `setup:${harness.key}`, dimColor: true}, `   ${harness.name} [${harness.support}]`)),
+      ]),
+    h(Text, {dimColor: true}, ' Skill Targets'),
     ...targets.slice(start, start + height).map((target, index) =>
       h(
         RowLine,
-        {key: target.name, active: start + index === selected, focused},
+        {key: `target:${target.name}`, active: start + index === selected, focused},
         target.name,
       ),
     ),
@@ -1084,6 +1099,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
             {height: bodyHeight},
             h(TargetList, {
               targets,
+              harnesses: snapshot.harnesses,
               selected: targetIndex,
               focused: focusColumn === 0,
               width: targetWidth,

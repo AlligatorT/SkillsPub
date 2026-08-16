@@ -505,7 +505,12 @@ test('Target migration previews legacy Runtime overrides and Generic Targets wit
   );
   const plan = planTargetMigration(home);
   assert.deepEqual(plan.overrides, [
-    { key: 'pi', discoveryRoot: piRoot, parkingRoot: path.join(home.configDir, 'custom-pi', '.skillspub-off', 'skills') },
+    {
+      key: 'pi',
+      discoveryRoot: piRoot,
+      parkingRoot: path.join(home.configDir, 'custom-pi', '.skillspub-off', 'skills'),
+      projectPath: '.pi/agent/skills',
+    },
     { key: 'claude', disabled: true },
     { key: 'shared', disabled: true },
   ]);

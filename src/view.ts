@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Home } from './core.ts';
+import { inspectHarnesses } from './harnesses/registry.ts';
 import {
   readStateFile,
   targetSlotId,
@@ -336,6 +337,7 @@ export interface SkillDetail {
 
 export interface TuiSnapshot {
   targets: Target[];
+  harnesses: ReturnType<typeof inspectHarnesses>;
   rows: Row[];
   /** Project root when this is a project-scope snapshot (ADR-0010). */
   project?: string;
@@ -347,11 +349,23 @@ export interface TuiSnapshot {
   };
 }
 
+function visibleTargets(
+  report: InventoryScanReport,
+  harnesses: ReturnType<typeof inspectHarnesses>,
+): Target[] {
+  const detected = new Set(harnesses.detected.map(({ key }) => key));
+  return report.targets
+    .filter(({ kind, key }) => kind !== 'harness' || detected.has(key))
+    .map((target) => ({ name: target.key, dir: target.discoveryRoot }));
+}
+
 /** Read the live disk state. Call again after every mutation (ADR-0001). */
 export function tuiSnapshot(home: Home): TuiSnapshot {
   const report = scanGlobalInventory(home, undefined, { persist: false });
+  const harnesses = inspectHarnesses(home, report.targets);
   return {
-    targets: viewTargets(report),
+    targets: visibleTargets(report, harnesses),
+    harnesses,
     rows: projectRows(report),
     catalog: readViewState(home),
   };
@@ -361,10 +375,13 @@ export function tuiSnapshot(home: Home): TuiSnapshot {
  *  rows are the project + parent + global union, inherited cells marked read-only. */
 export function projectTuiSnapshot(home: Home, projectPath: string): TuiSnapshot {
   const report = scanProjectInventory(home, projectPath, undefined, { persist: false });
+  const harnesses = inspectHarnesses(home, report.targets, report.projectPath);
   return {
-    targets: report.targets
-      .filter((target) => target.scope === 'project')
-      .map((target) => ({ name: target.key, dir: target.discoveryRoot })),
+    targets: visibleTargets(
+      { ...report, targets: report.targets.filter((target) => target.scope === 'project') },
+      harnesses,
+    ),
+    harnesses,
     rows: projectRows(report),
     catalog: readViewState(home),
     project: report.projectPath,
