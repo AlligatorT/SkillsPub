@@ -1,0 +1,5 @@
+[38;5;145mone/repo@same[0m [36m12K installs[0m
+[38;5;102m└ https://skills.sh/one/repo/same[0m
+
+[38;5;145mtwo/repo@same[0m [36m8 installs[0m
+[38;5;102m└ https://skills.sh/two/repo/same[0m

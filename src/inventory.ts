@@ -4,6 +4,11 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Home } from './core.ts';
 import { piAdapter } from './harnesses/pi.ts';
+import {
+  readNpxSkillsLock,
+  type NpxManagedSkill,
+  type NpxSkillsProvenance,
+} from './npx-skills.ts';
 import { sharedTargetDefinition } from './targets/shared.ts';
 
 export type TargetScope = 'global' | 'project' | 'parent';
@@ -80,11 +85,7 @@ export interface TargetRelationship {
   readOnly: boolean;
 }
 
-export interface SkillProvenance {
-  source?: string;
-  sourceUrl?: string;
-  skillPath?: string;
-}
+export type SkillProvenance = NpxSkillsProvenance;
 
 export interface InventoryResource {
   id: string;
@@ -605,12 +606,6 @@ export function normalizeSlotName(name: string): string {
   return name.trim().toLocaleLowerCase().replace(/[\s_]+/g, '-');
 }
 
-export function normalizeManagedSkillName(name: string): string {
-  return name.toLowerCase()
-    .replace(/[^a-z0-9._]+/g, '-')
-    .replace(/^[.-]+|[.-]+$/g, '')
-    .substring(0, 255) || 'unnamed-skill';
-}
 
 export function targetSlotId(targetId: string, slot: string): string {
   return `${targetId}\0${slot}`;
@@ -687,55 +682,16 @@ interface ProvenanceRead {
   error?: string;
 }
 
-export interface ManagedSkill {
-  name: string;
-  slot: string;
-  provenance: SkillProvenance;
-}
+export type ManagedSkill = NpxManagedSkill;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-export function readManagedSkillLock(file: string): ManagedSkill[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
-    throw new Error(`${file}: ${(error as Error).message}`);
-  }
-  if (!isRecord(parsed)) throw new Error(`${file}: lock must be a JSON object`);
-  if (parsed.version !== 3) throw new Error(`${file}: lock.version must be 3`);
-  const skills = parsed.skills;
-  if (skills !== undefined && !isRecord(skills))
-    throw new Error(`${file}: lock.skills must be a JSON object`);
-  const slots = new Set<string>();
-  return Object.entries(skills ?? {}).map(([name, entry]) => {
-    if (!isRecord(entry)) throw new Error(`${file}: lock skill entry must be an object: ${name}`);
-    for (const field of ['source', 'sourceUrl', 'skillPath'] as const) {
-      if (entry[field] !== undefined && typeof entry[field] !== 'string')
-        throw new Error(`${file}: lock skill ${name}.${field} must be a string`);
-    }
-    const slot = normalizeSlotName(normalizeManagedSkillName(name));
-    if (slots.has(slot)) throw new Error(`${file}: duplicate normalized lock skill: ${slot}`);
-    slots.add(slot);
-    return {
-      name,
-      slot,
-      provenance: {
-        source: entry.source as string | undefined,
-        sourceUrl: entry.sourceUrl as string | undefined,
-        skillPath: entry.skillPath as string | undefined,
-      },
-    };
-  });
-}
-
 function readProvenance(file: string | undefined): ProvenanceRead {
   if (!file) return { entries: new Map() };
   try {
-    const entries = readManagedSkillLock(file)
+    const entries = readNpxSkillsLock(file)
       .filter(({ provenance }) => Object.values(provenance).some(Boolean))
       .map(({ slot, provenance }) => [slot, provenance] as const);
     return { entries: new Map(entries) };

@@ -1,31 +1,34 @@
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
   loadTargets,
-  normalizeManagedSkillName,
-  readManagedSkillLock,
   readStateFile,
   scanGlobalInventory,
   scanProjectInventory,
   writeStateFile,
   type InventoryScanReport,
-  type ManagedSkill,
   type TargetRelationship,
   type ScannedTarget,
-  type SkillProvenance,
 } from './inventory.ts';
+import {
+  NPX_SKILLS_PACKAGE,
+  npxSkillsAddArgs,
+  npxSkillsDescribeArgs,
+  npxSkillsFindArgs,
+  npxSkillsProvenanceLabel,
+  npxSkillsRemoveArgs,
+  npxSkillsUpdateArgs,
+  normalizeNpxSkillsName,
+  parseNpxSkillsFindOutput,
+  readNpxSkillsLock,
+  runNpxSkills,
+  sameNpxSkillsSource,
+  type NpxManagedSkill,
+  type NpxSkillsRunResult,
+} from './npx-skills.ts';
 import type { Home } from './core.ts';
 
-const SKILLS_PACKAGE = 'skills@1.5.21';
-
-export interface FindCandidate {
-  source: string;
-  name: string;
-  installs?: string;
-  detailUrl: string;
-}
 
 export interface SharedCommandResult {
   actual: string;
@@ -41,64 +44,6 @@ interface Target {
   lockFile: string;
 }
 
-const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]/g;
-
-export function parseSkillsFindOutput(raw: string): {
-  candidates: FindCandidate[];
-  complete: boolean;
-  raw: string;
-} {
-  const lines = raw.replace(ANSI, '').split(/\r?\n/);
-  const candidates: FindCandidate[] = [];
-  const resultLines = lines.filter((line) =>
-    /^\S+@\S+(?:\s+.+ installs)?$/.test(line.trim())).length;
-  const detailLines = lines.filter((line) =>
-    /^└\s+https:\/\/skills\.sh\/\S+$/.test(line.trim())).length;
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index].trim();
-    if (index === lines.length - 1) continue;
-    const detail = lines[index + 1].trim().match(/^└\s+(https:\/\/skills\.sh\/\S+)$/);
-    if (!detail) continue;
-    const result = line.match(/^(\S+)@(\S+?)(?:\s+(.+ installs))?$/);
-    if (!result) continue;
-    candidates.push({
-      source: result[1],
-      name: result[2],
-      ...(result[3] ? { installs: result[3] } : {}),
-      detailUrl: detail[1],
-    });
-    index++;
-  }
-  const marker = lines.findIndex((line) =>
-    line.includes('Install with') && line.includes('npx skills add'));
-  const bodyLines = marker < 0 ? [] : lines.slice(marker + 1).filter((line) => line.trim());
-  return {
-    candidates,
-    complete: marker >= 0
-      ? bodyLines.length === candidates.length * 2
-      : candidates.length === resultLines && candidates.length === detailLines,
-    raw,
-  };
-}
-
-function runSkills(
-  args: string[],
-  cwd: string,
-  capture = false,
-): { status: number; stdout: string; stderr: string } {
-  const result = spawnSync('npx', ['--yes', SKILLS_PACKAGE, ...args], {
-    cwd,
-    encoding: 'utf8',
-    env: { ...process.env, XDG_STATE_HOME: undefined },
-    stdio: capture ? 'pipe' : 'inherit',
-  });
-  if (result.error) throw result.error;
-  return {
-    status: result.status ?? 1,
-    stdout: result.stdout ?? '',
-    stderr: result.stderr ?? '',
-  };
-}
 
 function scan(home: Home, projectPath?: string, persist = false): InventoryScanReport {
   const targets = loadTargets(home);
@@ -135,7 +80,7 @@ function resolveTarget(home: Home, projectPath?: string): Target {
 function validateName(name: string): string {
   if (!name || name === '.' || name === '..' || /[\\/\0]/.test(name))
     throw new Error(`invalid skill name: ${name || '(empty)'}`);
-  return normalizeManagedSkillName(name);
+  return normalizeNpxSkillsName(name);
 }
 
 function validateSource(source: string): void {
@@ -153,42 +98,6 @@ function relationship(target: Target, slot: string): TargetRelationship | undefi
   return found;
 }
 
-function sourceParts(value: string): { source: string; skill?: string } {
-  let source = value.trim();
-  const at = source.lastIndexOf('@');
-  const skill = at > source.indexOf('/') ? source.slice(at + 1) : undefined;
-  if (skill) source = source.slice(0, at);
-  source = source.replace(/\.git$/, '');
-  const github = source.match(/github\.com[/:]([^/]+\/[^/]+)$/i);
-  return { source: (github?.[1] ?? source).toLowerCase(), skill };
-}
-
-function provenanceSkillName(skillPath: string): string {
-  const normalized = skillPath.replaceAll('\\', '/').replace(/\/$/, '');
-  const parts = normalized.split('/');
-  return parts.at(-1)?.toLowerCase() === 'skill.md'
-    ? parts.at(-2) ?? ''
-    : parts.at(-1) ?? '';
-}
-
-function provenanceLabel(provenance?: SkillProvenance): string {
-  return provenance?.source ?? provenance?.sourceUrl ?? provenance?.skillPath ?? 'Source unknown';
-}
-
-function sameSource(
-  source: string,
-  skillName: string,
-  provenance?: SkillProvenance,
-): boolean {
-  if (!provenance) return false;
-  const requested = sourceParts(source);
-  const sourceMatches = [provenance.source, provenance.sourceUrl]
-    .some((value) => value && sourceParts(value).source === requested.source);
-  if (!sourceMatches) return false;
-  if (!provenance.skillPath) return requested.skill === undefined;
-  const requestedSkill = normalizeManagedSkillName(requested.skill ?? skillName);
-  return normalizeManagedSkillName(provenanceSkillName(provenance.skillPath)) === requestedSkill;
-}
 
 function withOperationLock<T>(target: Target, operation: () => T): T {
   const lock = `${target.lockFile}.skillspub-operation-lock`;
@@ -210,17 +119,17 @@ function withOperationLock<T>(target: Target, operation: () => T): T {
   }
 }
 
-function managedSelection(target: Target, requested: string[]): ManagedSkill[] {
-  const managed = readManagedSkillLock(target.lockFile);
+function managedSelection(target: Target, requested: string[]): NpxManagedSkill[] {
+  const managed = readNpxSkillsLock(target.lockFile);
   const bySlot = new Map(managed.map((skill) => [skill.slot, skill]));
   const selected = requested.length > 0
     ? requested.map((name) => {
         const found = bySlot.get(validateName(name));
-        if (!found) throw new Error(`${name} is not managed by ${SKILLS_PACKAGE}`);
+        if (!found) throw new Error(`${name} is not managed by ${NPX_SKILLS_PACKAGE}`);
         return found;
       })
     : managed;
-  if (selected.length === 0) throw new Error(`no skills managed by ${SKILLS_PACKAGE}`);
+  if (selected.length === 0) throw new Error(`no skills managed by ${NPX_SKILLS_PACKAGE}`);
   return [...new Map(selected.map((skill) => [skill.slot, skill])).values()];
 }
 
@@ -254,7 +163,7 @@ function baseIntents(state: Record<string, unknown>): Record<string, 'on' | 'off
 
 function desiredActivation(
   target: Target,
-  skill: ManagedSkill,
+  skill: NpxManagedSkill,
   current: TargetRelationship,
 ): 'on' | 'off' {
   const state = readStateFile(target.report.stateFile);
@@ -279,7 +188,7 @@ function move(relationship: TargetRelationship, destinationRoot: string): void {
   fs.renameSync(relationship.path, destination);
 }
 
-function desiredFor(target: Target, skills: ManagedSkill[]): Map<string, 'on' | 'off'> {
+function desiredFor(target: Target, skills: NpxManagedSkill[]): Map<string, 'on' | 'off'> {
   const desired = new Map<string, 'on' | 'off'>();
   for (const skill of skills) {
     const current = relationship(target, skill.slot);
@@ -289,7 +198,7 @@ function desiredFor(target: Target, skills: ManagedSkill[]): Map<string, 'on' | 
   return desired;
 }
 
-function ensureVisible(target: Target, skills: ManagedSkill[]): void {
+function ensureVisible(target: Target, skills: NpxManagedSkill[]): void {
   for (const skill of skills) {
     const current = relationship(target, skill.slot);
     if (!current) throw new Error(`installer lock/file mismatch: ${skill.name}`);
@@ -353,9 +262,9 @@ function updateBaseIntent(target: Target, slots: string[], value?: 'on'): void {
 export function sharedFind(home: Home, query: string[], projectPath?: string): void {
   if (query.length === 0) throw new Error('usage: skillspub shared find <query>');
   const target = resolveTarget(home, projectPath);
-  const result = runSkills(['find', ...query], target.cwd, true);
+  const result = runNpxSkills(npxSkillsFindArgs(query), target.cwd, true);
   if (result.stderr) process.stderr.write(result.stderr);
-  const parsed = parseSkillsFindOutput(result.stdout);
+  const parsed = parseNpxSkillsFindOutput(result.stdout);
   if (!parsed.complete || parsed.candidates.length === 0) process.stdout.write(result.stdout);
   else for (const candidate of parsed.candidates)
     console.log(`${candidate.source}@${candidate.name}\t${candidate.installs ?? ''}\t${candidate.detailUrl}`);
@@ -365,7 +274,7 @@ export function sharedFind(home: Home, query: string[], projectPath?: string): v
 export function sharedDescribe(home: Home, source: string, projectPath?: string): void {
   validateSource(source);
   const target = resolveTarget(home, projectPath);
-  const result = runSkills(['add', source, '--list'], target.cwd, true);
+  const result = runNpxSkills(npxSkillsDescribeArgs(source), target.cwd, true);
   if (result.stdout) process.stdout.write(result.stdout);
   if (result.stderr) process.stderr.write(result.stderr);
   if (result.status !== 0) throw new Error(`skills description lookup failed (exit ${result.status})`);
@@ -376,23 +285,23 @@ export function sharedDescribe(home: Home, source: string, projectPath?: string)
  *  add/update/remove below are only select/args/check/after over this template. */
 interface SharedOp {
   name: 'add' | 'update' | 'remove';
-  select(target: Target): ManagedSkill[];
-  args(selected: ManagedSkill[], globalFlag: string[]): string[];
+  select(target: Target): NpxManagedSkill[];
+  args(selected: NpxManagedSkill[], global: boolean): string[];
   /** Slots reported by finalActual when the selection is empty (fresh add). */
-  slots?(selected: ManagedSkill[]): string[];
+  slots?(selected: NpxManagedSkill[]): string[];
   /** restoreDesired only when something failed (remove: success means the Slots are gone). */
   restoreOnFailureOnly?: boolean;
   /** Ops-specific post-run check; throws on failure. May rescan and push into drift.
    *  Runs after the finalActual rescan for always-restore ops (report is fresh),
    *  before the conditional restore for restoreOnFailureOnly ops (must mid-scan).
    *  `outcome` carries the run result so check errors can mirror the generic reason. */
-  check?(target: Target, selected: ManagedSkill[], drift: string[], outcome: {
-    result?: ReturnType<typeof runSkills>;
+  check?(target: Target, selected: NpxManagedSkill[], drift: string[], outcome: {
+    result?: NpxSkillsRunResult;
     failure?: Error;
     actual?: string;
   }): void;
   /** Runs only on success; a throw here propagates unwrapped. */
-  after?(target: Target, selected: ManagedSkill[], actual: string): void;
+  after?(target: Target, selected: NpxManagedSkill[], actual: string): void;
 }
 
 function guardedSkillsOp(
@@ -406,8 +315,8 @@ function guardedSkillsOp(
     validatePolicyState(target);
     const selected = op.select(target);
     const desired = desiredFor(target, selected);
-    const args = op.args(selected, projectPath ? [] : ['--global']);
-    let result: ReturnType<typeof runSkills> | undefined;
+    const args = op.args(selected, !projectPath);
+    let result: NpxSkillsRunResult | undefined;
     let failure: Error | undefined;
     let drift: string[] = [];
     const restore = (): void => {
@@ -415,7 +324,7 @@ function guardedSkillsOp(
     };
     try {
       ensureVisible(target, selected);
-      result = runSkills(args, target.cwd);
+      result = runNpxSkills(args, target.cwd);
     } catch (error) {
       failure = error as Error;
     }
@@ -465,8 +374,8 @@ export function sharedAdd(
       const slotInfo = target.report.slots.find((item) =>
         item.targetId === target.target.id && item.name === slot);
       if (existing) {
-        const current = provenanceLabel(slotInfo?.provenance);
-        if (!sameSource(source, name, slotInfo?.provenance)) {
+        const current = npxSkillsProvenanceLabel(slotInfo?.provenance);
+        if (!sameNpxSkillsSource(source, name, slotInfo?.provenance)) {
           console.log(`Replace: ${current} -> ${source}`);
           if (!replace) throw new Error('source replacement requires --replace');
         }
@@ -481,8 +390,7 @@ export function sharedAdd(
         ? [{ name: existing.name, slot, provenance: slotInfo?.provenance ?? {} }]
         : [];
     },
-    args: (_selected, globalFlag) =>
-      ['add', source, '--skill', name, '--agent', 'codex', ...globalFlag, '--copy'],
+    args: (_selected, global) => npxSkillsAddArgs(source, name, global),
     slots: () => [slot],
     check(target, selected, drift, { result, failure, actual }) {
       const installed = actual !== 'unavailable' && target.report.relationships.some((item) =>
@@ -493,9 +401,9 @@ export function sharedAdd(
       if (!runFailed && !installed) throw new Error(`exit ${result?.status ?? 1}`);
     },
     after(target, selected, actual) {
-      const managed = readManagedSkillLock(target.lockFile)
+      const managed = readNpxSkillsLock(target.lockFile)
         .find((skill) => skill.slot === slot);
-      if (managed && !sameSource(source, name, managed.provenance))
+      if (managed && !sameNpxSkillsSource(source, name, managed.provenance))
         throw new Error(`skills add failed (installer lock source changed)\nActual: ${actual}\nRemaining drift: ${target.target.id}/${slot}: unverified provenance`);
       if (selected.length === 0) updateBaseIntent(target, [slot], 'on');
     },
@@ -510,8 +418,8 @@ export function sharedUpdate(
   return guardedSkillsOp(home, projectPath, {
     name: 'update',
     select: (target) => managedSelection(target, names),
-    args: (selected, globalFlag) =>
-      ['update', ...selected.map(({ name }) => name), ...globalFlag],
+    args: (selected, global) =>
+      npxSkillsUpdateArgs(selected.map(({ name }) => name), global),
   });
 }
 
@@ -534,8 +442,8 @@ export function sharedRemove(
       }
       return selected;
     },
-    args: (selected, globalFlag) =>
-      ['remove', ...selected.map(({ name }) => name), '--agent', 'codex', ...globalFlag],
+    args: (selected, global) =>
+      npxSkillsRemoveArgs(selected.map(({ name }) => name), global),
     check(target, selected, _drift, { result, failure }) {
       target.report = scan(home, projectPath);
       const remaining = selected.filter((skill) => target.report.relationships.some((item) =>
