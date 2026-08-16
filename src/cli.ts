@@ -56,6 +56,7 @@ import {
   deactivatePreset,
   deletePreset,
   planActivation,
+  planMirrorAction,
   planPresetReconcile,
   remainingDrift,
   type PresetReconcilePlan,
@@ -67,13 +68,14 @@ const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the sour
   skillspub ls [--target T] [--tag T]  skill × Target matrix (+ untagged/deadlink hints)
   skillspub on|off <selector> <target...> [--yes]  update Skill Target relationships
   skillspub status <skill>             per-Target state of one skill
+  skillspub mirror sync|overwrite|remove|convert <target-id> <slot> [--yes]
   skillspub bundle ls|show|create|add|rm ...
   skillspub tag add|rm|ls ...          manage global resource Tags
   skillspub preset create|add|rm|ls|show|activate|deactivate|reconcile|delete ...
   skillspub shared find|describe|add|update|remove ...  manage the Shared Target via skills@1.5.21
   skillspub scan                       explicitly scan Global Skill Target inventory
   skillspub doctor [--repair --yes]    diagnose; explicitly confirm safe repairs
-  skillspub project <path> scan|doctor|shared|preset ...  operate on the exact Project Skill Targets
+  skillspub project <path> scan|doctor|shared|preset|mirror ...  operate on exact Project Skill Targets
   skillspub targets                    list resolved Skill Targets
   skillspub harnesses [pi setup|reconcile [--yes]]  inspect or isolate Pi Shared Skills
   skillspub migrate targets [--yes]    preview or migrate runtimes.json to targets.json
@@ -227,8 +229,11 @@ function cmdOnOff(
     const intent = target.intent === target.to
       ? ''
       : ` (Base intent ${target.intent}; claimed ${target.to})`;
+    const mirror = target.createForm === 'mirror'
+      ? ' (create Mirror)'
+      : target.syncMirror ? ' (synchronize Mirror)' : '';
     console.log(
-      `  ${target.targetId}/${target.slot}\t${target.from} -> ${target.to}${intent}`,
+      `  ${target.targetId}/${target.slot}\t${target.from} -> ${target.to}${intent}${mirror}`,
     );
   }
   if (!confirmed && plan.targets.some((target) =>
@@ -248,6 +253,21 @@ function cmdOnOff(
     throw new Error(`${(error as Error).message}\nRemaining drift: ${drift}`);
   }
   scanGlobalInventory(home);
+}
+
+function cmdMirror(home: ReturnType<typeof defaultHome>, args: string[], projectPath?: string): void {
+  const [action, targetId, slot, ...rest] = args;
+  if (!['sync', 'overwrite', 'remove', 'convert'].includes(action ?? '') || !targetId || !slot ||
+    rest.some((arg) => arg !== '--yes'))
+    throw new Error('usage: skillspub mirror sync|overwrite|remove|convert <target-id> <slot> [--yes]');
+  const plan = planMirrorAction(home, targetId, slot, action as 'sync' | 'overwrite' | 'remove' | 'convert',
+    projectPath ? { projectPath } : {});
+  const target = plan.targets[0];
+  console.log(`Mirror plan: ${action} ${target?.targetId}/${target?.slot}`);
+  if (!rest.includes('--yes')) return;
+  applyActivationPlan(home, plan);
+  if (projectPath) scanProjectInventory(home, projectPath);
+  else scanGlobalInventory(home);
 }
 
 function cmdStatus(
@@ -783,6 +803,9 @@ async function main(
       case 'status':
         cmdStatus(home, rest);
         break;
+      case 'mirror':
+        cmdMirror(home, rest);
+        break;
       case 'bundle':
         cmdBundle(home, rest);
         break;
@@ -807,13 +830,14 @@ async function main(
         break;
       case 'project': {
         const [projectPath, projectCommand, ...projectArgs] = rest;
-        if (!projectPath) throw new Error('usage: skillspub project <path> scan|doctor|shared|preset');
+        if (!projectPath) throw new Error('usage: skillspub project <path> scan|doctor|shared|preset|mirror');
         if (projectCommand === 'scan' && projectArgs.length === 0)
           printScan(scanProjectInventory(home, projectPath, undefined, { persist: false }));
         else if (projectCommand === 'doctor') cmdDoctor(home, projectArgs, projectPath);
         else if (projectCommand === 'shared') cmdShared(home, projectArgs, projectPath);
         else if (projectCommand === 'preset') cmdPreset(home, projectArgs, projectPath);
-        else throw new Error('usage: skillspub project <path> scan|doctor|shared|preset');
+        else if (projectCommand === 'mirror') cmdMirror(home, projectArgs, projectPath);
+        else throw new Error('usage: skillspub project <path> scan|doctor|shared|preset|mirror');
         break;
       }
       case 'targets':

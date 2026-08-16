@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Home } from './core.ts';
 import {
+  hashDirectory,
   normalizeSlotName,
   readStateFile,
   targetSlotId,
@@ -9,8 +10,11 @@ import {
   scanProjectInventory,
   writeStateFile,
   type Activation,
+  type ManagedMirror,
+  type ResourceForm,
   type InventoryResource,
   type InventoryScanReport,
+  type SkillTarget,
   type TargetRelationship,
   type ScannedTarget,
 } from './inventory.ts';
@@ -28,6 +32,8 @@ import {
 
 export interface PresetScope {
   projectPath?: string;
+  /** Programmatic callers may provide adapter-resolved Targets. */
+  targets?: SkillTarget[];
 }
 
 export interface PresetReconcilePlan extends ActivationPlan {
@@ -36,6 +42,8 @@ export interface PresetReconcilePlan extends ActivationPlan {
   presetActivations: Record<string, string[]>;
   baseIntentDefaults: Record<string, Activation>;
 }
+
+export type MirrorAction = 'sync' | 'overwrite' | 'remove' | 'convert';
 
 export interface ActivationTarget {
   slotId: string;
@@ -49,6 +57,12 @@ export interface ActivationTarget {
   to: Activation;
   relationship?: TargetRelationship;
   destination?: string;
+  /** Form to create for a missing Relationship; Link remains the default. */
+  createForm?: Extract<ResourceForm, 'link' | 'mirror'>;
+  /** Explicit managed-Mirror operation, applied through this same plan. */
+  mirrorAction?: MirrorAction;
+  /** Restore a parked Mirror by synchronizing it after the move. */
+  syncMirror?: boolean;
   /** remove-link: unlink the symlink Relationship instead of moving it. */
   remove?: boolean;
 }
@@ -101,6 +115,31 @@ interface ActivationContext {
   report: InventoryScanReport;
   intent: Activation;
   claims: Record<string, string[]>;
+}
+
+function creationForm(target: ScannedTarget): Extract<ResourceForm, 'link' | 'mirror'> {
+  return target.relationship?.support === 'managed' && target.relationship.link === 'unsupported'
+    ? 'mirror'
+    : 'link';
+}
+
+function mirrorSource(report: InventoryScanReport, sourceId: string): InventoryResource {
+  const source = report.resources.find((resource) => resource.id === sourceId);
+  if (!source || source.realPath !== sourceId)
+    throw new Error(`Mirror source is unavailable: ${sourceId}`);
+  return source;
+}
+
+function assertMirrorMaySync(
+  report: InventoryScanReport,
+  relationship: TargetRelationship,
+  overwrite = false,
+): void {
+  if (relationship.form !== 'mirror' || !relationship.mirror || !relationship.realPath)
+    throw new Error(`not a managed Mirror: ${relationship.path}`);
+  mirrorSource(report, relationship.mirror.sourceId);
+  if (!overwrite && hashDirectory(relationship.realPath) !== relationship.mirror.hash)
+    throw new Error(`Mirror diverged and requires overwrite or conversion: ${relationship.path}`);
 }
 
 function selectedRelationship(
@@ -180,6 +219,8 @@ function activationTarget(
     slotName,
   });
   preflightTarget(relationship, from, to, destination);
+  const syncMirror = relationship?.form === 'mirror' && from === 'off' && to === 'on';
+  if (syncMirror) assertMirrorMaySync(context.report, relationship);
   return {
     slotId,
     targetId: target.id,
@@ -191,6 +232,8 @@ function activationTarget(
     to,
     relationship,
     destination,
+    createForm: !relationship && to === 'on' ? creationForm(target) : undefined,
+    syncMirror,
   };
 }
 
@@ -265,8 +308,8 @@ function resolvePlanSelector(
 /** Scan for a mutation scope: project scopes see project/parent/global targets. */
 function mutationReport(home: Home, scope: PresetScope): InventoryScanReport {
   return scope.projectPath
-    ? scanProjectInventory(home, scope.projectPath, undefined, { persist: false })
-    : scanGlobalInventory(home, undefined, { persist: false });
+    ? scanProjectInventory(home, scope.projectPath, scope.targets, { persist: false })
+    : scanGlobalInventory(home, scope.targets, { persist: false });
 }
 
 /** Resolve one writable Target by key or id; project scans prefer the project-scope match. */
@@ -381,6 +424,8 @@ export function planToggle(
       )
     : undefined;
   preflightTarget(relationship, from, to, destination);
+  const syncMirror = relationship.form === 'mirror' && from === 'off' && to === 'on';
+  if (syncMirror) assertMirrorMaySync(report, relationship);
   const targets = [{
     slotId,
     targetId,
@@ -392,12 +437,13 @@ export function planToggle(
     to,
     relationship,
     destination,
+    syncMirror,
   }];
   preflightDependentLinks(report, targets);
   return { report, targets, staleResourceIds: [], stateFile: report.stateFile };
 }
 
-/** Create the missing Link from one existing skill resource into a Target Slot. */
+/** Create the missing Relationship from one existing resource; managed copy-only Targets use Mirror. */
 export function planLink(
   home: Home,
   resourceId: string,
@@ -451,6 +497,39 @@ export function planUnlink(
   };
 }
 
+/** Preview an explicit managed-Mirror synchronization, overwrite, removal, or conversion. */
+export function planMirrorAction(
+  home: Home,
+  targetId: string,
+  slot: string,
+  action: MirrorAction,
+  scope: PresetScope = {},
+): ActivationPlan {
+  const { report, relationship, slotId } = selectSlotMutation(home, targetId, slot, scope);
+  if (relationship.form !== 'mirror')
+    throw new Error(`not a managed Mirror: ${relationship.path}`);
+  if (action === 'sync') assertMirrorMaySync(report, relationship);
+  if (action === 'overwrite') assertMirrorMaySync(report, relationship, true);
+  if (action === 'remove') assertUnlinkAllowed(report.stateFile, slotId);
+  return {
+    report,
+    targets: [{
+      slotId,
+      targetId,
+      targetKey: relationship.targetKey,
+      slot,
+      resourceId: relationship.resourceId ?? '',
+      from: relationship.activation,
+      intent: relationship.activation,
+      to: relationship.activation,
+      relationship,
+      mirrorAction: action,
+    }],
+    staleResourceIds: [],
+    stateFile: report.stateFile,
+  };
+}
+
 function readBaseIntent(state: CatalogState): Record<string, Activation> {
   const value = state.baseIntent ?? {};
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
@@ -494,7 +573,7 @@ function moveRelationships(home: Home, plan: ActivationPlan): {
     if (relationship.form === 'local') {
       const moved = fs.realpathSync(destination);
       movedLocals.set(target.resourceId, moved);
-      preserveMovedResourceReferences(home, target.resourceId, moved);
+      preserveMovedResourceReferences(home, target.resourceId, moved, plan.stateFile);
     } else {
       movedLinks.set(relationship.path, destination);
       const movedTarget = movedLocals.get(target.resourceId);
@@ -512,13 +591,26 @@ function moveRelationships(home: Home, plan: ActivationPlan): {
   return { movedLinks, movedLocals };
 }
 
-function createMissingLinks(plan: ActivationPlan, movedLocals: MovedLocals): void {
+function createMissingRelationships(
+  plan: ActivationPlan,
+  movedLocals: MovedLocals,
+): Map<string, ManagedMirror> {
+  const mirrors = new Map<string, ManagedMirror>();
   for (const target of plan.targets) {
     if (target.from !== 'missing' || target.to !== 'on' || !target.destination) continue;
     const source = movedLocals.get(target.resourceId) ?? target.resourceId;
     fs.mkdirSync(path.dirname(target.destination), { recursive: true });
-    fs.symlinkSync(source, target.destination, 'dir');
+    if (target.createForm === 'mirror') {
+      fs.cpSync(source, target.destination, { recursive: true, errorOnExist: true });
+      const hash = hashDirectory(source);
+      if (hashDirectory(target.destination) !== hash)
+        throw new Error(`Mirror verification failed: ${target.destination}`);
+      mirrors.set(target.slotId, { sourceId: source, hash });
+    } else {
+      fs.symlinkSync(source, target.destination, 'dir');
+    }
   }
+  return mirrors;
 }
 
 function retargetMovedLinks(
@@ -541,7 +633,12 @@ function retargetMovedLinks(
   }
 }
 
-function preserveMovedResourceReferences(home: Home, previous: string, moved: string): void {
+function preserveMovedResourceReferences(
+  home: Home,
+  previous: string,
+  moved: string,
+  policyStateFile = statePath(home),
+): void {
   const state = readState(home);
   state.bundles = Object.fromEntries(
     Object.entries(readBundles(state)).map(([name, members]) => [
@@ -572,7 +669,25 @@ function preserveMovedResourceReferences(home: Home, previous: string, moved: st
       },
     ]),
   );
+  const mirrors = state.mirrors as Record<string, ManagedMirror> | undefined;
+  if (mirrors) {
+    state.mirrors = Object.fromEntries(Object.entries(mirrors).map(([slotId, mirror]) => [
+      slotId,
+      mirror.sourceId === previous ? { ...mirror, sourceId: moved } : mirror,
+    ]));
+  }
   writeState(home, state);
+  if (policyStateFile !== statePath(home)) {
+    const policy = readStateFile(policyStateFile);
+    const policyMirrors = policy.mirrors as Record<string, ManagedMirror> | undefined;
+    if (policyMirrors) {
+      policy.mirrors = Object.fromEntries(Object.entries(policyMirrors).map(([slotId, mirror]) => [
+        slotId,
+        mirror.sourceId === previous ? { ...mirror, sourceId: moved } : mirror,
+      ]));
+      writeStateFile(policyStateFile, policy);
+    }
+  }
 }
 
 function movedResourceIds(plan: ActivationPlan): Map<string, string> {
@@ -616,13 +731,56 @@ export function remainingDrift(
       : [`${target.targetId}/${target.slot}`]);
 }
 
-function removePlanLinks(plan: ActivationPlan): void {
+function removePlanRelationships(plan: ActivationPlan): void {
   for (const target of plan.targets) {
-    if (!target.remove || !target.relationship) continue;
-    if (!fs.lstatSync(target.relationship.path).isSymbolicLink())
-      throw new Error(`cannot unlink ${target.relationship.path}: not a symlink`);
-    fs.unlinkSync(target.relationship.path);
+    const relationship = target.relationship;
+    if (!relationship) continue;
+    if (target.remove) {
+      if (!fs.lstatSync(relationship.path).isSymbolicLink())
+        throw new Error(`cannot unlink ${relationship.path}: not a symlink`);
+      fs.unlinkSync(relationship.path);
+    }
+    if (target.mirrorAction === 'remove') fs.rmSync(relationship.path, { recursive: true });
   }
+}
+
+function applyMirrorActions(
+  plan: ActivationPlan,
+  movedLocals: MovedLocals,
+): Map<string, ManagedMirror> {
+  const mirrors = new Map<string, ManagedMirror>();
+  for (const target of plan.targets) {
+    const relationship = target.relationship;
+    if (!relationship || (target.mirrorAction !== 'sync' &&
+      target.mirrorAction !== 'overwrite' && !target.syncMirror)) continue;
+    const sourceId = movedLocals.get(target.resourceId) ?? target.resourceId;
+    const source = mirrorSource(plan.report, target.resourceId);
+    const destination = target.destination ?? relationship.path;
+    fs.rmSync(destination, { recursive: true, force: true });
+    fs.cpSync(source.realPath, destination, { recursive: true });
+    const hash = hashDirectory(source.realPath);
+    if (hashDirectory(destination) !== hash)
+      throw new Error(`Mirror verification failed: ${destination}`);
+    mirrors.set(target.slotId, { sourceId, hash });
+  }
+  return mirrors;
+}
+
+function updateMirrorMetadata(
+  stateFile: string,
+  updates: Map<string, ManagedMirror>,
+  plan: ActivationPlan,
+): void {
+  if (updates.size === 0 && !plan.targets.some((target) =>
+    target.mirrorAction === 'remove' || target.mirrorAction === 'convert')) return;
+  const state = readStateFile(stateFile);
+  const mirrors = { ...(state.mirrors as Record<string, ManagedMirror> | undefined) };
+  for (const [slotId, mirror] of updates) mirrors[slotId] = mirror;
+  for (const target of plan.targets)
+    if (target.mirrorAction === 'remove' || target.mirrorAction === 'convert') delete mirrors[target.slotId];
+  if (Object.keys(mirrors).length === 0) delete state.mirrors;
+  else state.mirrors = mirrors;
+  writeStateFile(stateFile, state);
 }
 
 export function applyActivationPlan(home: Home, plan: ActivationPlan): void {
@@ -635,9 +793,11 @@ export function applyActivationPlan(home: Home, plan: ActivationPlan): void {
   state.baseIntent = baseIntent;
   writeStateFile(plan.stateFile, state);
 
-  removePlanLinks(plan);
+  removePlanRelationships(plan);
   const { movedLinks, movedLocals } = moveRelationships(home, plan);
-  createMissingLinks(plan, movedLocals);
+  const createdMirrors = createMissingRelationships(plan, movedLocals);
+  const synchronizedMirrors = applyMirrorActions(plan, movedLocals);
+  updateMirrorMetadata(plan.stateFile, new Map([...createdMirrors, ...synchronizedMirrors]), plan);
   retargetMovedLinks(plan, movedLinks, movedLocals);
 }
 
@@ -672,7 +832,7 @@ function scopeScan(home: Home, scope: PresetScope = {}): {
   policyState: Record<string, unknown>;
 } {
   if (scope.projectPath) {
-    const report = scanProjectInventory(home, scope.projectPath, undefined, { persist: false });
+    const report = scanProjectInventory(home, scope.projectPath, scope.targets, { persist: false });
     return {
       report,
       stateFile: report.stateFile,
@@ -680,7 +840,7 @@ function scopeScan(home: Home, scope: PresetScope = {}): {
       policyState: readStateFile(report.stateFile),
     };
   }
-  const report = scanGlobalInventory(home, undefined, { persist: false });
+  const report = scanGlobalInventory(home, scope.targets, { persist: false });
   const stateFile = statePath(home);
   const catalogState = readStateFile(stateFile) as CatalogState;
   return { report, stateFile, catalogState, policyState: catalogState };
@@ -844,13 +1004,31 @@ function buildReconcileTargets(
         intent: intent ?? 'off',
         to: desired,
         destination,
+        createForm: creationForm(target),
       });
       continue;
     }
 
     const from = relationship.activation;
     if (claimed && intent === undefined) baseIntentDefaults[slotId] = from;
-    if (from === desired) continue;
+    if (from === desired) {
+      if (desired === 'on' && relationship.form === 'mirror' && relationship.mirror &&
+        !relationship.diverged && mirrorSource(report, relationship.mirror.sourceId).hash !== relationship.mirror.hash) {
+        targets.push({
+          slotId,
+          targetId,
+          targetKey: target.key,
+          slot,
+          resourceId: resource?.id ?? resourceId,
+          from,
+          intent: intent ?? desired,
+          to: desired,
+          relationship,
+          mirrorAction: 'sync',
+        });
+      }
+      continue;
+    }
 
     const destination = activationDestination({
       relationship,
@@ -860,6 +1038,8 @@ function buildReconcileTargets(
       slotName: slot,
     });
     preflightTarget(relationship, from, desired, destination);
+    const syncMirror = relationship.form === 'mirror' && from === 'off' && desired === 'on';
+    if (syncMirror) assertMirrorMaySync(report, relationship);
     targets.push({
       slotId,
       targetId,
@@ -871,6 +1051,7 @@ function buildReconcileTargets(
       to: desired,
       relationship,
       destination,
+      syncMirror,
     });
   }
 
@@ -995,7 +1176,9 @@ export function applyPresetReconcile(
   writeStateFile(plan.stateFile, state);
 
   const { movedLinks, movedLocals } = moveRelationships(home, plan);
-  createMissingLinks(plan, movedLocals);
+  const createdMirrors = createMissingRelationships(plan, movedLocals);
+  const synchronizedMirrors = applyMirrorActions(plan, movedLocals);
+  updateMirrorMetadata(plan.stateFile, new Map([...createdMirrors, ...synchronizedMirrors]), plan);
   retargetMovedLinks(plan, movedLinks, movedLocals);
 }
 
