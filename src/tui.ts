@@ -200,29 +200,26 @@ function TargetList({
   height: number;
 }): ReactNode {
   const start = windowStart(targets.length, selected, height);
+  const detected = new Map(harnesses.detected.map((harness) => [harness.key, harness]));
   return h(
     ListColumn,
     {title: 'Targets', focused, width},
-    h(Text, {dimColor: true}, ' Detected Harnesses'),
-    ...(harnesses.detected.length === 0
-      ? [h(Text, {key: 'none', dimColor: true}, '   none')]
-      : harnesses.detected.map((harness) =>
-        h(Text, {key: harness.key}, `   ${harness.name} [${harness.support}] Shared ${harness.sharedConsumption.status} Isolation ${harness.isolation.status}`))),
-    ...(harnesses.setup.length === 0
-      ? []
-      : [
-        h(Text, {key: 'setup', dimColor: true}, ' Setup'),
-        ...harnesses.setup.map((harness) =>
-          h(Text, {key: `setup:${harness.key}`, dimColor: true}, `   ${harness.name} [${harness.support}]`)),
-      ]),
-    h(Text, {dimColor: true}, ' Skill Targets'),
-    ...targets.slice(start, start + height).map((target, index) =>
-      h(
+    ...targets.slice(start, start + height).map((target, index) => {
+      const harness = detected.get(target.name);
+      return h(
         RowLine,
         {key: `target:${target.name}`, active: start + index === selected, focused},
         target.name,
-      ),
-    ),
+        harness ? h(Text, {dimColor: true}, ` [${harness.support}]`) : null,
+      );
+    }),
+    ...(harnesses.setup.length === 0
+      ? []
+      : [
+          h(Text, {key: 'setup', dimColor: true}, ' Setup'),
+          ...harnesses.setup.map((harness) =>
+            h(Text, {key: `setup:${harness.key}`, dimColor: true}, `   ${harness.name} [${harness.support}]`)),
+        ]),
   );
 }
 
@@ -349,6 +346,35 @@ interface Membership {
   presets: string[];
 }
 
+function TargetInfoPanel({
+  target,
+  harness,
+  width,
+}: {
+  target: Target;
+  harness?: TuiSnapshot['harnesses']['detected'][number];
+  width: number;
+}): ReactNode {
+  const rows: ReactNode[] = [
+    h(Text, {key: 'target-name', bold: true, wrap: 'wrap'}, ` ${target.name}`),
+    h(Text, {key: 'target-gap'}, ''),
+    h(Text, {key: 'type'}, ' ', h(Text, {bold: true}, 'Type:'), ' Skill Target'),
+    h(Text, {key: 'path', wrap: 'wrap'}, ' ', h(Text, {bold: true}, 'Path:'), ` ${target.dir}`),
+  ];
+  if (harness) {
+    rows.push(
+      h(Text, {key: 'harness-gap'}, ''),
+      h(Text, {key: 'harness'}, ' ', h(Text, {bold: true, color: 'cyan'}, 'Harness:'), ` ${harness.name}`),
+      h(Text, {key: 'detected'}, ' ', h(Text, {bold: true}, 'Detected:'), ` ${harness.detected ? 'yes' : 'no'}`),
+      h(Text, {key: 'support'}, ' ', h(Text, {bold: true}, 'Support:'), ` ${harness.support}`),
+      h(Text, {key: 'shared'}, ' ', h(Text, {bold: true}, 'Shared:'), ` ${harness.sharedConsumption.status}`),
+      h(Text, {key: 'isolation'}, ' ', h(Text, {bold: true}, 'Isolation:'), ` ${harness.isolation.status}`),
+      h(Text, {key: 'link'}, ' ', h(Text, {bold: true}, 'Link:'), ` ${harness.link.supported ? 'supported' : 'unsupported'}`),
+    );
+  }
+  return h(ListColumn, {title: 'Info', focused: false, width}, ...rows);
+}
+
 function InfoPanel({
   row,
   info,
@@ -432,6 +458,10 @@ function BatchActivationModal({confirm}: {confirm: BatchConfirm}): ReactNode {
   );
 }
 
+function knownTagNames(tags: Record<string, string[]>): string[] {
+  return [...new Set(Object.values(tags).flat())].sort((a, b) => a.localeCompare(b));
+}
+
 function ManageModal({
   row,
   catalog,
@@ -443,7 +473,8 @@ function ManageModal({
   bundles: string[];
   manage: ManageState;
 }): ReactNode {
-  const tags = catalog.tags[row.id] ?? [];
+  const assigned = new Set(catalog.tags[row.id] ?? []);
+  const tagNames = knownTagNames(catalog.tags);
   const selector = `skill:${row.id}`;
   const presetNames = Object.keys(catalog.presets).sort((a, b) => a.localeCompare(b));
   const active = (section: ManageState['section'], index: number) =>
@@ -459,11 +490,11 @@ function ManageModal({
       ` Bundles: ${bundles.length > 0 ? bundles.join(', ') : '—'}`),
     h(Text, null, ''),
     sectionTitle('Tags', manage.section === 'tags'),
-    ...tags.map((tag, index) =>
+    ...tagNames.map((tag, index) =>
       h(Text, {key: `tag-${tag}`, inverse: active('tags', index)},
-        `${marker(active('tags', index))} ${tag}`)),
-    h(Text, {key: 'tag-add', inverse: active('tags', tags.length)},
-      `${marker(active('tags', tags.length))} + add tag`),
+        `${marker(active('tags', index))} [${assigned.has(tag) ? 'x' : ' '}] ${tag}`)),
+    h(Text, {key: 'tag-add', inverse: active('tags', tagNames.length)},
+      `${marker(active('tags', tagNames.length))} + add tag`),
     h(Text, null, ''),
     sectionTitle('Presets', manage.section === 'presets'),
     ...presetNames.map((name, index) => {
@@ -577,6 +608,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   const [searching, setSearching] = useState(false);
   const [sort, setSort] = useState<SortOrder>('name');
   const [modal, setModal] = useState<{row: Row; scroll: number} | null>(null);
+  const [targetInfoOpen, setTargetInfoOpen] = useState(false);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [manage, setManage] = useState<ManageState | null>(null);
   const [batch, setBatch] = useState<{ marks: Set<string> } | null>(null);
@@ -586,6 +618,10 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
 
   const targets = snapshot.targets;
   const target = targets[Math.min(targetIndex, Math.max(0, targets.length - 1))];
+  const targetHarness = target
+    ? [...snapshot.harnesses.detected, ...snapshot.harnesses.setup]
+        .find((harness) => harness.key === target.name)
+    : undefined;
   const instTarget = Math.min(instanceTargetIndex, Math.max(0, targets.length - 1));
   const instanceTarget = targets[instTarget];
   const rows = useMemo(
@@ -693,6 +729,10 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   };
 
   useInput((input, key) => {
+    if (targetInfoOpen) {
+      if (key.escape) setTargetInfoOpen(false);
+      return;
+    }
     if (modal) {
       if (key.escape) return setModal(null);
       if (key.downArrow || input === 'j')
@@ -710,10 +750,11 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       if (!current) return setManage(null);
       const row = current;
       const selector = `skill:${row.id}`;
-      const tags = snapshot.catalog.tags[row.id] ?? [];
+      const assignedTags = snapshot.catalog.tags[row.id] ?? [];
+      const tagNames = knownTagNames(snapshot.catalog.tags);
       const presetNames = Object.keys(snapshot.catalog.presets)
         .sort((a, b) => a.localeCompare(b));
-      const rowCount = (manage.section === 'tags' ? tags.length : presetNames.length) + 1;
+      const rowCount = (manage.section === 'tags' ? tagNames.length : presetNames.length) + 1;
       const draft = manage.input;
       if (draft) {
         if (key.escape) return setManage({...manage, input: undefined});
@@ -757,17 +798,22 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       if (manage.section === 'tags') {
         if ((key.return || input === 'a') && onActionRow)
           return setManage({...manage, input: {kind: 'tag', value: ''}});
-        if (input === 'x' && !onActionRow && tags[manage.index] !== undefined) {
-          const tag = tags[manage.index];
+        const tag = tagNames[manage.index];
+        if (!onActionRow && tag !== undefined && (input === ' ' || input === 'x')) {
+          const assigned = assignedTags.includes(tag);
+          if (input === 'x' && !assigned) return;
           try {
             prepareMutation();
-            removeResourceTags(home, selector, [tag]);
+            if (assigned) removeResourceTags(home, selector, [tag]);
+            else addResourceTags(home, selector, [tag]);
             refresh({rowId: row.id});
-            setFeedback(`Removed tag ${tag} from ${row.name}`);
+            setFeedback(assigned
+              ? `Removed tag ${tag} from ${row.name}`
+              : `Tagged ${row.name}: ${tag}`);
           } catch (err) {
             setFeedback((err as Error).message);
           }
-          return setManage({...manage, index: Math.min(manage.index, tags.length - 1)});
+          return setManage({...manage, index: Math.min(manage.index, Math.max(0, tagNames.length - 1))});
         }
         return;
       }
@@ -1078,6 +1124,8 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       });
     }
     if (key.return) {
+      if (tab === 'target' && focusColumn === 0 && target)
+        return setTargetInfoOpen(true);
       const row = tab === 'target' ? entry?.row : instance;
       if (row) setModal({row, scroll: 0});
     }
@@ -1113,12 +1161,22 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       snapshot.project ? h(Text, {color: 'cyan'}, `  Project: ${snapshot.project}`) : null,
       `  Sort: ${sortLabel(sort)}${query ? `  Search: ${query}` : ''}`,
     ),
-    modal
+    targetInfoOpen && target
       ? h(
           Box,
           {height: bodyHeight, paddingLeft: 2, paddingRight: 2, paddingTop: 1},
-          h(DetailModal, {row: modal.row, lines: modalLines, scroll: modal.scroll, height}),
+          h(TargetInfoPanel, {
+            target,
+            harness: targetHarness,
+            width: Math.max(12, width - 4),
+          }),
         )
+      : modal
+        ? h(
+            Box,
+            {height: bodyHeight, paddingLeft: 2, paddingRight: 2, paddingTop: 1},
+            h(DetailModal, {row: modal.row, lines: modalLines, scroll: modal.scroll, height}),
+          )
       : manage && manageRow
         ? h(
             Box,
@@ -1163,12 +1221,18 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
               showScope: snapshot.project !== undefined,
             }),
             wide
-              ? h(InfoPanel, {
-                  row: entry?.row,
-                  info: entry?.relationship.info,
-                  membership,
-                  width: infoWidth,
-                })
+              ? focusColumn === 0
+                ? h(TargetInfoPanel, {
+                    target,
+                    harness: targetHarness,
+                    width: infoWidth,
+                  })
+                : h(InfoPanel, {
+                    row: entry?.row,
+                    info: entry?.relationship.info,
+                    membership,
+                    width: infoWidth,
+                  })
               : null,
           )
         : h(
@@ -1202,8 +1266,10 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     h(
       Text,
       {inverse: true, wrap: 'truncate-end'},
-      modal
-        ? ' ↑↓/jk scroll  PgUp/PgDn page  esc close '
+      targetInfoOpen
+        ? ' esc close '
+        : modal
+          ? ' ↑↓/jk scroll  PgUp/PgDn page  esc close '
         : manage
           ? ` ${feedback}${feedback ? '  ' : ''}j/k move  tab section  space toggle  a add  x rm tag  esc close `
         : batchConfirm
@@ -1216,7 +1282,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
           ? ' y confirm  n/esc cancel '
         : searching
           ? ` search: ${query || '…'}  enter apply  esc clear `
-          : ` ${feedback}${feedback ? '  ' : ''}${tab}:${columnName}  ←→/hl  ↑↓/jk${actionHint}  enter SKILL.md  m manage  / search  s sort:${sortLabel(sort)}  R refresh  tab  q `,
+          : ` ${feedback}${feedback ? '  ' : ''}${tab}:${columnName}  ←→/hl  ↑↓/jk${actionHint}  enter ${tab === 'target' && focusColumn === 0 ? 'details' : 'SKILL.md'}  m manage  / search  s sort:${sortLabel(sort)}  R refresh  tab  q `,
     ),
   );
 }
