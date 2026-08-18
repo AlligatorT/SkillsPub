@@ -140,8 +140,9 @@ test('initial projection: first agent selected, all relationship kinds shown, ab
   assert.match(frame, /\[ ON \] local\s+grilling/);
   // completely absent skill of agent b is not listed
   assert.doesNotMatch(frame, /only-b/);
-  // summary of first entry visible on wide terminal
-  assert.match(frame, /Source:/);
+  // selected Target summary is visible on wide terminals
+  assert.match(frame, /Type: Skill Target/);
+  assert.match(frame, /Path:/);
   // focus starts on the agent column, first agent selected
   assert.match(frame, /› a/);
   t.unmount();
@@ -193,7 +194,7 @@ test('manage modal adds and removes tags for the selected skill', async () => {
   await t.send('\r');
   frame = t.stdout.frame();
   assert.match(frame, /Tagged grilling: backend/);
-  assert.match(frame, /› backend/);
+  assert.match(frame, /› \[x\] backend/);
   const state = () => JSON.parse(
     fs.readFileSync(path.join(home.configDir, 'state.json'), 'utf8'));
   assert.deepEqual(state().tags[grillingId], ['backend']);
@@ -205,6 +206,37 @@ test('manage modal adds and removes tags for the selected skill', async () => {
 
   await t.send('\x1b');
   assert.doesNotMatch(t.stdout.frame(), /Manage: grilling/);
+  t.unmount();
+});
+
+test('manage modal reuses a tag created on another skill', async () => {
+  const { home } = setup();
+  const grillingId = fs.realpathSync(path.join(home.configDir, 'a-skills', 'grilling'));
+  const linkedId = fs.realpathSync(path.join(home.configDir, 'shared', 'real-linked'));
+  const t = await renderApp(home);
+  await t.send('l');
+  await t.send('j');
+  await t.send('j'); // grilling
+  await t.send('m');
+  await t.send('a');
+  for (const input of 'cicd') await t.send(input);
+  await t.send('\r');
+  await t.send('\x1b');
+
+  await t.send('j'); // linked
+  await t.send('m');
+  let frame = t.stdout.frame();
+  assert.match(frame, /Manage: linked/);
+  assert.match(frame, /\[ \] cicd/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(home.configDir, 'state.json'), 'utf8')).tags[linkedId], undefined);
+
+  await t.send(' ');
+  frame = t.stdout.frame();
+  assert.match(frame, /Tagged linked: cicd/);
+  assert.match(frame, /\[x\] cicd/);
+  const tags = JSON.parse(fs.readFileSync(path.join(home.configDir, 'state.json'), 'utf8')).tags;
+  assert.deepEqual(tags[grillingId], ['cicd']);
+  assert.deepEqual(tags[linkedId], ['cicd']);
   t.unmount();
 });
 
@@ -849,7 +881,7 @@ test('unlinking the sole relationship drops out-of-registry sources from the fre
   t.unmount();
 });
 
-test('TUI separates detected Harnesses from setup options and shows Shared consumption', async () => {
+test('TUI keeps Harness status out of the target list and shows it in Target info', async () => {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-tui-harnesses-'));
   const piHome = path.join(configDir, 'pi');
   fs.mkdirSync(path.join(piHome, 'agent'), { recursive: true });
@@ -872,28 +904,86 @@ test('TUI separates detected Harnesses from setup options and shows Shared consu
   }));
 
   const t = await renderApp({ configDir });
+  let frame = t.stdout.frame();
+  assert.doesNotMatch(frame, /Detected Harnesses|Skill Targets/);
+  assert.match(frame, /pi\s+\[managed\]/);
+  assert.doesNotMatch(frame, /Pi \[managed\] Shared/);
+
+  await t.send('j'); // pi
+  frame = t.stdout.frame();
+  assert.match(frame, /Harness:\s*Pi/);
+  assert.match(frame, /Detected:\s*yes/);
+  assert.match(frame, /Support:\s*managed/);
+  assert.match(frame, /Shared:\s*enabled/);
+  assert.match(frame, /Isolation:\s*unmanaged/);
+  assert.match(frame, /Link:\s*supported/);
+  t.unmount();
+});
+
+test('TUI keeps undetected Harnesses in a compact Setup section', async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-tui-harness-setup-'));
+  const piHome = path.join(configDir, 'pi');
+  fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [
+      {
+        key: 'pi',
+        discoveryRoot: path.join(piHome, 'agent', 'skills'),
+        parkingRoot: path.join(piHome, 'agent', '.skillspub-off', 'skills'),
+      },
+      {
+        key: 'shared',
+        discoveryRoot: path.join(configDir, 'agents', 'skills'),
+        parkingRoot: path.join(configDir, 'agents', '.skillspub-off', 'skills'),
+        lockFile: path.join(configDir, 'agents', '.skill-lock.json'),
+      },
+    ],
+    genericTargets: [],
+  }));
+
+  const t = await renderApp({ configDir });
   const frame = t.stdout.frame();
-  assert.match(frame, /Detected/);
-  assert.match(frame, /Harnesses/);
-  assert.match(frame, /Pi/);
-  assert.match(frame, /managed/);
-  assert.match(frame, /Shared enabled/);
-  assert.match(frame, /Isolation[\s\S]*unmanaged/);
-  assert.match(frame, /Skill Targets/);
-  assert.doesNotMatch(frame, /Claude \[/);
+  assert.match(frame, /Setup[\s\S]*Pi \[managed\]/);
+  assert.doesNotMatch(frame, /Shared enabled|Isolation unmanaged/);
+  t.unmount();
+});
+
+test('narrow TUI opens Harness details from a selected Target', async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-tui-harness-modal-'));
+  const piHome = path.join(configDir, 'pi');
+  fs.mkdirSync(path.join(piHome, 'agent'), { recursive: true });
+  fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [{
+      key: 'pi',
+      discoveryRoot: path.join(piHome, 'agent', 'skills'),
+      parkingRoot: path.join(piHome, 'agent', '.skillspub-off', 'skills'),
+    }],
+    genericTargets: [],
+  }));
+
+  const t = await renderApp({ configDir }, 60);
+  await t.send('j'); // pi
+  await t.send('\r');
+  const frame = t.stdout.frame();
+  assert.match(frame, /Harness:\s*Pi/);
+  assert.match(frame, /Shared:\s*enabled/);
+  assert.match(frame, /Isolation:\s*unmanaged/);
+  assert.match(frame, /esc close/);
   t.unmount();
 });
 
 test('footer reflects available navigation actions and modal state', async () => {
   const { home } = setup();
   const t = await renderApp(home);
-  assert.match(t.stdout.frame(), /enter SKILL\.md/);
+  assert.match(t.stdout.frame(), /enter details/);
   assert.match(t.stdout.frame(), /\/ search/);
   assert.match(t.stdout.frame(), /s sort:Name/);
   assert.match(t.stdout.frame(), /R refresh/);
   // read-only slice: no mutation actions in the footer
   assert.doesNotMatch(t.stdout.frame().split('\n').pop() ?? '', /toggle|space|unlink/i);
   await t.send('l');
+  assert.match(t.stdout.frame(), /enter SKILL\.md/);
   await t.send('\r');
   assert.match(t.stdout.frame(), /esc close/);
   assert.doesNotMatch(t.stdout.frame(), /R refresh/);
