@@ -3,23 +3,17 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Home } from '../core.ts';
-import { readStateFile, writeStateFile, type SkillTarget, type TargetDefinition, type TargetScope } from '../inventory.ts';
+import { readStateFile, writeStateFile, type SkillTarget } from '../inventory.ts';
+import type {
+  HarnessAdapter,
+  HarnessEvidence,
+  HarnessInspection,
+  HarnessOperation,
+  HarnessOperationPlan,
+} from './types.ts';
+import { resolveHarnessTarget } from './target.ts';
 
-export type SupportLevel = 'managed' | 'discoverable' | 'unsupported';
-export type SharedConsumption = 'not-consumed' | 'required' | 'enabled' | 'excluded' | 'unknown';
-
-export interface HarnessEvidence {
-  url: string;
-  verifiedVersion: string;
-  detail: string;
-}
-
-export interface ResolvedHarnessTarget {
-  scope: Extract<TargetScope, 'global' | 'project'>;
-  discoveryRoot: string;
-}
-
-export interface PiSharedIsolationPlan {
+interface PiSharedIsolationPlan {
   file: string;
   expected: string | undefined;
   sharedRoot: string;
@@ -27,26 +21,6 @@ export interface PiSharedIsolationPlan {
   change: boolean;
   claim: boolean;
   summary: string;
-}
-
-export interface HarnessInspection {
-  key: string;
-  name: string;
-  detected: boolean;
-  support: SupportLevel;
-  evidence: readonly HarnessEvidence[];
-  targets: ResolvedHarnessTarget[];
-  sharedConsumption: { status: SharedConsumption; detail: string };
-  isolation: { status: 'unmanaged' | 'managed' | 'drift'; detail: string };
-  link: { supported: boolean };
-}
-
-export interface HarnessAdapter {
-  key: string;
-  targetDefinition(): TargetDefinition;
-  inspect(home: Home, targets: SkillTarget[], projectPath?: string): HarnessInspection;
-  planSharedIsolation(home: Home, targets: SkillTarget[]): PiSharedIsolationPlan;
-  applySharedIsolation(home: Home, plan: PiSharedIsolationPlan): void;
 }
 
 const EVIDENCE = [
@@ -130,18 +104,18 @@ function canonicalExclusion(shared: SkillTarget): string {
   return `!${toPosix(path.relative(path.dirname(shared.discoveryRoot), shared.discoveryRoot))}/**`;
 }
 
-function resolvePi(targets: SkillTarget[]): SkillTarget {
-  return targets.find(({ key }) => key === 'pi') ?? piAdapter.targetDefinition();
+function resolvePiTarget(targets: SkillTarget[]): SkillTarget {
+  return resolveHarnessTarget(targets, 'pi', () => piAdapter.targetDefinition());
 }
 
-function resolveShared(targets: SkillTarget[]): SkillTarget {
-  return targets.find(({ key, kind }) => key === 'shared' && kind === 'shared') ?? {
+function resolveSharedTarget(targets: SkillTarget[]): SkillTarget {
+  return resolveHarnessTarget(targets, 'shared', () => ({
     key: 'shared',
     kind: 'shared',
     discoveryRoot: path.join(os.homedir(), '.agents', 'skills'),
     parkingRoot: path.join(os.homedir(), '.agents', '.skillspub-off', 'skills'),
     projectPath: '.agents/skills',
-  };
+  }));
 }
 
 function managedClaim(home: Home, file: string, exclusion: string): boolean {
@@ -205,8 +179,77 @@ function atomicWrite(file: string, value: Record<string, unknown>): void {
   }
 }
 
+function planSharedIsolation(home: Home, targets: SkillTarget[]): PiSharedIsolationPlan {
+  const piTarget = resolvePiTarget(targets);
+  const sharedTarget = resolveSharedTarget(targets);
+  const file = settingsFile(piTarget);
+  const exclusion = canonicalExclusion(sharedTarget);
+  const settings = readSettings(file);
+  const excluded = sharedExcluded(sharedTarget.discoveryRoot, settings.skills);
+  const claim = managedClaim(home, file, exclusion);
+  return {
+    file,
+    expected: settings.raw,
+    sharedRoot: sharedTarget.discoveryRoot,
+    exclusion,
+    change: !excluded || (claim && !settings.skills.includes(exclusion)),
+    claim: claim || !excluded,
+    summary: 'Pi will stop consuming Shared skills while Pi Targets remain independently managed.',
+  };
+}
+
+function applySharedIsolation(home: Home, plan: PiSharedIsolationPlan): void {
+  const current = readSettings(plan.file);
+  if (current.raw !== plan.expected)
+    throw new Error(`Pi settings changed after preview: ${plan.file}`);
+  if (plan.change) {
+    atomicWrite(plan.file, {
+      ...current.value,
+      skills: current.skills.includes(plan.exclusion)
+        ? current.skills
+        : [...current.skills, plan.exclusion],
+    });
+    const verified = readSettings(plan.file);
+    // The plan's canonical exclusion is relative to the Shared root parent; verify its semantics directly.
+    if (!sharedExcluded(plan.sharedRoot, verified.skills))
+      throw new Error(`Pi isolation was written but semantic verification failed: ${plan.file}`);
+  }
+  if (plan.claim) {
+    const stateFile = path.join(home.configDir, 'state.json');
+    const state = readStateFile(stateFile);
+    state.piIsolation = { file: plan.file, exclusion: plan.exclusion };
+    writeStateFile(stateFile, state);
+  }
+}
+
+function planOperation(
+  home: Home,
+  targets: SkillTarget[],
+  operation: HarnessOperation,
+): HarnessOperationPlan {
+  if (operation === 'setup' && piAdapter.inspect(home, targets).isolation.status === 'drift')
+    throw new Error('Pi Shared isolation has drift; use explicit reconcile.');
+  const plan = planSharedIsolation(home, targets);
+  return {
+    title: 'Pi isolation plan:',
+    lines: [
+      `write\t${plan.file}`,
+      `exclusion\t${plan.exclusion}`,
+      `${plan.change ? 'add exclusion' : 'already satisfied'}\t${plan.summary}`,
+    ],
+    apply: () => applySharedIsolation(home, plan),
+    verify() {
+      const inspection = piAdapter.inspect(home, targets);
+      if (inspection.sharedConsumption.status !== 'excluded')
+        throw new Error(`Pi isolation verification failed: ${inspection.sharedConsumption.detail}`);
+      return inspection;
+    },
+  };
+}
+
 export const piAdapter: HarnessAdapter = {
   key: 'pi',
+  name: 'Pi',
   targetDefinition() {
     const home = os.homedir();
     return {
@@ -219,20 +262,20 @@ export const piAdapter: HarnessAdapter = {
     };
   },
   inspect(home, targets, projectPath) {
-    const pi = resolvePi(targets);
-    const shared = resolveShared(targets);
+    const piTarget = resolvePiTarget(targets);
+    const sharedTarget = resolveSharedTarget(targets);
     const projectRoot = projectPath ? path.resolve(projectPath) : undefined;
-    const file = settingsFile(pi);
+    const file = settingsFile(piTarget);
     let sharedConsumption: HarnessInspection['sharedConsumption'];
     let skills: string[] = [];
     try {
       skills = readSettings(file).skills;
-      sharedConsumption = inspectShared(pi, shared, projectRoot);
+      sharedConsumption = inspectShared(piTarget, sharedTarget, projectRoot);
     } catch (error) {
       sharedConsumption = { status: 'unknown', detail: (error as Error).message };
     }
-    const detected = fs.existsSync(pi.discoveryRoot) || fs.existsSync(file) ||
-      fs.existsSync(piHome(pi)) || Boolean(projectRoot && fs.existsSync(path.join(projectRoot, '.pi')));
+    const detected = fs.existsSync(piTarget.discoveryRoot) || fs.existsSync(file) ||
+      fs.existsSync(piHome(piTarget)) || Boolean(projectRoot && fs.existsSync(path.join(projectRoot, '.pi')));
     return {
       key: 'pi',
       name: 'Pi',
@@ -240,60 +283,25 @@ export const piAdapter: HarnessAdapter = {
       support: 'managed',
       evidence: EVIDENCE,
       targets: [
-        { scope: 'global', discoveryRoot: pi.discoveryRoot },
-        ...(projectRoot ? [{ scope: 'project' as const, discoveryRoot: path.join(projectRoot, pi.projectPath) }] : []),
+        { scope: 'global', discoveryRoot: piTarget.discoveryRoot },
+        ...(projectRoot ? [{
+          scope: 'project' as const,
+          discoveryRoot: path.join(projectRoot, piTarget.projectPath),
+        }] : []),
       ],
       sharedConsumption,
       isolation: isolation(
         home,
         file,
-        canonicalExclusion(shared),
+        canonicalExclusion(sharedTarget),
         skills,
         sharedConsumption.status === 'excluded',
       ),
       link: { supported: true },
     };
   },
-  planSharedIsolation(home, targets) {
-    const pi = resolvePi(targets);
-    const shared = resolveShared(targets);
-    const file = settingsFile(pi);
-    const exclusion = canonicalExclusion(shared);
-    const settings = readSettings(file);
-    const excluded = sharedExcluded(shared.discoveryRoot, settings.skills);
-    const claim = managedClaim(home, file, exclusion);
-    const change = !excluded || (claim && !settings.skills.includes(exclusion));
-    return {
-      file,
-      expected: settings.raw,
-      sharedRoot: shared.discoveryRoot,
-      exclusion,
-      change,
-      claim: claim || !excluded,
-      summary: `Pi will stop consuming Shared skills while Pi Targets remain independently managed.`,
-    };
-  },
-  applySharedIsolation(home, plan) {
-    const current = readSettings(plan.file);
-    if (current.raw !== plan.expected)
-      throw new Error(`Pi settings changed after preview: ${plan.file}`);
-    if (plan.change) {
-      atomicWrite(plan.file, {
-        ...current.value,
-        skills: current.skills.includes(plan.exclusion)
-          ? current.skills
-          : [...current.skills, plan.exclusion],
-      });
-      const verified = readSettings(plan.file);
-      // The plan's canonical exclusion is relative to the Shared root parent; verify its semantics directly.
-      if (!sharedExcluded(plan.sharedRoot, verified.skills))
-        throw new Error(`Pi isolation was written but semantic verification failed: ${plan.file}`);
-    }
-    if (plan.claim) {
-      const stateFile = path.join(home.configDir, 'state.json');
-      const state = readStateFile(stateFile);
-      state.piIsolation = { file: plan.file, exclusion: plan.exclusion };
-      writeStateFile(stateFile, state);
-    }
+  operations: {
+    setup: (home, targets) => planOperation(home, targets, 'setup'),
+    reconcile: (home, targets) => planOperation(home, targets, 'reconcile'),
   },
 };

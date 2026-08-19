@@ -888,6 +888,7 @@ test('TUI keeps Harness status out of the target list and shows it in Target inf
   fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
     version: 1,
     overrides: [
+      { key: 'claude', disabled: true },
       {
         key: 'pi',
         discoveryRoot: path.join(piHome, 'agent', 'skills'),
@@ -920,12 +921,13 @@ test('TUI keeps Harness status out of the target list and shows it in Target inf
   t.unmount();
 });
 
-test('TUI keeps undetected Harnesses in a compact Setup section', async () => {
+test('TUI keeps undetected Harnesses in a compact Available section', async () => {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-tui-harness-setup-'));
   const piHome = path.join(configDir, 'pi');
   fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
     version: 1,
     overrides: [
+      { key: 'claude', disabled: true },
       {
         key: 'pi',
         discoveryRoot: path.join(piHome, 'agent', 'skills'),
@@ -943,7 +945,7 @@ test('TUI keeps undetected Harnesses in a compact Setup section', async () => {
 
   const t = await renderApp({ configDir });
   const frame = t.stdout.frame();
-  assert.match(frame, /Setup[\s\S]*Pi \[managed\]/);
+  assert.match(frame, /Available[\s\S]*Pi \[managed\]/);
   assert.doesNotMatch(frame, /Shared enabled|Isolation unmanaged/);
   t.unmount();
 });
@@ -954,7 +956,7 @@ test('narrow TUI opens Harness details from a selected Target', async () => {
   fs.mkdirSync(path.join(piHome, 'agent'), { recursive: true });
   fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
     version: 1,
-    overrides: [{
+    overrides: [{ key: 'claude', disabled: true }, {
       key: 'pi',
       discoveryRoot: path.join(piHome, 'agent', 'skills'),
       parkingRoot: path.join(piHome, 'agent', '.skillspub-off', 'skills'),

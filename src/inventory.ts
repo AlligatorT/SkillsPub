@@ -214,18 +214,8 @@ function expandHome(value: string): string {
 }
 
 export function defaultTargetDefinitions(): TargetDefinition[] {
-  const home = os.homedir();
-  return [
-    {
-      key: 'claude',
-      kind: 'harness',
-      discoveryRoot: path.join(home, '.claude', 'skills'),
-      parkingRoot: path.join(home, '.claude', '.skillspub-off', 'skills'),
-      projectPath: '.claude/skills',
-    },
-    sharedTargetDefinition(),
-    ...harnessAdapters().map((adapter) => adapter.targetDefinition()),
-  ];
+  const [first, ...rest] = harnessAdapters().map((adapter) => adapter.targetDefinition());
+  return first ? [first, sharedTargetDefinition(), ...rest] : [sharedTargetDefinition()];
 }
 
 function targetFile(home: Home): string {
