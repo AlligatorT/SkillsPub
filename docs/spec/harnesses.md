@@ -40,14 +40,16 @@ Shared Target Definition 独立存在，不归属于任何 Harness。`targets.js
 
 ## Harness Adapter contract
 
-每个 Adapter 集中拥有该 Harness 的外部契约：
+每个内置支持的 Harness 都必须有 Adapter，即使它只读取路径和能力、完全不修改配置。Adapter 集中拥有该 Harness 的外部契约：
 
 - 产品检测、已验证版本和官方证据；
 - Global/Project/Profile Target Definitions；
 - Shared consumption 的读取与隔离能力；
 - 配置文件定位、schema 检查和迁移；
-- `inspect → resolve targets → plan → apply → verify`；
+- `inspect → resolve targets`，以及产品需要时的 `plan → apply → verify`；
 - Link 支持与必要的 Mirror 策略。
+
+`setup`、`apply` 和配置写入是可选 capability，不是 Adapter 存在的前提。没有内置 Adapter 的自定义目录只能作为 Generic Target，SkillsPub 不承诺其 Harness 最终可见性。
 
 流程控制属于 SkillsPub 应用层。`inspect`、scan、ls 和打开 TUI 严格只读，不创建目录或配置。setup/apply/reconcile 必须：
 
@@ -63,23 +65,23 @@ SkillsPub 只删除自己可证明拥有的配置 claim。原本已存在的用�
 
 ## Support levels
 
-- `managed`：官方路径与配置有证据、fixtures、读写及语义验证，可安全管理。
-- `discoverable`：能可靠解析并扫描 Skill Targets，但不修改 Harness 配置。
+- `managed`：官方路径、能力与必要配置有证据和 fixtures；Adapter 能通过已验证流程使该 Harness 达到可独立控制最终可见性的状态。
+- `discoverable`：能可靠解析并扫描 Skill Targets，但不能承诺独立控制最终可见性。
 - `unsupported`：缺少可靠官方机制，SkillsPub 不猜测。
 
-TUI 主界面只显示检测到的 Harness；未安装的内置支持项放在单独的可添加列表。只有 `managed` 承诺独立管理。
+Support level 描述 Adapter 能力，不等于当前配置状态。TUI 主界面只显示检测到的 Harness；未安装的内置支持项放在单独的可添加列表。
 
 ## Shared consumption
 
-Harness Adapter 报告它对 Shared Target 的状态：
+Harness Adapter 报告它对 Shared Target 的当前状态：
 
-- `not-consumed`：不读取 Shared；
-- `required`：读取且无官方可靠排除机制；
-- `enabled`：当前读取，但官方支持隔离；
+- `not-consumed`：不读取 Shared；无需 setup 也可以独立管理，例如 Claude Code；
+- `required`：读取且无官方可靠排除机制；该 Harness 不能达到 `managed`；
+- `enabled`：当前读取，但官方支持隔离；Adapter 仍可具有 `managed` 能力，例如 setup 前的 Pi；
 - `excluded`：已通过官方机制隔离；
 - `unknown`：无法可靠确认。
 
-Shared Target 在矩阵中只显示一次。Harness 详情解释 consumption；`unknown` 不作最终可见性承诺。当前不实现 Consumer/Profile 类型，但 Adapter 结构不得假设一个 Harness 永远只有一个身份或 Target。
+Shared Target 在矩阵中只显示一次。Harness 详情解释 consumption；`required` 或 `unknown` 时，某个 Harness-specific Target 为 OFF 不等于该 Skill 对 Harness 最终不可见。当前不实现 Consumer/Profile 类型，但 Adapter 结构不得假设一个 Harness 永远只有一个身份或 Target。
 
 ## Resource forms
 
@@ -107,7 +109,7 @@ Source Adapter 拥有固定上游版本、命令、输出解析、provenance、l
 `npx skills` Adapter 固定使用一个经过发布验证的版本，并且只安装到 Shared Target：
 
 - 不自动创建任何 Harness-specific Link/Mirror；
-- 上游 `--agent codex` 若仍是实现 Shared-only transport 的必要参数，只留在 Adapter 内部；
+- 上游任何 `--agent <name>` 若仍是实现 Shared-only transport 的必要参数，只留在 Adapter 内部，不作为 Harness 支持或隔离能力的证据；
 - 用户之后通过 SkillsPub 为其他 Skill Targets 建立 Relationships；
 - 升级上游版本时同步更新证据、fixtures 和兼容测试，不使用动态 `latest`。
 
@@ -119,8 +121,8 @@ Source Adapter 拥有固定上游版本、命令、输出解析、provenance、l
 | --- | --- | --- | --- |
 | Pi | 同时发现 Pi 专属 roots 与 `.agents/skills`；`skills` 配置支持 glob exclusion | 第一批达到 `managed`，默认计划隔离 Shared，但只在 setup/apply 时确认写入 | [skills docs](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/skills.md), [v0.54.0](https://github.com/earendil-works/pi/releases/tag/v0.54.0), [discovery commit](https://github.com/earendil-works/pi/commit/39cbf47e42433ce301dabcec398cac6fe5f0fa22) |
 | Codex | Global/Repo Skills 使用 `.agents/skills`；`[[skills.config]]` 提供按路径启停 | 先保留证据；另行设计逐 Skill override 后再决定 support level | [Agent Skills](https://developers.openai.com/codex/skills), [config sample](https://developers.openai.com/codex/config-sample) |
-| Claude Code | Personal/Project 使用 `.claude/skills`，支持 symlink；Plugin Skills 位于 plugin 内并 namespaced | 后续 Adapter；Shared 默认为 `not-consumed`，Plugin ownership 保持外部 | [Skills](https://docs.anthropic.com/en/docs/claude-code/skills), [Settings](https://docs.anthropic.com/en/docs/claude-code/settings) |
+| Claude Code | Personal/Project 使用 `.claude/skills`，支持 symlink；Plugin Skills 位于 plugin 内并 namespaced | 下一份 Adapter Spec；Shared 为 `not-consumed`，无需 setup 即可达到 `managed`，Plugin ownership 保持外部 | [Skills](https://docs.anthropic.com/en/docs/claude-code/skills), [Settings](https://docs.anthropic.com/en/docs/claude-code/settings) |
 | Hermes | 每个 Profile 有独立 `HERMES_HOME` 与 `skills/`；可配置 `skills.external_dirs` | 等多 Profile 需求明确后实现，不提前引入 Consumer 模型 | [Profiles](https://hermes-agent.nousresearch.com/docs/user-guide/profiles), [Skills](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills) |
 | OpenClaw | 支持多种 Target roots 与 per-Agent final skill allowlists | 等多 Agent 身份模型设计后实现 | [Skills](https://docs.openclaw.ai/tools/skills), [Skills config](https://docs.openclaw.ai/tools/skills-config) |
 
-实施顺序：先收尾现有 Project TUI；再迁移 Skill Target 术语和持久格式；然后建立 Adapter seam 并完成 Pi Managed；再抽离 `npx skills` Source Adapter；其余 Harness 逐个以官方证据和 fixtures 提升支持等级。
+已完成 Project TUI、Skill Target 迁移、Pi Managed Adapter 与 `npx skills` Source Adapter。下一份 Spec 只泛化 Harness Adapter contract 并完成 Claude Code Managed；之后各 Harness 逐个以官方证据、fixtures 和 Shared 隔离能力提升支持等级。OpenClaw/Hermes 在 Consumer/Profile 模型明确前保持延后。

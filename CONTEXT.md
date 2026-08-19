@@ -66,16 +66,16 @@ _避免_: Disabled
 _避免_: Source guess、Expected source
 
 **Harness Adapter**:
-集中维护一个 Harness 的官方发现路径、配置格式、隔离能力、Target 解析、变更计划、写入与验证。Inventory 不包含 Harness 专属配置知识。
+每个内置支持的 Harness 都有一个 Adapter，集中维护其官方发现路径、配置格式、隔离能力、Target 解析、变更计划、写入与验证。Adapter 不一定修改 Harness 配置；`setup`、`apply` 等写入能力按产品需要提供。Inventory 不包含 Harness 专属配置知识。
 
 **Source Adapter**:
 集中维护一个安装来源或传输工具的固定版本、命令、输出解析、provenance 和兼容性，例如 `npx skills`。Source Adapter 不决定最终启用哪些 Harness Targets。
 
 **Support level**:
-Harness Adapter 的能力等级：`managed` 可安全读写并验证，`discoverable` 只可靠扫描，`unsupported` 不猜测。只有 `managed` 承诺独立管理。
+Harness Adapter 的能力等级。`managed` 表示 Adapter 能通过已验证流程使该 Harness 达到可独立控制最终可见性的状态；`discoverable` 只可靠解析和扫描 Targets；`unsupported` 不猜测。Support level 描述能力，不表示当前已经隔离 Shared。
 
 **Shared consumption**:
-Harness 对 Shared Skill Target 的已验证关系：`not-consumed`、`required`、`enabled`、`excluded` 或 `unknown`。它描述最终可见性的一个输入，不复制 Target Relationship。
+Harness 对 Shared Skill Target 的已验证关系：`not-consumed`、`required`、`enabled`、`excluded` 或 `unknown`。它描述当前状态以及最终可见性的一个输入，不复制 Target Relationship。
 
 **Actual state**:
 现场扫描得到的 Relationship、Activation 与 Resource form。磁盘是 Actual state 的唯一真相。
