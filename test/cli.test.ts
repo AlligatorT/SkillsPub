@@ -274,6 +274,11 @@ test('harnesses reports detected Pi support and Shared consumption without write
         parkingRoot: path.join(piHome, 'agent', '.skillspub-off', 'skills'),
       },
       {
+        key: 'claude',
+        discoveryRoot: path.join(configDir, 'claude', 'skills'),
+        parkingRoot: path.join(configDir, 'claude', '.skillspub-off', 'skills'),
+      },
+      {
         key: 'shared',
         discoveryRoot: shared,
         parkingRoot: path.join(configDir, 'agents', '.skillspub-off', 'skills'),
@@ -292,7 +297,7 @@ test('harnesses reports detected Pi support and Shared consumption without write
   assert.match(result.stdout, /Detected Harnesses:/);
   assert.match(result.stdout, /pi\s+managed\s+Shared enabled\s+Isolation unmanaged\s+Link supported/);
   assert.match(result.stdout, /evidence\s+v0\.54\.0/);
-  assert.match(result.stdout, /Available Harnesses:\n {2}none/);
+  assert.match(result.stdout, /Available Harnesses:\nclaude\s+managed\s+Shared not-consumed\s+Isolation not-required\s+Link supported/);
   assert.deepEqual(fs.readdirSync(configDir).sort(), before);
 });
 
