@@ -73,8 +73,7 @@ skillspub ls [--target T] [--tag T]
 skillspub on|off <selector> <target...>
 skillspub status <selector>
 skillspub targets
-skillspub harnesses
-skillspub harness setup|reconcile <name>
+skillspub harnesses [<name> inspect|setup|reconcile [--yes]]
 skillspub migrate targets
 skillspub project <path> <command...>  # 包括显式 Project scan/doctor
 ```

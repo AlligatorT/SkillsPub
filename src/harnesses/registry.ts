@@ -1,21 +1,56 @@
 import type { Home } from '../core.ts';
 import type { SkillTarget } from '../inventory.ts';
-import { piAdapter, type HarnessAdapter, type HarnessInspection } from './pi.ts';
+import { claudeAdapter } from './claude.ts';
+import { piAdapter } from './pi.ts';
+import type {
+  HarnessAdapter,
+  HarnessInspection,
+  HarnessOperation,
+  HarnessOperationPlan,
+} from './types.ts';
 
-const adapters: readonly HarnessAdapter[] = [piAdapter];
+const adapters: readonly HarnessAdapter[] = [claudeAdapter, piAdapter];
 
 export function harnessAdapters(): readonly HarnessAdapter[] {
   return adapters;
+}
+
+function harnessAdapter(key: string): HarnessAdapter {
+  const adapter = adapters.find((candidate) => candidate.key === key);
+  if (!adapter) throw new Error(`unknown Harness: ${key}`);
+  return adapter;
+}
+
+export function inspectHarness(
+  key: string,
+  home: Home,
+  targets: SkillTarget[],
+  projectPath?: string,
+): HarnessInspection {
+  return harnessAdapter(key).inspect(home, targets, projectPath);
+}
+
+export function planHarnessOperation(
+  key: string,
+  operation: HarnessOperation,
+  home: Home,
+  targets: SkillTarget[],
+): HarnessOperationPlan {
+  const adapter = harnessAdapter(key);
+  const plan = adapter.operations?.[operation];
+  if (!plan)
+    throw new Error(`${adapter.name} does not support ${operation}; no configuration write is required.`);
+  return plan(home, targets);
 }
 
 export function inspectHarnesses(
   home: Home,
   targets: SkillTarget[],
   projectPath?: string,
-): { detected: HarnessInspection[]; setup: HarnessInspection[] } {
+): { detected: HarnessInspection[]; available: HarnessInspection[] } {
   const inspections = adapters.map((adapter) => adapter.inspect(home, targets, projectPath));
   return {
     detected: inspections.filter(({ detected }) => detected),
-    setup: inspections.filter(({ detected }) => !detected),
+    available: inspections.filter(({ detected }) => !detected),
   };
 }

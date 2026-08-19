@@ -3,8 +3,11 @@ import { parseArgs } from 'node:util';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { defaultHome } from './core.ts';
-import { inspectHarnesses } from './harnesses/registry.ts';
-import { piAdapter } from './harnesses/pi.ts';
+import {
+  inspectHarness,
+  inspectHarnesses,
+  planHarnessOperation,
+} from './harnesses/registry.ts';
 import {
   applyTargetMigration,
   loadTargets,
@@ -78,7 +81,7 @@ const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the sour
   skillspub doctor [--repair --yes]    diagnose; explicitly confirm safe repairs
   skillspub project <path> scan|doctor|shared|preset|mirror ...  operate on exact Project Skill Targets
   skillspub targets                    list resolved Skill Targets
-  skillspub harnesses [pi setup|reconcile [--yes]]  inspect or isolate Pi Shared Skills
+  skillspub harnesses [name inspect|setup|reconcile [--yes]]  inspect or configure a Harness
   skillspub migrate targets [--yes]    preview or migrate runtimes.json to targets.json
   skillspub tui [--project [path]]     interactive full-screen skill browser
                                        (--project: project-scope view, cwd when path omitted)
@@ -338,30 +341,28 @@ function printHarnesses(
 }
 
 function cmdHarnesses(home: ReturnType<typeof defaultHome>, args: string[]): void {
+  const targets = loadTargets(home);
   if (args.length === 0) {
-    const report = inspectHarnesses(home, loadTargets(home));
+    const report = inspectHarnesses(home, targets);
     printHarnesses('Detected Harnesses:', report.detected);
-    printHarnesses('Available setup:', report.setup);
+    printHarnesses('Available Harnesses:', report.available);
     return;
   }
   const [harness, action, ...rest] = args;
-  if (harness !== 'pi' || !['setup', 'reconcile'].includes(action ?? '') ||
-    rest.some((arg) => arg !== '--yes'))
-    throw new Error('usage: skillspub harnesses [pi setup|reconcile [--yes]]');
-  const targets = loadTargets(home);
-  if (action === 'setup' && piAdapter.inspect(home, targets).isolation.status === 'drift')
-    throw new Error('Pi Shared isolation has drift; use explicit reconcile.');
-  const plan = piAdapter.planSharedIsolation(home, targets);
-  console.log('Pi isolation plan:');
-  console.log(`  write\t${plan.file}`);
-  console.log(`  exclusion\t${plan.exclusion}`);
-  console.log(`  ${plan.change ? 'add exclusion' : 'already satisfied'}\t${plan.summary}`);
+  if (!harness || !['inspect', 'setup', 'reconcile'].includes(action ?? '') ||
+    rest.some((arg) => arg !== '--yes') || (action === 'inspect' && rest.length > 0))
+    throw new Error('usage: skillspub harnesses [name inspect|setup|reconcile [--yes]]');
+  if (action === 'inspect') {
+    printHarnesses(`${harness} Harness:`, [inspectHarness(harness, home, targets)]);
+    return;
+  }
+  const plan = planHarnessOperation(harness, action as 'setup' | 'reconcile', home, targets);
+  console.log(plan.title);
+  for (const line of plan.lines) console.log(`  ${line}`);
   if (!rest.includes('--yes')) return;
-  piAdapter.applySharedIsolation(home, plan);
-  const inspection = piAdapter.inspect(home, targets);
-  if (inspection.sharedConsumption.status !== 'excluded')
-    throw new Error(`Pi isolation verification failed: ${inspection.sharedConsumption.detail}`);
-  console.log('Pi Shared isolation verified.');
+  plan.apply();
+  const inspection = plan.verify();
+  console.log(`${inspection.name} ${action} verified.`);
 }
 
 function printTargetMigration(home: ReturnType<typeof defaultHome>): ReturnType<typeof planTargetMigration> {
@@ -746,7 +747,7 @@ function printHarnessDrift(
   targets: InventoryScanReport['targets'],
 ): void {
   const harnesses = inspectHarnesses(home, targets);
-  const drift = [...harnesses.detected, ...harnesses.setup]
+  const drift = [...harnesses.detected, ...harnesses.available]
     .filter((harness) => harness.isolation.status === 'drift');
   console.log('Harness drift:');
   if (drift.length === 0) console.log('  none');

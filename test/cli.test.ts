@@ -292,7 +292,7 @@ test('harnesses reports detected Pi support and Shared consumption without write
   assert.match(result.stdout, /Detected Harnesses:/);
   assert.match(result.stdout, /pi\s+managed\s+Shared enabled\s+Isolation unmanaged\s+Link supported/);
   assert.match(result.stdout, /evidence\s+v0\.54\.0/);
-  assert.match(result.stdout, /Available setup:\n {2}none/);
+  assert.match(result.stdout, /Available Harnesses:\n {2}none/);
   assert.deepEqual(fs.readdirSync(configDir).sort(), before);
 });
 
@@ -350,6 +350,43 @@ test('Pi setup previews, confirms, and explicitly reconciles its managed Shared 
   const reconciled = run(['harnesses', 'pi', 'reconcile', '--yes']);
   assert.equal(reconciled.status, 0, reconciled.stderr);
   assert.match(reconciled.stdout, /verified/i);
+});
+
+test('Claude Code inspect is read-only and setup reports its unsupported optional capability', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-claude-'));
+  const claudeHome = path.join(configDir, 'claude');
+  fs.mkdirSync(claudeHome, { recursive: true });
+  fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [
+      {
+        key: 'claude',
+        discoveryRoot: path.join(claudeHome, 'skills'),
+        parkingRoot: path.join(claudeHome, '.skillspub-off', 'skills'),
+      },
+      { key: 'pi', disabled: true },
+      { key: 'shared', disabled: true },
+    ],
+    genericTargets: [],
+  }));
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+  const before = fs.readdirSync(configDir, { recursive: true }).sort();
+
+  const inspected = run(['harnesses', 'claude', 'inspect']);
+  assert.equal(inspected.status, 0, inspected.stderr);
+  assert.match(
+    inspected.stdout,
+    /claude\s+managed\s+Shared not-consumed\s+Isolation not-required\s+Link supported/,
+  );
+  assert.deepEqual(fs.readdirSync(configDir, { recursive: true }).sort(), before);
+
+  const unsupported = run(['harnesses', 'claude', 'setup']);
+  assert.equal(unsupported.status, 1);
+  assert.match(unsupported.stderr, /does not support setup.*no configuration write is required/i);
+  assert.deepEqual(fs.readdirSync(configDir, { recursive: true }).sort(), before);
 });
 
 test('project scan does not create Project state', () => {

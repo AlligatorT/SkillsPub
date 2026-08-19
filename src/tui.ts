@@ -213,12 +213,12 @@ function TargetList({
         harness ? h(Text, {dimColor: true}, ` [${harness.support}]`) : null,
       );
     }),
-    ...(harnesses.setup.length === 0
+    ...(harnesses.available.length === 0
       ? []
       : [
-          h(Text, {key: 'setup', dimColor: true}, ' Setup'),
-          ...harnesses.setup.map((harness) =>
-            h(Text, {key: `setup:${harness.key}`, dimColor: true}, `   ${harness.name} [${harness.support}]`)),
+          h(Text, {key: 'available', dimColor: true}, ' Available'),
+          ...harnesses.available.map((harness) =>
+            h(Text, {key: `available:${harness.key}`, dimColor: true}, `   ${harness.name} [${harness.support}]`)),
         ]),
   );
 }
@@ -619,7 +619,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   const targets = snapshot.targets;
   const target = targets[Math.min(targetIndex, Math.max(0, targets.length - 1))];
   const targetHarness = target
-    ? [...snapshot.harnesses.detected, ...snapshot.harnesses.setup]
+    ? [...snapshot.harnesses.detected, ...snapshot.harnesses.available]
         .find((harness) => harness.key === target.name)
     : undefined;
   const instTarget = Math.min(instanceTargetIndex, Math.max(0, targets.length - 1));
