@@ -513,6 +513,7 @@ test('Target migration previews legacy Runtime overrides and Generic Targets wit
     },
     { key: 'claude', disabled: true },
     { key: 'shared', disabled: true },
+    { key: 'grok', disabled: true },
   ]);
   assert.deepEqual(plan.genericTargets.map(({ key, kind, discoveryRoot }) => ({ key, kind, discoveryRoot })), [
     { key: 'other', kind: 'generic', discoveryRoot: genericRoot },

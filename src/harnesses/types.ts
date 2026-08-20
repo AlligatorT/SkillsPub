@@ -24,13 +24,15 @@ export interface HarnessInspection {
   evidence: readonly HarnessEvidence[];
   targets: ResolvedHarnessTarget[];
   sharedConsumption: { status: SharedConsumption; detail: string };
-  isolation: { status: 'not-required' | 'unmanaged' | 'managed' | 'drift'; detail: string };
+  isolation: { status: 'not-required' | 'unmanaged' | 'managed' | 'drift' | 'unknown'; detail: string };
   link: { supported: boolean };
+  mirror?: { supported: boolean };
 }
 
 export interface HarnessOperationPlan {
   title: string;
   lines: readonly string[];
+  recovery?: readonly string[];
   apply(): void;
   verify(): HarnessInspection;
 }
@@ -43,5 +45,6 @@ export interface HarnessAdapter {
   operations?: Partial<Record<HarnessOperation, (
     home: Home,
     targets: SkillTarget[],
+    projectPath?: string,
   ) => HarnessOperationPlan>>;
 }

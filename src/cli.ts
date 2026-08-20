@@ -79,7 +79,7 @@ const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the sour
   skillspub shared find|describe|add|update|remove ...  manage the Shared Target via skills@1.5.21
   skillspub scan                       explicitly scan Global Skill Target inventory
   skillspub doctor [--repair --yes]    diagnose; explicitly confirm safe repairs
-  skillspub project <path> scan|doctor|shared|preset|mirror ...  operate on exact Project Skill Targets
+  skillspub project <path> scan|doctor|shared|preset|mirror|harnesses ...  operate on exact Project Skill Targets
   skillspub targets                    list resolved Skill Targets
   skillspub harnesses [name inspect|setup|reconcile [--yes]]  inspect or configure a Harness
   skillspub migrate targets [--yes]    preview or migrate runtimes.json to targets.json
@@ -330,7 +330,7 @@ function printHarnesses(
     return;
   }
   for (const harness of harnesses) {
-    console.log(`${harness.key}\t${harness.support}\tShared ${harness.sharedConsumption.status}\tIsolation ${harness.isolation.status}\tLink ${harness.link.supported ? 'supported' : 'unsupported'}`);
+    console.log(`${harness.key}\t${harness.support}\tShared ${harness.sharedConsumption.status}\tIsolation ${harness.isolation.status}\tLink ${harness.link.supported ? 'supported' : 'unsupported'}${harness.mirror ? `\tMirror ${harness.mirror.supported ? 'supported' : 'unsupported'}` : ''}`);
     console.log(`  Shared: ${harness.sharedConsumption.detail}`);
     console.log(`  Isolation: ${harness.isolation.detail}`);
     for (const target of harness.targets)
@@ -340,10 +340,15 @@ function printHarnesses(
   }
 }
 
-function cmdHarnesses(home: ReturnType<typeof defaultHome>, args: string[]): void {
+function cmdHarnesses(
+  home: ReturnType<typeof defaultHome>,
+  args: string[],
+  projectPath?: string,
+): void {
   const targets = loadTargets(home);
+  const selectedProject = projectPath ? fs.realpathSync(projectPath) : undefined;
   if (args.length === 0) {
-    const report = inspectHarnesses(home, targets);
+    const report = inspectHarnesses(home, targets, selectedProject);
     printHarnesses('Detected Harnesses:', report.detected);
     printHarnesses('Available Harnesses:', report.available);
     return;
@@ -353,14 +358,24 @@ function cmdHarnesses(home: ReturnType<typeof defaultHome>, args: string[]): voi
     rest.some((arg) => arg !== '--yes') || (action === 'inspect' && rest.length > 0))
     throw new Error('usage: skillspub harnesses [name inspect|setup|reconcile [--yes]]');
   if (action === 'inspect') {
-    printHarnesses(`${harness} Harness:`, [inspectHarness(harness, home, targets)]);
+    printHarnesses(`${harness} Harness:`, [inspectHarness(harness, home, targets, selectedProject)]);
     return;
   }
-  const plan = planHarnessOperation(harness, action as 'setup' | 'reconcile', home, targets);
+  const plan = planHarnessOperation(
+    harness,
+    action as 'setup' | 'reconcile',
+    home,
+    targets,
+    selectedProject,
+  );
   console.log(plan.title);
   for (const line of plan.lines) console.log(`  ${line}`);
   if (!rest.includes('--yes')) return;
   plan.apply();
+  if (plan.recovery?.length) {
+    console.log('Manual recovery:');
+    for (const line of plan.recovery) console.log(`  ${line}`);
+  }
   const inspection = plan.verify();
   console.log(`${inspection.name} ${action} verified.`);
 }
@@ -848,14 +863,15 @@ async function main(
         break;
       case 'project': {
         const [projectPath, projectCommand, ...projectArgs] = rest;
-        if (!projectPath) throw new Error('usage: skillspub project <path> scan|doctor|shared|preset|mirror');
+        if (!projectPath) throw new Error('usage: skillspub project <path> scan|doctor|shared|preset|mirror|harnesses');
         if (projectCommand === 'scan' && projectArgs.length === 0)
           printScan(scanProjectInventory(home, projectPath, undefined, { persist: false }));
         else if (projectCommand === 'doctor') cmdDoctor(home, projectArgs, projectPath);
         else if (projectCommand === 'shared') cmdShared(home, projectArgs, projectPath);
         else if (projectCommand === 'preset') cmdPreset(home, projectArgs, projectPath);
         else if (projectCommand === 'mirror') cmdMirror(home, projectArgs, projectPath);
-        else throw new Error('usage: skillspub project <path> scan|doctor|shared|preset|mirror');
+        else if (projectCommand === 'harnesses') cmdHarnesses(home, projectArgs, projectPath);
+        else throw new Error('usage: skillspub project <path> scan|doctor|shared|preset|mirror|harnesses');
         break;
       }
       case 'targets':
