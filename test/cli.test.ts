@@ -394,6 +394,88 @@ test('Claude Code inspect is read-only and setup reports its unsupported optiona
   assert.deepEqual(fs.readdirSync(configDir, { recursive: true }).sort(), before);
 });
 
+test('Grok CLI supports read-only inspection and confirmed Global and Project setup', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-grok-'));
+  const grokHome = path.join(configDir, 'grok-home');
+  const shared = path.join(configDir, 'global-agents', 'skills');
+  const parent = path.join(configDir, 'workspace');
+  const project = path.join(parent, 'project');
+  const selectedShared = path.join(project, '.agents', 'skills');
+  const ancestorShared = path.join(parent, '.agents', 'skills');
+  fs.mkdirSync(grokHome, { recursive: true });
+  fs.mkdirSync(path.join(parent, '.git'), { recursive: true });
+  fs.mkdirSync(selectedShared, { recursive: true });
+  fs.mkdirSync(ancestorShared, { recursive: true });
+  fs.writeFileSync(path.join(grokHome, 'config.toml'), '# preserve\n');
+  fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [
+      {
+        key: 'grok',
+        discoveryRoot: path.join(grokHome, 'skills'),
+        parkingRoot: path.join(grokHome, '.skillspub-off', 'skills'),
+      },
+      {
+        key: 'shared',
+        discoveryRoot: shared,
+        parkingRoot: path.join(configDir, 'global-agents', '.skillspub-off', 'skills'),
+      },
+      { key: 'pi', disabled: true },
+      { key: 'claude', disabled: true },
+    ],
+    genericTargets: [],
+  }));
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+
+  const before = fs.readdirSync(configDir, { recursive: true }).sort();
+  const inspected = run(['harnesses', 'grok', 'inspect']);
+  const projectInspected = run(['project', project, 'harnesses', 'grok', 'inspect']);
+  const globalPreview = run(['harnesses', 'grok', 'setup']);
+  const preview = run(['project', project, 'harnesses', 'grok', 'setup']);
+  assert.equal(inspected.status, 0, inspected.stderr);
+  assert.equal(projectInspected.status, 0, projectInspected.stderr);
+  assert.equal(globalPreview.status, 0, globalPreview.stderr);
+  assert.equal(preview.status, 0, preview.stderr);
+  assert.match(inspected.stdout, /grok\s+managed\s+Shared enabled\s+Isolation unmanaged\s+Link unsupported\s+Mirror supported/);
+  assert.match(projectInspected.stdout, new RegExp(path.join(project, '.grok', 'skills').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(globalPreview.stdout, new RegExp(shared.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(preview.stdout, new RegExp(selectedShared.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(preview.stdout, new RegExp(ancestorShared.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.deepEqual(fs.readdirSync(configDir, { recursive: true }).sort(), before);
+
+  const globalApplied = run(['harnesses', 'grok', 'setup', '--yes']);
+  assert.equal(globalApplied.status, 0, globalApplied.stderr);
+  assert.match(globalApplied.stdout, /Grok Build setup verified/);
+  fs.writeFileSync(
+    path.join(grokHome, 'config.toml'),
+    fs.readFileSync(path.join(grokHome, 'config.toml'), 'utf8')
+      .replace('[compat.cursor]\nskills = false', '[compat.cursor]\nskills = true'),
+  );
+  const globalReconciled = run(['harnesses', 'grok', 'reconcile', '--yes']);
+  assert.equal(globalReconciled.status, 0, globalReconciled.stderr);
+  assert.match(globalReconciled.stdout, /Grok Build reconcile verified/);
+
+  const applied = run(['project', project, 'harnesses', 'grok', 'setup', '--yes']);
+  assert.equal(applied.status, 0, applied.stderr);
+  assert.match(applied.stdout, /Manual recovery:/);
+  assert.match(applied.stdout, /Grok Build setup verified/);
+  const written = fs.readFileSync(path.join(grokHome, 'config.toml'), 'utf8');
+  assert.match(written, /# preserve/);
+  assert.match(written, new RegExp(selectedShared.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(written, new RegExp(ancestorShared.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+
+  fs.writeFileSync(
+    path.join(grokHome, 'config.toml'),
+    written.replace('[compat.claude]\nskills = false', '[compat.claude]\nskills = true'),
+  );
+  const projectReconciled = run(['project', project, 'harnesses', 'grok', 'reconcile', '--yes']);
+  assert.equal(projectReconciled.status, 0, projectReconciled.stderr);
+  assert.match(projectReconciled.stdout, /Grok Build reconcile verified/);
+});
+
 test('project scan does not create Project state', () => {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-project-'));
   const project = path.join(configDir, 'project');

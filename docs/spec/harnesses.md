@@ -8,6 +8,7 @@
 src/targets/shared.ts        Shared Target Definition
 src/harnesses/registry.ts    检测并调用内置 Harness Adapters
 src/harnesses/pi.ts          Pi 专属知识
+src/harnesses/grok.ts        Grok Build 专属知识
 src/harnesses/<name>.ts      后续内置 Harness Adapter
 src/sources/npx-skills.ts    固定版本的 npx skills Source Adapter
 src/inventory.ts             通用 Target/Slot/Relationship 扫描
@@ -113,6 +114,20 @@ Source Adapter 拥有固定上游版本、命令、输出解析、provenance、l
 - 用户之后通过 SkillsPub 为其他 Skill Targets 建立 Relationships；
 - 升级上游版本时同步更新证据、fixtures 和兼容测试，不使用动态 `latest`。
 
+## Grok Build v0.1 managed slice
+
+Grok Build Adapter 的 key 是 `grok`，已验证契约固定到 `xai-org/grok-build` revision `19d42e35c07a9c9244f03f6df0c4c353f970d4f9`：
+
+- Global Target 是 `$GROK_HOME/skills`，未设置时为 `~/.grok/skills`；Project Target 是从当前目录向 Git 根扫描的 `.grok/skills`，SkillsPub 继续复用现有 selected/ancestor Project projection。
+- Grok 也始终扫描 Global、Project 与 ancestor `.agents/skills`，并默认扫描 Claude/Cursor Skills。`$GROK_HOME/config.toml` 的 `[skills].ignore` 按 canonical path prefix 排除 Skills；`[compat.claude].skills = false` 与 `[compat.cursor].skills = false` 分别关闭 vendor-compatible roots。
+- 当前上游实现会遍历 symlink，但没有稳定的官方兼容承诺；同时 ignore 会 canonicalize link target。为保证 Relationship ON/OFF 不被 Shared ignore 绕过，SkillsPub 把 Grok 的有效 Link capability 报为 unsupported，新建 missing Relationship 使用现有 Managed Mirror 实现。
+- Global setup/reconcile 加入用户 Shared root；Project 操作还加入 selected Project 与当前存在的 ancestor Shared roots。`skillspub project <path> harnesses grok ...` 只传递 canonical project path，不创建中央 Project registry。
+- `skills.paths` 或 `skills.disabled` 非空、已有 ignore 覆盖 Grok Target、TOML malformed/类型异常时无法确认安全语义，plan 在任何写入前失败。该 zero-change 拒绝是 v0.1 的保守边界，不改写或翻译用户配置。
+- plan 列出因新 ignore 失效的全部 Grok Links。确认后只 Unlink manifest 中的 symlinks，不删除 source，也不自动建 Mirror；保存原配置、SHA-256 与 affected-Link manifest，复核并发变化后原子写配置，再验证 Shared 与 vendor-compatible isolation。
+- 写入保留无关 TOML 与 comments，并保持非-Skill compatibility cells、Grok-native local resources、bundled/plugin/server-managed Skills、commands 及其他 Grok-private resources 不变。apply 后打印 backup/manifest 的手工恢复步骤；本 slice 不提供 `unsetup`。
+
+官方证据：[settings reference](https://docs.x.ai/build/settings/reference)、[Skills/Plugins/Marketplaces](https://docs.x.ai/build/features/skills-plugins-marketplaces)、[pinned discovery source](https://github.com/xai-org/grok-build/blob/19d42e35c07a9c9244f03f6df0c4c353f970d4f9/crates/codegen/xai-grok-agent/src/prompt/skills.rs)。
+
 ## Evidence baseline and delivery order
 
 以下是 2026-08-12 的官方证据与 Adapter 规划，不表示这些 Adapters 已全部实现：
@@ -121,8 +136,9 @@ Source Adapter 拥有固定上游版本、命令、输出解析、provenance、l
 | --- | --- | --- | --- |
 | Pi | 同时发现 Pi 专属 roots 与 `.agents/skills`；`skills` 配置支持 glob exclusion | 第一批达到 `managed`，默认计划隔离 Shared，但只在 setup/apply 时确认写入 | [skills docs](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/skills.md), [v0.54.0](https://github.com/earendil-works/pi/releases/tag/v0.54.0), [discovery commit](https://github.com/earendil-works/pi/commit/39cbf47e42433ce301dabcec398cac6fe5f0fa22) |
 | Codex | Global/Repo Skills 使用 `.agents/skills`；`[[skills.config]]` 提供按路径启停 | 先保留证据；另行设计逐 Skill override 后再决定 support level | [Agent Skills](https://developers.openai.com/codex/skills), [config sample](https://developers.openai.com/codex/config-sample) |
-| Claude Code | Personal/Project 使用 `.claude/skills`，支持 symlink；Plugin Skills 位于 plugin 内并 namespaced | 下一份 Adapter Spec；Shared 为 `not-consumed`，无需 setup 即可达到 `managed`，Plugin ownership 保持外部 | [Skills](https://docs.anthropic.com/en/docs/claude-code/skills), [Settings](https://docs.anthropic.com/en/docs/claude-code/settings) |
+| Claude Code | Personal/Project 使用 `.claude/skills`，支持 symlink；Plugin Skills 位于 plugin 内并 namespaced | `managed`；Shared 为 `not-consumed`，无需 setup，Plugin ownership 保持外部 | [Skills](https://docs.anthropic.com/en/docs/claude-code/skills), [Settings](https://docs.anthropic.com/en/docs/claude-code/settings) |
+| Grok Build | `$GROK_HOME/skills`、Project/ancestor `.grok/skills`、Shared `.agents/skills` 与默认启用的 Claude/Cursor roots；canonical `[skills].ignore` 可隔离 Shared | `managed`；setup/reconcile 管理 isolation，missing Relationship 默认 Mirror | [settings](https://docs.x.ai/build/settings/reference), [skills](https://docs.x.ai/build/features/skills-plugins-marketplaces), [pinned source](https://github.com/xai-org/grok-build/blob/19d42e35c07a9c9244f03f6df0c4c353f970d4f9/crates/codegen/xai-grok-agent/src/prompt/skills.rs) |
 | Hermes | 每个 Profile 有独立 `HERMES_HOME` 与 `skills/`；可配置 `skills.external_dirs` | 等多 Profile 需求明确后实现，不提前引入 Consumer 模型 | [Profiles](https://hermes-agent.nousresearch.com/docs/user-guide/profiles), [Skills](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills) |
 | OpenClaw | 支持多种 Target roots 与 per-Agent final skill allowlists | 等多 Agent 身份模型设计后实现 | [Skills](https://docs.openclaw.ai/tools/skills), [Skills config](https://docs.openclaw.ai/tools/skills-config) |
 
-已完成 Project TUI、Skill Target 迁移、Pi Managed Adapter 与 `npx skills` Source Adapter。下一份 Spec 只泛化 Harness Adapter contract 并完成 Claude Code Managed；之后各 Harness 逐个以官方证据、fixtures 和 Shared 隔离能力提升支持等级。OpenClaw/Hermes 在 Consumer/Profile 模型明确前保持延后。
+已完成 Project TUI、Skill Target 迁移、Pi、Claude Code 与 Grok Build Managed Adapters，以及 `npx skills` Source Adapter。后续 Harness 继续逐个以官方证据、fixtures 和 Shared 隔离能力提升支持等级。OpenClaw/Hermes 在 Consumer/Profile 模型明确前保持延后。

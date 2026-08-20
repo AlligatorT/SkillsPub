@@ -889,6 +889,7 @@ test('TUI keeps Harness status out of the target list and shows it in Target inf
     version: 1,
     overrides: [
       { key: 'claude', disabled: true },
+      { key: 'grok', disabled: true },
       {
         key: 'pi',
         discoveryRoot: path.join(piHome, 'agent', 'skills'),
@@ -921,6 +922,42 @@ test('TUI keeps Harness status out of the target list and shows it in Target inf
   t.unmount();
 });
 
+test('TUI reports Grok managed Mirror capability without writing Grok files', async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-tui-grok-'));
+  const grokHome = path.join(configDir, 'grok-home');
+  fs.mkdirSync(grokHome, { recursive: true });
+  fs.writeFileSync(path.join(grokHome, 'config.toml'), '# untouched\n');
+  fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [
+      { key: 'claude', disabled: true },
+      { key: 'pi', disabled: true },
+      {
+        key: 'grok',
+        discoveryRoot: path.join(grokHome, 'skills'),
+        parkingRoot: path.join(grokHome, '.skillspub-off', 'skills'),
+      },
+      {
+        key: 'shared',
+        discoveryRoot: path.join(configDir, 'agents', 'skills'),
+        parkingRoot: path.join(configDir, 'agents', '.skillspub-off', 'skills'),
+      },
+    ],
+    genericTargets: [],
+  }));
+  const before = fs.readdirSync(configDir, { recursive: true }).sort();
+
+  const t = await renderApp({ configDir });
+  await t.send('j');
+  const frame = t.stdout.frame();
+  assert.match(frame, /Harness:\s*Grok Build/);
+  assert.match(frame, /Support:\s*managed/);
+  assert.match(frame, /Link:\s*unsupported/);
+  assert.match(frame, /Mirror:\s*supported/);
+  assert.deepEqual(fs.readdirSync(configDir, { recursive: true }).sort(), before);
+  t.unmount();
+});
+
 test('TUI keeps undetected Harnesses in a compact Available section', async () => {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-tui-harness-setup-'));
   const piHome = path.join(configDir, 'pi');
@@ -928,6 +965,7 @@ test('TUI keeps undetected Harnesses in a compact Available section', async () =
     version: 1,
     overrides: [
       { key: 'claude', disabled: true },
+      { key: 'grok', disabled: true },
       {
         key: 'pi',
         discoveryRoot: path.join(piHome, 'agent', 'skills'),
@@ -956,7 +994,7 @@ test('narrow TUI opens Harness details from a selected Target', async () => {
   fs.mkdirSync(path.join(piHome, 'agent'), { recursive: true });
   fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
     version: 1,
-    overrides: [{ key: 'claude', disabled: true }, {
+    overrides: [{ key: 'claude', disabled: true }, { key: 'grok', disabled: true }, {
       key: 'pi',
       discoveryRoot: path.join(piHome, 'agent', 'skills'),
       parkingRoot: path.join(piHome, 'agent', '.skillspub-off', 'skills'),

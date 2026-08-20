@@ -75,7 +75,8 @@ skillspub status <selector>
 skillspub targets
 skillspub harnesses [<name> inspect|setup|reconcile [--yes]]
 skillspub migrate targets
-skillspub project <path> <command...>  # 包括显式 Project scan/doctor
+skillspub project <path> <command...>  # 包括 scan/doctor/shared/preset/mirror/harnesses
+skillspub project <path> harnesses grok setup|reconcile [--yes]
 ```
 
 裸命令只在交互式 TTY 中启动 Ink。非 TTY 环境输出 CLI usage。`tui` 不接受额外参数。
@@ -108,6 +109,7 @@ skillspub preset delete <name> [--yes]
 - 无 watcher、daemon、polling、hook 或后台 reconcile。
 - Preview/preflight 验证来源、权限、Target Slot、同名目标、依赖 Links/Mirrors、Harness 配置 hash 和路径冲突。任何预检失败都必须零变更。
 - Harness 配置修改采用 `inspect → plan → recheck → atomic apply → verify`；无法识别的 schema 或并发变化拒绝写入。
+- Grok Global/Project setup 预览 Shared/vendor isolation、受影响 Links、backup 与 verification。`--yes` 后只 Unlink manifest 中的 Grok Links，保留 source，写入后打印原 TOML/哈希与 manifest 的手工恢复路径。
 - 意外 I/O 失败保留 Desired state 与已完成操作，不尝试脆弱 rollback；输出剩余 drift。再次 reconcile 必须幂等。
 - 可在明确且无歧义时，经 preview/confirmation 为 missing Relationship 创建 Link。Harness 不支持 symlink 时，由 Managed Adapter 明确规划 Mirror。
 - Mirror source 更新时 scan 只报告 Drift；显式 reconcile 才同步。人工修改的 Mirror 标记 diverged，拒绝静默覆盖。

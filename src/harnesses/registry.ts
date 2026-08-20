@@ -1,6 +1,7 @@
 import type { Home } from '../core.ts';
 import type { SkillTarget } from '../inventory.ts';
 import { claudeAdapter } from './claude.ts';
+import { grokAdapter } from './grok.ts';
 import { piAdapter } from './pi.ts';
 import type {
   HarnessAdapter,
@@ -9,7 +10,7 @@ import type {
   HarnessOperationPlan,
 } from './types.ts';
 
-const adapters: readonly HarnessAdapter[] = [claudeAdapter, piAdapter];
+const adapters: readonly HarnessAdapter[] = [claudeAdapter, grokAdapter, piAdapter];
 
 export function harnessAdapters(): readonly HarnessAdapter[] {
   return adapters;
@@ -35,12 +36,13 @@ export function planHarnessOperation(
   operation: HarnessOperation,
   home: Home,
   targets: SkillTarget[],
+  projectPath?: string,
 ): HarnessOperationPlan {
   const adapter = harnessAdapter(key);
   const plan = adapter.operations?.[operation];
   if (!plan)
     throw new Error(`${adapter.name} does not support ${operation}; no configuration write is required.`);
-  return plan(home, targets);
+  return plan(home, targets, projectPath);
 }
 
 export function inspectHarnesses(

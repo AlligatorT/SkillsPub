@@ -370,6 +370,9 @@ function TargetInfoPanel({
       h(Text, {key: 'shared'}, ' ', h(Text, {bold: true}, 'Shared:'), ` ${harness.sharedConsumption.status}`),
       h(Text, {key: 'isolation'}, ' ', h(Text, {bold: true}, 'Isolation:'), ` ${harness.isolation.status}`),
       h(Text, {key: 'link'}, ' ', h(Text, {bold: true}, 'Link:'), ` ${harness.link.supported ? 'supported' : 'unsupported'}`),
+      ...(harness.mirror
+        ? [h(Text, {key: 'mirror'}, ' ', h(Text, {bold: true}, 'Mirror:'), ` ${harness.mirror.supported ? 'supported' : 'unsupported'}`)]
+        : []),
     );
   }
   return h(ListColumn, {title: 'Info', focused: false, width}, ...rows);
