@@ -52,7 +52,7 @@ Shared Target Definition 独立存在，不归属于任何 Harness。`targets.js
 
 `setup`、`apply` 和配置写入是可选 capability，不是 Adapter 存在的前提。没有内置 Adapter 的自定义目录只能作为 Generic Target，SkillsPub 不承诺其 Harness 最终可见性。
 
-流程控制属于 SkillsPub 应用层。`inspect`、scan、ls 和打开 TUI 严格只读，不创建目录或配置。setup/apply/reconcile 必须：
+流程控制属于 SkillsPub 应用层。`inspect`、scan、ls 和打开 TUI 严格只读，不创建目录或配置。Project-scoped Harness operation 统一从 `skillspub project <path> harnesses ...` 进入，并把 canonical project path 传给 Adapter；Global operation 不得静默写入项目路径。setup/apply/reconcile 必须：
 
 1. 读取配置并保存内容/hash；
 2. 展示路径、语义与完整变更计划；
@@ -89,7 +89,7 @@ Shared Target 在矩阵中只显示一次。Harness 详情解释 consumption；`
 Relationship 支持 `local`、`link`、`mirror`：
 
 - 默认使用 Link 复用原始 resource。
-- Harness 官方不支持或不会跟随 symlink 时，Adapter 可以创建 Mirror。
+- Harness 官方不支持、不跟随 symlink，或其隔离机制按 canonical target 过滤导致 Link 不可见时，Adapter 可以要求使用 Mirror。
 - Mirror 是同一 source resource 的受管副本，不是 Variant；其 source identity/hash 必须写入受管 metadata。
 - Shared resource 更新后，scan 只报告 Mirror Drift；显式 reconcile 才同步。
 - Mirror 被人工修改后标记 diverged，拒绝静默覆盖；用户必须明确覆盖或转为独立 local Variant。
@@ -101,7 +101,7 @@ Relationship 支持 `local`、`link`、`mirror`：
 
 SkillsPub 管理落在已管理 Skill Target 中的自包含 `SKILL.md` 目录。Plugin 私有目录中的 Skills 由 Plugin Manager 管理，不进入普通 Target inventory。
 
-如果 Plugin 或其他外部工具把 Skill 复制到已管理 Target，SkillsPub 按普通 Skill Resource 扫描和管理；除非存在可靠 manifest/lock provenance，否则不猜测 Plugin ownership。SkillsPub 可以 ON/OFF 该 resource，但不负责 Plugin 的安装、升级或卸载。
+如果 Plugin 或其他外部工具把 Skill 复制到已管理 Target，SkillsPub 按普通 Skill Resource 扫描和管理；除非存在可靠 manifest/lock provenance，否则不猜测 Plugin ownership。SkillsPub 可以 ON/OFF 该 resource，但不负责 Plugin 的安装、升级或卸载。Harness bundled、Plugin-provided 与 server-managed Skills 保持外部所有权；Adapter 可以报告其存在，但不把其私有目录变成普通可写 Target。
 
 ## Source Adapters
 
@@ -116,29 +116,48 @@ Source Adapter 拥有固定上游版本、命令、输出解析、provenance、l
 
 ## Grok Build v0.1 managed slice
 
-Grok Build Adapter 的 key 是 `grok`，已验证契约固定到 `xai-org/grok-build` revision `19d42e35c07a9c9244f03f6df0c4c353f970d4f9`：
+Grok Build 是 Pi、Claude Code 之后的第三个 `managed` Harness。Adapter key 是 `grok`，已验证契约固定到 `xai-org/grok-build` revision `19d42e35c07a9c9244f03f6df0c4c353f970d4f9`。该切片只管理 Grok 原生 Global/Project Skill Targets，不接管 Plugin、bundled、server-managed 或命令目录。
 
-- Global Target 是 `$GROK_HOME/skills`，未设置时为 `~/.grok/skills`；Project Target 是从当前目录向 Git 根扫描的 `.grok/skills`，SkillsPub 继续复用现有 selected/ancestor Project projection。
-- Grok 也始终扫描 Global、Project 与 ancestor `.agents/skills`，并默认扫描 Claude/Cursor Skills。`$GROK_HOME/config.toml` 的 `[skills].ignore` 按 canonical path prefix 排除 Skills；`[compat.claude].skills = false` 与 `[compat.cursor].skills = false` 分别关闭 vendor-compatible roots。
-- 当前上游实现会遍历 symlink，但没有稳定的官方兼容承诺；同时 ignore 会 canonicalize link target。为保证 Relationship ON/OFF 不被 Shared ignore 绕过，SkillsPub 把 Grok 的有效 Link capability 报为 unsupported，新建 missing Relationship 使用现有 Managed Mirror 实现。
-- Global setup/reconcile 加入用户 Shared root；Project 操作还加入 selected Project 与当前存在的 ancestor Shared roots。`skillspub project <path> harnesses grok ...` 只传递 canonical project path，不创建中央 Project registry。
-- `skills.paths` 或 `skills.disabled` 非空、已有 ignore 覆盖 Grok Target、TOML malformed/类型异常时无法确认安全语义，plan 在任何写入前失败。该 zero-change 拒绝是 v0.1 的保守边界，不改写或翻译用户配置。
-- plan 列出因新 ignore 失效的全部 Grok Links。确认后只 Unlink manifest 中的 symlinks，不删除 source，也不自动建 Mirror；保存原配置、SHA-256 与 affected-Link manifest，复核并发变化后原子写配置，再验证 Shared 与 vendor-compatible isolation。
-- 写入保留无关 TOML 与 comments，并保持非-Skill compatibility cells、Grok-native local resources、bundled/plugin/server-managed Skills、commands 及其他 Grok-private resources 不变。apply 后打印 backup/manifest 的手工恢复步骤；本 slice 不提供 `unsetup`。
+### Targets and resource form
+
+- Global Target：`$GROK_HOME/skills`，未设置时为 `~/.grok/skills`。
+- Project Target：所选项目的 `.grok/skills`；现有 Project inventory 继续把 ancestor entries 投影为只读继承。
+- 当前上游实现会遍历 symlink，但没有稳定的官方兼容承诺，且 `[skills].ignore` 会 canonicalize link target。为避免被隔离 Shared root 下的 Link 绕过 Relationship ON/OFF，Adapter 把有效 Link capability 报为 unsupported，新建 missing Relationship 使用现有 Managed Mirror 实现。
+- Mirror 更新、Drift、diverged 与 parking 继续使用通用 Resource form 语义，不在 Adapter 内另建副本模型。
+
+### Isolation
+
+Grok 默认读取 `.grok/skills`、Global/Project/ancestor `.agents/skills` 以及 Claude/Cursor 兼容 Skill 目录。严格 managed setup 必须：
+
+1. 在 `[skills].ignore` 中加入 user Shared root；Project setup 还加入所选项目及当前已存在 ancestor Shared roots；
+2. 设置 `[compat.claude].skills = false` 与 `[compat.cursor].skills = false`，不改 rules、agents、MCP、hooks 或 sessions 等其他兼容 surface；
+3. 重新读取有效配置并验证上述来源不再贡献 Skills；
+4. 把兼容入口保留为 Adapter 私有 isolation 细节，不泛化新的 Target-consumption 领域类型。
+
+若用户已有非空 `skills.paths`、`skills.disabled`，或 `skills.ignore` 与 Grok Targets 冲突，setup 列出 blocker 并保持零变更；TOML malformed 或类型异常同样在写入前失败，不导入、不覆盖、不猜测 intent。Plugin、bundled 与 server-managed Skills 保持外部所有权，不影响 Grok 原生 Targets 的 Relationship 管理。
+
+### Migration and commands
+
+setup 计划列出隔离后将失效的 Relationships。用户确认后，SkillsPub 只 Unlink affected-Link manifest 中的 Grok symlinks，不删除 source resource，也不自动创建 Mirrors。写入前保存原配置、SHA-256 与 affected-Link manifest，复核并发变化后原子写配置，再验证 Shared 与 vendor-compatible isolation。
+
+Global 操作使用 `skillspub harnesses grok setup|reconcile [--yes]`。Project 操作使用 `skillspub project <path> harnesses grok setup|reconcile [--yes]`，只传递 canonical project path，不创建中央 Project registry。写入保留无关 TOML、comments、非-Skill compatibility cells 与 Grok-private resources；apply 后打印 backup/manifest 的手工恢复步骤。v0.1 不提供 `unsetup`。
 
 官方证据：[settings reference](https://docs.x.ai/build/settings/reference)、[Skills/Plugins/Marketplaces](https://docs.x.ai/build/features/skills-plugins-marketplaces)、[pinned discovery source](https://github.com/xai-org/grok-build/blob/19d42e35c07a9c9244f03f6df0c4c353f970d4f9/crates/codegen/xai-grok-agent/src/prompt/skills.rs)。
 
 ## Evidence baseline and delivery order
 
-以下是 2026-08-12 的官方证据与 Adapter 规划，不表示这些 Adapters 已全部实现：
+以下是 2026-08-20 的官方证据与 Adapter 状态：
 
-| Harness | 已确认的官方行为 | Adapter 计划 | 官方证据 |
+| Harness | 已确认的官方行为 | Adapter 状态/计划 | 官方证据 |
 | --- | --- | --- | --- |
-| Pi | 同时发现 Pi 专属 roots 与 `.agents/skills`；`skills` 配置支持 glob exclusion | 第一批达到 `managed`，默认计划隔离 Shared，但只在 setup/apply 时确认写入 | [skills docs](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/skills.md), [v0.54.0](https://github.com/earendil-works/pi/releases/tag/v0.54.0), [discovery commit](https://github.com/earendil-works/pi/commit/39cbf47e42433ce301dabcec398cac6fe5f0fa22) |
-| Codex | Global/Repo Skills 使用 `.agents/skills`；`[[skills.config]]` 提供按路径启停 | 先保留证据；另行设计逐 Skill override 后再决定 support level | [Agent Skills](https://developers.openai.com/codex/skills), [config sample](https://developers.openai.com/codex/config-sample) |
-| Claude Code | Personal/Project 使用 `.claude/skills`，支持 symlink；Plugin Skills 位于 plugin 内并 namespaced | `managed`；Shared 为 `not-consumed`，无需 setup，Plugin ownership 保持外部 | [Skills](https://docs.anthropic.com/en/docs/claude-code/skills), [Settings](https://docs.anthropic.com/en/docs/claude-code/settings) |
-| Grok Build | `$GROK_HOME/skills`、Project/ancestor `.grok/skills`、Shared `.agents/skills` 与默认启用的 Claude/Cursor roots；canonical `[skills].ignore` 可隔离 Shared | `managed`；setup/reconcile 管理 isolation，missing Relationship 默认 Mirror | [settings](https://docs.x.ai/build/settings/reference), [skills](https://docs.x.ai/build/features/skills-plugins-marketplaces), [pinned source](https://github.com/xai-org/grok-build/blob/19d42e35c07a9c9244f03f6df0c4c353f970d4f9/crates/codegen/xai-grok-agent/src/prompt/skills.rs) |
+| Pi | 同时发现 Pi 专属 roots 与 `.agents/skills`；`skills` 配置支持 glob exclusion | 已实现 `managed`；setup/apply 显式隔离 Shared | [skills docs](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/skills.md), [v0.54.0](https://github.com/earendil-works/pi/releases/tag/v0.54.0), [discovery commit](https://github.com/earendil-works/pi/commit/39cbf47e42433ce301dabcec398cac6fe5f0fa22) |
+| Claude Code | Personal/Project 使用 `.claude/skills`，支持 symlink；Plugin Skills 位于 plugin 内并 namespaced | 已实现 `managed`；Shared 为 `not-consumed`，无需配置写入 | [Skills](https://docs.anthropic.com/en/docs/claude-code/skills), [Settings](https://docs.anthropic.com/en/docs/claude-code/settings) |
+| Grok Build | `$GROK_HOME/skills`、Project/ancestor `.grok/skills`、Shared `.agents/skills` 与默认启用的 Claude/Cursor roots；canonical `[skills].ignore` 可隔离 Shared | 已实现 `managed`；setup/reconcile 管理 isolation，missing Relationship 默认 Mirror | [settings](https://docs.x.ai/build/settings/reference), [skills](https://docs.x.ai/build/features/skills-plugins-marketplaces), [pinned source](https://github.com/xai-org/grok-build/blob/19d42e35c07a9c9244f03f6df0c4c353f970d4f9/crates/codegen/xai-grok-agent/src/prompt/skills.rs) |
+| Codex | Global/Repo Skills 使用 `.agents/skills`；`[[skills.config]]` 提供按路径启停 | 保留证据；另行设计逐 Skill override 后再决定 support level | [Agent Skills](https://developers.openai.com/codex/skills), [config sample](https://developers.openai.com/codex/config-sample) |
+| Kimi Code CLI | 同时发现品牌目录与 `.agents/skills`；`--skills-dir` 可替换自动发现但属于每次启动参数 | 可研究 `discoverable`；SkillsPub 不负责启动 Harness，因此不能据此承诺 `managed` | [Agent Skills](https://www.kimi.com/code/docs/en/kimi-code-cli/customization/skills.html), [Kimi CLI source docs](https://github.com/MoonshotAI/kimi-cli/blob/main/docs/en/customization/skills.md) |
+| OpenCode | 原生 `.opencode/skills`，并自动发现 `.agents/skills` 与 `.claude/skills`；可靠总开关是进程环境变量 | 可研究 `discoverable`；不增加 launcher/wrapper 时不承诺 `managed` | [Agent Skills](https://opencode.ai/docs/skills/), [runtime flags](https://github.com/anomalyco/opencode/blob/v1.18.8/packages/opencode/src/effect/runtime-flags.ts) |
+| DeepSeek Harness | Skill registry/provider 为 Profile plugin；默认 roots 包含 `.dsh/skills` 与 `.agents/skills`，可用 `includeDefaultRoots: false` 重组 | 等 Consumer/Profile 与 Plugin composition 模型明确后实现；developer preview 不进入当前切片 | [Developer preview](https://deepseek.com/harness/en/), [Skills subsystem](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/skills.md) |
 | Hermes | 每个 Profile 有独立 `HERMES_HOME` 与 `skills/`；可配置 `skills.external_dirs` | 等多 Profile 需求明确后实现，不提前引入 Consumer 模型 | [Profiles](https://hermes-agent.nousresearch.com/docs/user-guide/profiles), [Skills](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills) |
 | OpenClaw | 支持多种 Target roots 与 per-Agent final skill allowlists | 等多 Agent 身份模型设计后实现 | [Skills](https://docs.openclaw.ai/tools/skills), [Skills config](https://docs.openclaw.ai/tools/skills-config) |
 
-已完成 Project TUI、Skill Target 迁移、Pi、Claude Code 与 Grok Build Managed Adapters，以及 `npx skills` Source Adapter。后续 Harness 继续逐个以官方证据、fixtures 和 Shared 隔离能力提升支持等级。OpenClaw/Hermes 在 Consumer/Profile 模型明确前保持延后。
+已完成 Project TUI、Skill Target 迁移、Pi、Claude Code 与 Grok Build Managed Adapters，以及 `npx skills` Source Adapter。之后按 #67 继续 Shared-consuming Harness 调研、批量操作、Source update、JSON CLI 与 pre-release hardening。DeepSeek Harness、OpenClaw 与 Hermes 在 Consumer/Profile 模型明确前保持延后。
