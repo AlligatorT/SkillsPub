@@ -71,6 +71,10 @@ _避免_: Source guess、Expected source
 **Source Adapter**:
 集中维护一个安装来源或传输工具的固定版本、命令、输出解析、provenance 和兼容性，例如 `npx skills`。Source Adapter 不决定最终启用哪些 Harness Targets。
 
+**Update availability**:
+Source Adapter 对受管 Skill 当前 provenance 与上游内容的缓存比较结果：`current`、`available`、`upstream-missing` 或 `check-failed`，并带 `checkedAt`。它是可过期观察，不属于 Actual state、Desired state 或 Drift。
+_避免_: Upstream drift、自动更新状态
+
 **Support level**:
 Harness Adapter 的能力等级。`managed` 表示 Adapter 能通过已验证流程使该 Harness 达到可独立控制最终可见性的状态；`discoverable` 只可靠解析和扫描 Targets；`unsupported` 不猜测。Support level 描述能力，不表示当前已经隔离 Shared。
 

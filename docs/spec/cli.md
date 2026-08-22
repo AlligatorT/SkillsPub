@@ -73,6 +73,8 @@ skillspub ls [--target T] [--tag T]
 skillspub on|off <selector> <target...>
 skillspub status <selector>
 skillspub targets
+skillspub shared refresh
+skillspub shared outdated
 skillspub harnesses [<name> inspect|setup|reconcile [--yes]]
 skillspub migrate targets
 skillspub project <path> <command...>  # 包括 scan/doctor/shared/preset/mirror/harnesses
@@ -82,6 +84,21 @@ skillspub project <path> harnesses grok setup|reconcile [--yes]
 裸命令只在交互式 TTY 中启动 Ink。非 TTY 环境输出 CLI usage。`tui` 不接受额外参数。
 
 `--target` 是当前术语；现有 `--agent` 暂作兼容别名并输出弃用提示。只读命令和打开 TUI 严格不创建目录、不迁移文件、不修改 Harness 配置。
+
+## Non-interactive JSON contract
+
+所有非 TUI 命令接受 `--json`，并只向 stdout 写一个无 ANSI 的 versioned envelope：
+
+```json
+{"schemaVersion":1,"ok":true,"data":{}}
+{"schemaVersion":1,"ok":false,"error":{"code":"stable_code","message":"human-readable","details":{}}}
+```
+
+- `schemaVersion` 从 `1` 开始；命令专属结构只放在 `data` 或 `error.details` 中。
+- JSON 模式永不进入交互 prompt。会修改磁盘的命令没有 `--yes` 时返回完整 plan 与 `applied: false`，退出 0；带 `--yes` 才 apply，并返回 `applied: true` 与结果。
+- 退出码固定为：0 表示命令完成；1 表示领域、预检或运行失败；2 表示参数或 usage 错误。
+- Drift、update available、warnings 等有效发现属于成功 `data`，不改变退出码。未来若需要 CI gate，另行增加显式检查模式，不复用普通查询的退出码。
+- 裸命令加 `--json` 不启动 TUI，而是返回 usage error。`tui` 本身不支持 JSON。
 
 ## Presets
 
@@ -157,6 +174,20 @@ npx --yes skills@1.5.21 add <source>
 - Source 是当前 Slot 的可变 metadata。用户在外部手工替换后，SkillsPub 接受 lock 中的新来源并保留 Slot intent、Tags、Bundles 与 claims；不产生 persistent source warning。
 - 只有 ON/OFF 同时存在、broken link、lock/file 缺失等结构异常持续告警。
 
+### Update availability
+
+Update availability 是 Source Adapter 的缓存观察，不是 Actual state、Desired state 或 Drift。TUI 启动、scan 和普通只读查询不联网；用户显式刷新：
+
+```text
+skillspub shared refresh
+skillspub shared outdated
+```
+
+- `shared refresh` 按 source 批量检查当前 scope 的全部 npx-managed Skills，以固定 `skills@1.5.21` lock 中的 source、skill path 与 folder hash 对比远端内容。该检查在 Source Adapter 内实现，不调用可能修改磁盘的上游 `skills update`。
+- 缓存跟随对应 Global 或精确 Project scope，不建立中央 Project registry。每项保存 `current`、`available`、`upstream-missing` 或 `check-failed` 以及 `checkedAt`；provenance、skill path 或本地内容身份变化后，旧结果不再代表当前 Skill。
+- `shared outdated` 只读缓存；没有缓存时显示 unknown，不隐式联网。检查失败不得把旧结果伪装成 current/available。
+- `upstream-missing` 只报告上游事实，保留本地 Skill、Relationships 与 provenance；update 拒绝该项，删除仍走显式 remove。
+
 ### Update and remove
 
 - Global npx lock 保持在 `~/.agents/.skill-lock.json`；Project lock 保持在 `<project>/skills-lock.json`。OFF 不删除 lock。
@@ -190,7 +221,10 @@ TUI 是 matrix-first 的单项 Relationship manager，不追求完整 CLI parity
 - Absent Relationship：灰色 `missing`
 - Broken symlink：明显异常 `broken`
 - Shared consumption：Harness 详情显示 `required` / `enabled` / `excluded` 等状态
+- Update availability：显示 `current` / `available` / `upstream-missing` / `check-failed` 与 `checkedAt`；无缓存时显示 unknown
 - Inherited Project entry：只读并显示 source directory
+
+`r` 显式刷新当前 scope 的全部受管 Skills，不在 TUI 启动时后台联网。`u` 更新选中的 available Skill；batch marks 存在时只更新已标记且 available 的 Skills。更新继续使用 Shared update 的操作锁、Desired state 停放和验证语义。
 
 Global view 中 `Space` 只切换 existing Relationship；Missing 通过 Link/Mirror plan 建立。Project view 每个 Skill × Target 只投影一个有效条目：inherited ON 只读；inherited OFF 或 missing 可用普通 `Space` 创建 Project Relationship；Project ON/OFF 始终停留在同一条目。
 
