@@ -1,6 +1,6 @@
 # SkillsPub
 
-SkillsPub 管理 skill resources 与 Skill Targets 之间的 Relationships。磁盘记录 Actual state；SkillsPub state 记录人工 intent 与 persistent Preset claims。
+SkillsPub 是 Agent Skills 的 verified visibility 与 Relationship manager。它管理 skill resources 与 Skill Targets 之间的 Relationships，并解释一个已安装 resource 为何会或不会被 Harness 在下次加载时发现；磁盘记录 Actual state，SkillsPub state 记录人工 intent 与 persistent Preset claims。
 
 ## Language
 
@@ -37,7 +37,7 @@ _避免_: Runtime、假设一个 Harness 只有一个 Target
 _避免_: Shared Harness、Dedicated Target、为每个消费者复制 Shared 开关
 
 **Generic Target**:
-用户为未内置支持的 Harness 或自定义目录声明的 Skill Target。SkillsPub 可以扫描和管理目录，但不承诺理解其 Harness 配置、隔离或最终可见性。
+用户为未内置支持的 Harness 或自定义目录声明的 Skill Target。SkillsPub 可以扫描和管理目录，但不承诺理解其 Harness 配置、隔离或 Effective visibility。
 
 **Target Slot**:
 Skill Target discovery root 下由规范化 entry name 占据的位置，以 `(Target, normalized name)` 识别。同一 Target 的一个 Slot 同时只能承载一个来源。
@@ -76,10 +76,17 @@ Source Adapter 对受管 Skill 当前 provenance 与上游内容的缓存比较�
 _避免_: Upstream drift、自动更新状态
 
 **Support level**:
-Harness Adapter 的能力等级。`managed` 表示 Adapter 能通过已验证流程使该 Harness 达到可独立控制最终可见性的状态；`discoverable` 只可靠解析和扫描 Targets；`unsupported` 不猜测。Support level 描述能力，不表示当前已经隔离 Shared。
+Harness Adapter 的能力等级。`managed` 表示 Adapter 能通过已验证流程独立控制并解释该 Harness 的 Effective visibility；`discoverable` 只可靠解析和扫描 Targets；`unsupported` 不猜测。Support level 描述能力，不表示当前已经隔离 Shared。
 
 **Shared consumption**:
-Harness 对 Shared Skill Target 的已验证关系：`not-consumed`、`required`、`enabled`、`excluded` 或 `unknown`。它描述当前状态以及最终可见性的一个输入，不复制 Target Relationship。
+Harness 对 Shared Skill Target 的已验证关系：`not-consumed`、`required`、`enabled`、`excluded` 或 `unknown`。它描述当前状态以及 Effective visibility 的一个输入，不复制 Target Relationship。
+
+**Effective visibility**:
+针对一个已安装 Skill resource 与 Harness 的本地只读结论：根据 Actual Relationships、Harness 实际消费的 Targets、配置与 Adapter 证据，判断该 resource 在 Harness 下次加载时是 `visible`、`not-visible`、`unknown` 或 `conflicted`。它不声称知道运行中进程的内存状态。
+_避免_: Final visibility、Live visibility、把目录存在直接当作可见
+
+**Visibility explanation**:
+Effective visibility 的可审计说明，包括贡献或绕过预期的 Targets/roots、Shared consumption、同名冲突、版本证据和可选目标计划。计划只描述安全的现有操作；证据不足、Preset claim 或未知 ownership 作为 blocker，不被猜测或自动覆盖。
 
 **Actual state**:
 现场扫描得到的 Relationship、Activation 与 Resource form。磁盘是 Actual state 的唯一真相。

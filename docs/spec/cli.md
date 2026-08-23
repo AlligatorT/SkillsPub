@@ -55,8 +55,8 @@ Target Definition 是 Harness 或公共标准的路径/能力规则；结合 hom
 
 - Shared Target 在矩阵中只显示一次，ON/OFF 对该 Target 的全部消费者生效。
 - Harness Adapter 报告 `not-consumed`、`required`、`enabled`、`excluded` 或 `unknown`，但不复制 Shared 开关。
-- Harness 最终可见性是它实际消费且未排除的 Global、Project、父级与 Shared Targets 的并集。
-- `unknown` 不作最终可见性承诺。
+- Effective visibility 由它实际消费且未排除的 Global、Project、父级与 Shared Targets 共同决定。
+- 只有本地证据完整且不存在未解析的同名 Variant 时才返回 `visible` 或 `not-visible`；其余情况返回 `unknown` 或 `conflicted`。
 
 Harness-specific Targets 由对应 Adapter 定义。Generic Target 可由用户指定路径，SkillsPub 只承诺目录管理。当前不建立 Consumer/Profile 类型，但 Target 结构不得假设一个 Harness 永远只有一个身份或 Target。
 
@@ -72,18 +72,37 @@ skillspub doctor [--repair --yes]      # 只读诊断；确认后执行安全修
 skillspub ls [--target T] [--tag T]
 skillspub on|off <selector> <target...>
 skillspub status <selector>
+skillspub explain <selector> [--harness H] [--want visible|hidden]
 skillspub targets
 skillspub shared refresh
 skillspub shared outdated
 skillspub harnesses [<name> inspect|setup|reconcile [--yes]]
 skillspub migrate targets
-skillspub project <path> <command...>  # 包括 scan/doctor/shared/preset/mirror/harnesses
+skillspub project <path> <command...>  # 包括 scan/doctor/explain/shared/preset/mirror/harnesses
+skillspub project <path> explain <selector> [--harness H] [--want visible|hidden]
 skillspub project <path> harnesses grok setup|reconcile [--yes]
 ```
 
 裸命令只在交互式 TTY 中启动 Ink。非 TTY 环境输出 CLI usage。`tui` 不接受额外参数。
 
 `--target` 是当前术语；现有 `--agent` 暂作兼容别名并输出弃用提示。只读命令和打开 TUI 严格不创建目录、不迁移文件、不修改 Harness 配置。
+
+## Effective Visibility Explain
+
+`explain` 只接受当前 Inventory 中可明确解析的已安装 Skill resource；同名 Variants 有歧义时失败并列出 selectors。Catalog candidate 必须先通过 Shared add 安装，不在 Explain 中生成下载计划。
+
+- Global 命令只扫描 Global scope；Project 命令只读取用户给出的 canonical 项目、其适用 ancestor roots 与 Global 继承，不推断 cwd、不维护中央 Project registry。
+- 默认解释全部内置 Harness；`--harness` 只缩小输出。未检测到的内置 Harness 仍返回 `detected: false`、support/evidence 和 `unknown`，不按默认目录猜测。
+- 每次调用都重新扫描本地 Relationships、配置和 Harness inspection；不联网、不新增 cache，也不读取 Update availability 推断可见性。
+- 每个 Harness 聚合为 `visible`、`not-visible`、`unknown` 或 `conflicted`。结果列出 detection、support、Adapter evidence/verified version、所有 consumed roots、贡献的 Relationships/Resource forms、Shared consumption、绕过原因与同名 Variants。
+- `visible` 表示选定 resource 在至少一个已验证 consumed root 中有 ON Relationship 且没有未解析冲突；`not-visible` 表示完整证据证明所有 consumed roots 都不提供该 resource；配置/consumption/支持证据不足时为 `unknown`；不同来源的同名 Variant 可能竞争且 Adapter 没有已验证 precedence 时为 `conflicted`。
+- Effective visibility 描述 Harness **下次加载**时应发现什么，不启动 Harness、不检查运行中进程的内存。Adapter 展示其固定证据版本；本机版本未知或不匹配时给 warning，不能确认 schema/语义时降为 `unknown`。
+- 不带 `--want` 时只解释。`--want visible|hidden` 返回只读 plan；Explain 永不 apply，也不进入 confirmation。计划只组合现有安全 operations，并带重新检查所需的 preconditions。
+- `visible` 计划优先建立或激活 Harness-specific Target Relationship，由 Managed Adapter 决定 Link/Mirror；不会为了减少步骤主动扩大 Shared consumption。
+- `hidden` 计划必须覆盖该 Harness 的全部 contributing roots。active Preset claim、未知 ownership、同名冲突、未知配置或会影响其他 Skills 且尚未获明确决策的隔离变更成为 blockers；Explain 不停用 Preset、不制造 Drift、不返回 best-effort executable plan。
+- `managed` 且证据完整的 Harness 才能给出确定结果；`discoverable`、`unsupported` 或 inspection 不完整时保守返回 `unknown`。
+
+JSON `data` 至少包含选定 resource identity、scope、逐 Harness detection/support/evidence、`effectiveVisibility`、roots、reasons、conflicts、warnings，以及可选的 `wanted` 和 `{ executable, steps, blockers }` plan。Text 与 TUI 只投影同一 resolver 结果，不另建状态。
 
 ## Non-interactive JSON contract
 
@@ -221,6 +240,7 @@ TUI 是 matrix-first 的单项 Relationship manager，不追求完整 CLI parity
 - Absent Relationship：灰色 `missing`
 - Broken symlink：明显异常 `broken`
 - Shared consumption：Harness 详情显示 `required` / `enabled` / `excluded` 等状态
+- Effective visibility：selected resource 的 Harness 摘要显示 `visible` / `not-visible` / `unknown` / `conflicted`；未检测项显示 `not-detected`
 - Update availability：显示 `current` / `available` / `upstream-missing` / `check-failed` 与 `checkedAt`；无缓存时显示 unknown
 - Inherited Project entry：只读并显示 source directory
 
@@ -235,7 +255,8 @@ Link/Unlink 和 Mirror create/remove 显示 source → target 并确认。Unlink
 - `/` 搜索 name、frontmatter description 与 provenance，不搜索完整 `SKILL.md` body。
 - `s` 按 Name（默认）→ Status → Source 循环排序。
 - 刷新或排序后 selection 跟随 resource identity，不跟随旧 row index。
-- Summary 显示 name、description、source；无可靠来源时显示 `Source unknown` 与 `realPath`。
+- Summary 显示 name、description、source；无可靠来源时显示 `Source unknown` 与 `realPath`。Skill view 的详情同时列出全部内置 Harness 的 Effective visibility 摘要，包括未检测项。
+- Visibility detail 打开非全屏、可滚动 modal，展示 consumed roots、Relationships、Shared consumption、证据版本、冲突、warnings 与 blockers；用户可选择 `visible` 或 `hidden` 只查看同一 resolver 生成的 plan，不能从 Explain modal apply。
 - Enter 打开非全屏、可滚动的完整 `SKILL.md` modal；Esc 返回并保留 selection。
 - Keyboard-only；footer 只显示当前上下文可用动作。
 
