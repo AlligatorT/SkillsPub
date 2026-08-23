@@ -199,28 +199,21 @@ SkillsPub 对 Grok 的复杂工作并不是竞争对手证明“不需要”，�
 - 明确的 managed/discoverable/unsupported 可信等级；
 - 不假装 50 个 path adapters 都等价于真实控制。
 
-## 5. 对当前路线图的建议
+## 5. 对当前路线图的建议与决策
 
-### 建议：先暂停 #76–#82 的实施，不删除 tickets
+### 决策：以 Effective Visibility 证明 v0.1 价值
 
-[#76](https://github.com/AlligatorT/SkillsPub/issues/76)（update cache）、[#78](https://github.com/AlligatorT/SkillsPub/issues/78)（JSON）、[#80](https://github.com/AlligatorT/SkillsPub/issues/80)（公开 package）都是合理工程工作，但它们会把当前产品命题进一步固化。在竞品面已经变化的情况下，应先用一个短 decision gate 回答：
+研究后的 decision gate 选择 **Verified visibility product**：SkillsPub 只承诺少量、真实验证的 Managed Harness；其他 Harness 清楚标记 discoverable/unsupported。核心卖点是 explain/plan/verify，而不是 agent 数量。
 
-1. **Verified visibility product（推荐）**  
-   SkillsPub 只承诺少量、真实验证的 Managed Harness；其他 Harness 清楚标记 discoverable/unsupported。核心卖点是 explain/plan/verify，而不是 agent 数量。
-
-2. **Broad filesystem manager**  
-   放弃严格 isolation，快速加大 path table、桌面/TUI、marketplace、copy/symlink。这个方向已有 Skills Manager、Skills Hub、ASM、Vercel `skills`，不建议正面竞争。
-
-3. **Compatibility/audit layer**  
-   复用 `npx skills` / `gh skill` / dotagents 的 source/provenance/materialization，SkillsPub 只做 inventory、Relationship、visibility audit 与 Harness verification。这可能是最轻的长期架构，但需要重画产品边界。
-
-若选择方案 1，建议：
-
-- 保留现有 Target/Relationship/Shared consumption/Adapter 词汇；
+- 保留现有 Target/Relationship/Shared consumption/Adapter 词汇与严格 isolation；
+- Source add/update/remove 继续委托固定 Vercel `skills` Adapter，不建 marketplace 或平行 updater；
 - 把“50 agents”式 path table 放到长期 roadmap，不作为 v0.1 成功指标；
-- 减少 Source/marketplace 重复建设，优先兼容 Vercel/GitHub provenance；
-- 在 v0.1 ticket 之前先做一个用户可见的 `explain visibility` tracer bullet，以证明深模型的价值；
-- 重新评估 #76–#82 是否仍是最先发布的 frontier。
+- 将用户可见的 Effective Visibility resolver、CLI/JSON Explain 与 TUI evidence detail 加入 v0.1 发布门槛；
+- Explain 只做本地只读推断：解释已安装 resource 在 Harness 下次加载时为何 `visible`、`not-visible`、`unknown` 或 `conflicted`，不启动 Harness、不声称运行中进程状态；
+- `--want visible|hidden` 只返回安全 plan 或 blockers，不自动修改 Presets、未知 ownership 或配置；
+- #76–#82 保留，继续作为 Source update、JSON 与发布 frontier；新增 Explain tracer tickets 并加入 #81 的发布依赖。
+
+Broad filesystem manager 与独立 compatibility/audit layer 保留为已拒绝替代方向。前者已有 Skills Manager、Skills Hub、ASM 与 Vercel `skills` 覆盖；后者会丢失 SkillsPub 已经实现的 Relationship、Preset claims 与 Managed Harness isolation 价值。
 
 ## 6. 最强架构启示
 

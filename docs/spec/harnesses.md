@@ -25,7 +25,7 @@ Shared Target Definition 独立存在，不归属于任何 Harness。`targets.js
 - 内置 Target Definition 的明确 overrides；
 - 用户创建的 Generic Targets。
 
-内置默认路径留在 Adapter/Target 模块中，避免把会变化的官方默认值复制到用户文件。Generic Target 只承诺目录扫描与 Relationship 管理，不承诺 Harness 隔离或最终可见性。
+内置默认路径留在 Adapter/Target 模块中，避免把会变化的官方默认值复制到用户文件。Generic Target 只承诺目录扫描与 Relationship 管理，不承诺 Harness 隔离或 Effective visibility。
 
 ### Legacy migration
 
@@ -45,12 +45,12 @@ Shared Target Definition 独立存在，不归属于任何 Harness。`targets.js
 
 - 产品检测、已验证版本和官方证据；
 - Global/Project/Profile Target Definitions；
-- Shared consumption 的读取与隔离能力；
+- 实际消费的 Global/Project/ancestor/Shared roots、Shared consumption 与隔离能力；
 - 配置文件定位、schema 检查和迁移；
 - `inspect → resolve targets`，以及产品需要时的 `plan → apply → verify`；
 - Link 支持与必要的 Mirror 策略。
 
-`setup`、`apply` 和配置写入是可选 capability，不是 Adapter 存在的前提。没有内置 Adapter 的自定义目录只能作为 Generic Target，SkillsPub 不承诺其 Harness 最终可见性。
+`setup`、`apply` 和配置写入是可选 capability，不是 Adapter 存在的前提。没有内置 Adapter 的自定义目录只能作为 Generic Target，SkillsPub 不承诺其 Harness Effective visibility。
 
 流程控制属于 SkillsPub 应用层。`inspect`、scan、ls 和打开 TUI 严格只读，不创建目录或配置。Project-scoped Harness operation 统一从 `skillspub project <path> harnesses ...` 进入，并把 canonical project path 传给 Adapter；Global operation 不得静默写入项目路径。setup/apply/reconcile 必须：
 
@@ -66,8 +66,8 @@ SkillsPub 只删除自己可证明拥有的配置 claim。原本已存在的用�
 
 ## Support levels
 
-- `managed`：官方路径、能力与必要配置有证据和 fixtures；Adapter 能通过已验证流程使该 Harness 达到可独立控制最终可见性的状态。
-- `discoverable`：能可靠解析并扫描 Skill Targets，但不能承诺独立控制最终可见性。
+- `managed`：官方路径、能力与必要配置有证据和 fixtures；Adapter 能通过已验证流程独立控制并解释该 Harness 的 Effective visibility。
+- `discoverable`：能可靠解析并扫描 Skill Targets，但不能承诺确定的 Effective visibility。
 - `unsupported`：缺少可靠官方机制，SkillsPub 不猜测。
 
 Support level 描述 Adapter 能力，不等于当前配置状态。TUI 主界面只显示检测到的 Harness；未安装的内置支持项放在单独的可添加列表。
@@ -82,7 +82,28 @@ Harness Adapter 报告它对 Shared Target 的当前状态：
 - `excluded`：已通过官方机制隔离；
 - `unknown`：无法可靠确认。
 
-Shared Target 在矩阵中只显示一次。Harness 详情解释 consumption；`required` 或 `unknown` 时，某个 Harness-specific Target 为 OFF 不等于该 Skill 对 Harness 最终不可见。当前不实现 Consumer/Profile 类型，但 Adapter 结构不得假设一个 Harness 永远只有一个身份或 Target。
+Shared Target 在矩阵中只显示一次。Harness 详情解释 consumption；`required` 或 `unknown` 时，某个 Harness-specific Target 为 OFF 不等于该 Skill 对 Harness 有确定的 Effective visibility。当前不实现 Consumer/Profile 类型，但 Adapter 结构不得假设一个 Harness 永远只有一个身份或 Target。
+
+## Effective Visibility evidence
+
+Harness Adapter 必须为共用 resolver 提供可审计的本地发现证据，而不是只返回一个路径表或最终布尔值：
+
+- Harness detection、support level、固定 upstream evidence 与 verified version；
+- 当前 scope 实际消费、排除或无法确认的 Global、Project、ancestor、Shared 与 vendor-compatible roots；
+- 每个 root 的来源、scope、消费理由和配置证据；
+- isolation 状态，以及配置/schema/版本不确定性产生的 warnings 或 blockers；
+- Adapter 已有的安全 setup/reconcile operations 和 Link/Mirror capability。
+
+Resolver 把该 evidence 与一次 Inventory scan 中的 Resource identity、Target Slots、Relationships、Activation、Resource forms、Variants、Base intent 与 Preset claims 合成 Effective visibility。它不缓存 projection、不创建第二份 Actual state，也不联网读取 Source 或 Harness 文档。
+
+- `visible`：选定 resource 在至少一个已验证 consumed root 中有 ON Relationship，且没有未解析的同名竞争。
+- `not-visible`：完整证据证明所有 consumed roots 都不提供该 resource。
+- `unknown`：Harness 未检测、support 不是 `managed`、consumption/config/schema 无法确认，或本地版本差异使已验证语义不能成立。
+- `conflicted`：不同来源的同名 Variant 可能竞争，而 Adapter 没有官方且经过 fixture 验证的 precedence。不得按 SkillsPub 自定 root 顺序猜测获胜者。
+
+本机 Harness 版本未知或与固定证据版本不同但 schema/语义仍可确认时，结果可保持确定并附 warning；不能确认时降为 `unknown`。Effective visibility 只表示 Harness 下次加载时应发现什么，不承诺运行中进程已经加载。
+
+`--want visible|hidden` 只生成 plan。Managed Harness 的 visible 计划优先使用 Harness-specific Target，并复用 Adapter 的 Link/Mirror 与 isolation operations；hidden 计划必须覆盖所有 contributing roots。Preset claim、未知 ownership、未知配置、同名冲突或未决跨 Skill 副作用阻止 executable plan，并返回 blockers。Explain 不直接修改 Harness 配置或 Relationship。
 
 ## Resource forms
 
@@ -160,4 +181,4 @@ Global 操作使用 `skillspub harnesses grok setup|reconcile [--yes]`。Project
 | Hermes | 每个 Profile 有独立 `HERMES_HOME` 与 `skills/`；可配置 `skills.external_dirs` | 等多 Profile 需求明确后实现，不提前引入 Consumer 模型 | [Profiles](https://hermes-agent.nousresearch.com/docs/user-guide/profiles), [Skills](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills) |
 | OpenClaw | 支持多种 Target roots 与 per-Agent final skill allowlists | 等多 Agent 身份模型设计后实现 | [Skills](https://docs.openclaw.ai/tools/skills), [Skills config](https://docs.openclaw.ai/tools/skills-config) |
 
-已完成 Project TUI、Skill Target 迁移、Pi、Claude Code 与 Grok Build Managed Adapters，以及 `npx skills` Source Adapter。之后按 #67 继续 Shared-consuming Harness 调研、批量操作、Source update、JSON CLI 与 pre-release hardening。DeepSeek Harness、OpenClaw 与 Hermes 在 Consumer/Profile 模型明确前保持延后。
+已完成 Project TUI、Skill Target 迁移、Pi、Claude Code 与 Grok Build Managed Adapters，以及 `npx skills` Source Adapter。v0.1 按 #67 增加共用 Effective Visibility resolver、CLI/JSON Explain 与 TUI evidence detail，并继续 Source update、JSON CLI 与 pre-release hardening。后续 Harness Adapter 必须提供 consumed-root evidence，才能让 Explain 返回非 `unknown` 结论；DeepSeek Harness、OpenClaw 与 Hermes 在 Consumer/Profile 模型明确前保持延后。
