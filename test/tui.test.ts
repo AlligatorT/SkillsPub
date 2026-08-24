@@ -83,6 +83,38 @@ function setup() {
   return { home: { configDir } };
 }
 
+function setupVisibilityTui({grokDetected = true} = {}) {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-tui-visibility-'));
+  const roots = {
+    shared: path.join(configDir, 'shared', 'skills'),
+    pi: path.join(configDir, 'pi', 'agent', 'skills'),
+    claude: path.join(configDir, 'claude', 'skills'),
+    grok: path.join(configDir, 'grok', 'skills'),
+  };
+  fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: Object.entries(roots).map(([key, discoveryRoot]) => ({
+      key,
+      discoveryRoot,
+      parkingRoot: path.join(path.dirname(discoveryRoot), '.skillspub-off', 'skills'),
+    })),
+    genericTargets: [],
+  }));
+  mkSkill(roots.shared, 'demo');
+  const resource = fs.realpathSync(path.join(roots.shared, 'demo'));
+  fs.mkdirSync(roots.pi, {recursive: true});
+  fs.symlinkSync(resource, path.join(roots.pi, 'demo'));
+  fs.writeFileSync(path.join(path.dirname(roots.pi), 'settings.json'), JSON.stringify({
+    skills: [`!${roots.shared}/**`],
+  }));
+  fs.mkdirSync(path.dirname(roots.claude), {recursive: true});
+  if (grokDetected) {
+    fs.mkdirSync(path.dirname(roots.grok), {recursive: true});
+    fs.writeFileSync(path.join(path.dirname(roots.grok), 'config.toml'), '[');
+  }
+  return {home: {configDir}, roots, resource};
+}
+
 async function renderApp(
   home: { configDir: string },
   columns = 100,
@@ -1027,5 +1059,145 @@ test('footer reflects available navigation actions and modal state', async () =>
   await t.send('\r');
   assert.match(t.stdout.frame(), /esc close/);
   assert.doesNotMatch(t.stdout.frame(), /R refresh/);
+  t.unmount();
+});
+
+test('Skill detail shows every built-in Effective Visibility result and not-detected explicitly', async () => {
+  const detected = setupVisibilityTui();
+  const t = await renderApp(detected.home, 140, 34);
+  await t.send('\t');
+  let frame = t.stdout.frame();
+  assert.match(frame, /Effective Visibility/);
+  assert.match(frame, /Claude Code: not-visible/);
+  assert.match(frame, /Grok Build: unknown/);
+  assert.match(frame, /Pi: visible/);
+  assert.match(frame, /e explain/);
+  t.unmount();
+
+  const unavailable = setupVisibilityTui({grokDetected: false});
+  const u = await renderApp(unavailable.home, 140, 34);
+  await u.send('\t');
+  frame = u.stdout.frame();
+  assert.match(frame, /Grok Build: unknown · not-detected/);
+  u.unmount();
+});
+
+test('Explain modal projects evidence and read-only visible/hidden plans for each Harness', async () => {
+  const {home, roots} = setupVisibilityTui();
+  const before = fs.readdirSync(home.configDir, {recursive: true}).sort();
+  const t = await renderApp(home, 120, 38);
+  await t.send('\t');
+  await t.send('e');
+
+  let frame = t.stdout.frame();
+  assert.match(frame, /Explain — demo — Claude Code \[1\/3\]/);
+  assert.match(frame, /Result: not-visible/);
+  assert.match(frame, /Shared: not-consumed/);
+  assert.match(frame, /Isolation: not-required/);
+  assert.match(frame, /Evidence:/);
+  assert.match(frame, /consumed global\/harness/);
+  assert.match(frame, /excluded global\/shared/);
+
+  await t.send('v');
+  frame = t.stdout.frame();
+  assert.match(frame, /Wanted: visible/);
+  assert.match(frame, /Executable: yes/);
+  assert.match(frame, /create-link global:claude\/demo/);
+  assert.equal(fs.existsSync(path.join(roots.claude, 'demo')), false);
+
+  await t.send('h');
+  frame = t.stdout.frame();
+  assert.match(frame, /Wanted: hidden/);
+  assert.match(frame, /Executable: yes/);
+
+  await t.send('\t');
+  frame = t.stdout.frame();
+  assert.match(frame, /Explain — demo — Grok Build \[2\/3\]/);
+  assert.match(frame, /Result: unknown/);
+  for (let i = 0; i < 10; i++) await t.send('j');
+  frame = t.stdout.frame();
+  assert.match(frame, /warning: Local Grok Build/);
+  assert.match(frame, /version was not confirmed/);
+  await t.send('v');
+  for (let i = 0; i < 20; i++) await t.send('j');
+  assert.match(t.stdout.frame(), /blocker: Effective visibility is unknown/);
+
+  await t.send('\t');
+  frame = t.stdout.frame();
+  assert.match(frame, /Explain — demo — Pi \[3\/3\]/);
+  assert.match(frame, /Result: visible/);
+  assert.match(frame, /Shared: excluded/);
+  assert.match(frame, /on link selected/);
+  assert.deepEqual(fs.readdirSync(home.configDir, {recursive: true}).sort(), before);
+  t.unmount();
+});
+
+test('Explain modal shows Variant conflicts and a consumed Shared bypass', async () => {
+  const conflicted = setupVisibilityTui();
+  mkSkill(conflicted.roots.claude, 'demo', '# competing demo');
+  const c = await renderApp(conflicted.home, 120, 34);
+  await c.send('j'); // Shared Target
+  await c.send('l'); // selected Shared resource
+  assert.match(c.stdout.frame(), /Claude Code: conflicted/);
+  await c.send('e');
+  assert.match(c.stdout.frame(), /Result: conflicted/);
+  assert.match(c.stdout.frame(), /conflict:/);
+  assert.match(c.stdout.frame(), /competes in consumed root/);
+  await c.send('v');
+  assert.match(c.stdout.frame(), /blocker: Resolve same-name Variants/);
+  c.unmount();
+
+  const bypass = setupVisibilityTui();
+  fs.rmSync(path.join(path.dirname(bypass.roots.pi), 'settings.json'));
+  fs.rmSync(path.join(bypass.roots.pi, 'demo'));
+  const parked = path.join(path.dirname(bypass.roots.pi), '.skillspub-off', 'skills');
+  fs.mkdirSync(parked, {recursive: true});
+  fs.symlinkSync(bypass.resource, path.join(parked, 'demo'));
+  const b = await renderApp(bypass.home, 120, 34);
+  await b.send('\t');
+  await b.send('e');
+  await b.send('\t');
+  await b.send('\t');
+  let frame = b.stdout.frame();
+  assert.match(frame, /Result: visible/);
+  assert.match(frame, /consumed global\/shared/);
+  assert.match(frame, /off link selected/);
+  for (let i = 0; i < 12; i++) await b.send('j');
+  frame = b.stdout.frame();
+  assert.match(frame, /on local selected/);
+  await b.send('h');
+  assert.match(b.stdout.frame(), /blocker: Hiding/);
+  assert.match(b.stdout.frame(), /would affect other consumers/);
+  b.unmount();
+});
+
+test('Project Explain stays reachable when narrow and Esc preserves exact selection', async () => {
+  const {home, resource} = setupVisibilityTui();
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-tui-explain-project-'));
+  const projectClaude = path.join(project, '.claude', 'skills');
+  fs.mkdirSync(projectClaude, {recursive: true});
+  fs.symlinkSync(resource, path.join(projectClaude, 'demo'));
+  const before = fs.readdirSync(project, {recursive: true}).sort();
+  const t = await renderApp(home, 62, 28, project);
+  await t.send('\t');
+  assert.match(t.stdout.frame(), /› demo/);
+  assert.match(t.stdout.frame(), /e explain/);
+  await t.send('e');
+  let frame = t.stdout.frame();
+  assert.match(frame, /Result: visible/);
+  assert.match(frame, /j\/k scroll/);
+  for (let i = 0; i < 12; i++) await t.send('j');
+  frame = t.stdout.frame();
+  assert.match(frame, /consumed project\/harness/);
+  for (let i = 0; i < 6; i++) await t.send('j');
+  assert.match(t.stdout.frame(), /on link selected/);
+  await t.send('\x1b');
+  frame = t.stdout.frame();
+  assert.match(frame, /Skills/);
+  assert.match(frame, /› demo/);
+  await t.send('s');
+  await t.send('R');
+  assert.match(t.stdout.frame(), /› demo/);
+  assert.deepEqual(fs.readdirSync(project, {recursive: true}).sort(), before);
   t.unmount();
 });
