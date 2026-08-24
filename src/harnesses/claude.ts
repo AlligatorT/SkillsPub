@@ -33,6 +33,7 @@ export const claudeAdapter: HarnessAdapter = {
   },
   inspect(_home, targets, projectPath) {
     const claudeTarget = resolveHarnessTarget(targets, 'claude', () => claudeAdapter.targetDefinition());
+    const sharedTarget = targets.find(({ key }) => key === 'shared');
     const projectRoot = projectPath ? path.resolve(projectPath) : undefined;
     const detected = fs.existsSync(claudeTarget.discoveryRoot) ||
       fs.existsSync(path.dirname(claudeTarget.discoveryRoot)) ||
@@ -49,6 +50,39 @@ export const claudeAdapter: HarnessAdapter = {
           scope: 'project' as const,
           discoveryRoot: path.join(projectRoot, claudeTarget.projectPath),
         }] : []),
+      ],
+      roots: [
+        {
+          kind: 'harness',
+          targetKey: 'claude',
+          scope: 'global',
+          discoveryRoot: claudeTarget.discoveryRoot,
+          consumption: 'consumed',
+          reason: 'Claude Code discovers its Global Skill Target.',
+        },
+        ...(projectRoot ? [{
+          kind: 'harness' as const,
+          targetKey: 'claude',
+          scope: 'project' as const,
+          discoveryRoot: path.join(projectRoot, claudeTarget.projectPath),
+          consumption: 'consumed' as const,
+          reason: 'Claude Code discovers the exact Project Skill Target.',
+        }] : []),
+        ...(sharedTarget ? [{
+          kind: 'shared' as const,
+          targetKey: 'shared',
+          scope: 'global' as const,
+          discoveryRoot: sharedTarget.discoveryRoot,
+          consumption: 'excluded' as const,
+          reason: 'Claude Code does not consume the Shared Agent Skills root.',
+        }, ...(projectRoot ? [{
+          kind: 'shared' as const,
+          targetKey: 'shared',
+          scope: 'project' as const,
+          discoveryRoot: path.join(projectRoot, sharedTarget.projectPath),
+          consumption: 'excluded' as const,
+          reason: 'Claude Code does not consume the Project Shared Agent Skills root.',
+        }] : [])] : []),
       ],
       sharedConsumption: {
         status: 'not-consumed',

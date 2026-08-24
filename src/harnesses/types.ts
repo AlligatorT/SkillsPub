@@ -16,6 +16,15 @@ interface ResolvedHarnessTarget {
   discoveryRoot: string;
 }
 
+export interface HarnessDiscoveryRoot {
+  kind: 'harness' | 'shared' | 'compatibility';
+  targetKey: string;
+  scope: TargetScope;
+  discoveryRoot: string;
+  consumption: 'consumed' | 'excluded' | 'unknown';
+  reason: string;
+}
+
 export interface HarnessInspection {
   key: string;
   name: string;
@@ -23,6 +32,7 @@ export interface HarnessInspection {
   support: SupportLevel;
   evidence: readonly HarnessEvidence[];
   targets: ResolvedHarnessTarget[];
+  roots: HarnessDiscoveryRoot[];
   sharedConsumption: { status: SharedConsumption; detail: string };
   isolation: { status: 'not-required' | 'unmanaged' | 'managed' | 'drift' | 'unknown'; detail: string };
   link: { supported: boolean };
