@@ -41,6 +41,11 @@ import {
   removePresetSelectors,
   removeResourceTags,
 } from './catalog.ts';
+import {
+  explainVisibility,
+  type VisibilityExplanation,
+  type WantedVisibility,
+} from './explain.ts';
 
 /** Below this width the passive summary column is hidden. */
 const WIDE_MIN = 80;
@@ -76,6 +81,13 @@ interface Confirmation {
   slot: string;
   source: string;
   destination: string;
+}
+
+interface ExplainModalState {
+  row: Row;
+  harness: string;
+  want?: WantedVisibility;
+  scroll: number;
 }
 
 /** Existing relationships of one target, in inventory order (absent skills excluded). */
@@ -382,11 +394,13 @@ function InfoPanel({
   row,
   info,
   membership,
+  visibility,
   width,
 }: {
   row?: Row;
   info?: SkillInfo;
   membership?: Membership;
+  visibility?: VisibilityExplanation;
   width: number;
 }): ReactNode {
   const inner = Math.max(8, width - 2); // column borders
@@ -442,6 +456,14 @@ function InfoPanel({
           ...labeled('Bundles', membership?.bundles.join(', '), 'cyan'),
           ...labeled('Tags', membership?.tags.join(', '), 'green'),
           ...labeled('Presets', membership?.presets.join(', '), 'magenta'),
+          h(Text, {key: 'gap-visibility'}, ''),
+          h(Text, {key: 'visibility', bold: true, color: 'cyan'}, ' Effective Visibility'),
+          ...(visibility?.harnesses.map((harness) =>
+            h(
+              Text,
+              {key: `visibility-${harness.key}`, wrap: 'wrap'},
+              ` ${harness.name}: ${harness.effectiveVisibility}${harness.detected ? '' : ' · not-detected'}`,
+            )) ?? []),
         ],
   );
 }
@@ -574,6 +596,101 @@ function DetailModal({
   );
 }
 
+function resolveVisibility(
+  home: Home,
+  row: Row | undefined,
+  projectPath?: string,
+  harness?: string,
+  want?: WantedVisibility,
+): VisibilityExplanation | undefined {
+  if (!row?.realPath) return undefined;
+  try {
+    return explainVisibility(home, `skill:${row.id}`, {projectPath, harness, want});
+  } catch {
+    return undefined;
+  }
+}
+
+function explanationLines(explanation: VisibilityExplanation | undefined): string[] {
+  const harness = explanation?.harnesses[0];
+  if (!harness) return ['Explain unavailable; refresh Inventory and try again.'];
+  const lines = [
+    `Result: ${harness.effectiveVisibility}${harness.detected ? '' : ' · not-detected'}`,
+    `Detected: ${harness.detected ? 'yes' : 'no'}`,
+    `Support: ${harness.support}`,
+    `Shared: ${harness.sharedConsumption.status} — ${harness.sharedConsumption.detail}`,
+    `Isolation: ${harness.isolation.status} — ${harness.isolation.detail}`,
+    '',
+    'Evidence:',
+    ...harness.evidence.map((evidence) =>
+      `  ${evidence.verifiedVersion} — ${evidence.detail} — ${evidence.url}`),
+    ...harness.reasons.map((reason) => `reason: ${reason.message}`),
+    ...harness.warnings.map((warning) => `warning: ${warning.message}`),
+    ...harness.conflicts.map((conflict) => `conflict: ${conflict.message}`),
+  ];
+  if (harness.plan) {
+    lines.push(
+      '',
+      `Wanted: ${explanation.wanted}`,
+      `Executable: ${harness.plan.executable ? 'yes' : 'no'}`,
+      ...harness.plan.steps.flatMap((step) => [
+        `step: ${step.operation} ${step.targetId}/${step.slot} (${step.from} -> ${step.to}${step.form ? `, ${step.form}` : ''})`,
+        ...step.preconditions.map((condition) => `  precondition: ${condition.message}`),
+      ]),
+      ...harness.plan.blockers.map((blocker) => `blocker: ${blocker.message}`),
+    );
+  }
+  lines.push('', 'Roots:');
+  for (const root of harness.roots) {
+    lines.push(
+      `${root.consumption} ${root.scope}/${root.kind}: ${root.path}`,
+      `  reason: ${root.reason}`,
+      ...root.relationships.map((relationship) =>
+        `  ${relationship.activation} ${relationship.form}${relationship.selected ? ' selected' : ''}: ${relationship.path}`),
+    );
+  }
+  return lines;
+}
+
+function ExplainModal({
+  row,
+  harnessName,
+  harnessIndex,
+  harnessCount,
+  lines,
+  scroll,
+  height,
+}: {
+  row: Row;
+  harnessName: string;
+  harnessIndex: number;
+  harnessCount: number;
+  lines: string[];
+  scroll: number;
+  height: number;
+}): ReactNode {
+  const viewHeight = Math.max(1, height - 8);
+  return h(
+    Box,
+    {
+      flexGrow: 1,
+      flexDirection: 'column',
+      borderStyle: 'round',
+      borderColor: 'cyan',
+      paddingX: 1,
+      overflow: 'hidden',
+    },
+    h(
+      Text,
+      {bold: true, wrap: 'truncate-end'},
+      `Explain — ${row.name} — ${harnessName} [${harnessIndex + 1}/${harnessCount}]`,
+    ),
+    ...lines.slice(scroll, scroll + viewHeight).map((line, index) =>
+      h(Text, {key: scroll + index, wrap: 'truncate-end'}, line || ' '),
+    ),
+  );
+}
+
 export function App({home, projectPath}: {home: Home; projectPath?: string}): ReactNode {
   const {exit} = useApp();
   const {stdout} = useStdout();
@@ -611,6 +728,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   const [searching, setSearching] = useState(false);
   const [sort, setSort] = useState<SortOrder>('name');
   const [modal, setModal] = useState<{row: Row; scroll: number} | null>(null);
+  const [explainModal, setExplainModal] = useState<ExplainModalState | null>(null);
   const [targetInfoOpen, setTargetInfoOpen] = useState(false);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [manage, setManage] = useState<ManageState | null>(null);
@@ -687,6 +805,30 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     : selectedRow?.relationships.find((relationship) =>
         relationship.target === selectedTarget?.name &&
         relationship.info.path === selectedInfo?.path);
+  const visibility = useMemo(
+    () => resolveVisibility(home, selectedRow, projectPath),
+    [home, projectPath, selectedRow, snapshot],
+  );
+  const explained = useMemo(
+    () => resolveVisibility(
+      home,
+      explainModal?.row,
+      projectPath,
+      explainModal?.harness,
+      explainModal?.want,
+    ),
+    [home, projectPath, explainModal?.row, explainModal?.harness, explainModal?.want],
+  );
+  const explainedHarness = explained?.harnesses[0];
+  const explainHarnesses = visibility?.harnesses ?? [];
+  const explainHarnessIndex = Math.max(
+    0,
+    explainHarnesses.findIndex(({key}) => key === explainModal?.harness),
+  );
+  const explainDetailLines = detailLines(
+    explanationLines(explained).join('\n'),
+    Math.max(1, width - 8),
+  );
   const actionable = focusColumn === 1 && selectedRow && selectedTarget;
   const manageRow = manage ? rows.find((candidate) => candidate.id === manage.rowId) : undefined;
   const membership = useMemo((): Membership | undefined => {
@@ -734,6 +876,28 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   useInput((input, key) => {
     if (targetInfoOpen) {
       if (key.escape) setTargetInfoOpen(false);
+      return;
+    }
+    if (explainModal) {
+      if (key.escape) return setExplainModal(null);
+      if (key.tab && explainHarnesses.length > 0) {
+        const next = explainHarnesses[(explainHarnessIndex + 1) % explainHarnesses.length];
+        if (next) return setExplainModal({...explainModal, harness: next.key, scroll: 0});
+      }
+      if (input === 'v') return setExplainModal({...explainModal, want: 'visible', scroll: 0});
+      if (input === 'h') return setExplainModal({...explainModal, want: 'hidden', scroll: 0});
+      if (input === 'd') {
+        const {want: _, ...diagnosis} = explainModal;
+        return setExplainModal({...diagnosis, scroll: 0});
+      }
+      if (key.downArrow || input === 'j')
+        return setExplainModal({...explainModal, scroll: Math.min(Math.max(0, explainDetailLines.length - 1), explainModal.scroll + 1)});
+      if (key.upArrow || input === 'k')
+        return setExplainModal({...explainModal, scroll: Math.max(0, explainModal.scroll - 1)});
+      if (key.pageDown || (key.ctrl && input === 'd'))
+        return setExplainModal({...explainModal, scroll: Math.min(Math.max(0, explainDetailLines.length - 1), explainModal.scroll + modalPage)});
+      if (key.pageUp || (key.ctrl && input === 'u'))
+        return setExplainModal({...explainModal, scroll: Math.max(0, explainModal.scroll - modalPage)});
       return;
     }
     if (modal) {
@@ -991,6 +1155,12 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     if (input === 'v') return setBatch({marks: new Set()});
     if (input === 'm' && selectedRow?.realPath)
       return setManage({rowId: selectedRow.id, section: 'tags', index: 0});
+    if (input === 'e') {
+      const harness = visibility?.harnesses[0];
+      if (!selectedRow?.realPath || !harness)
+        return setFeedback('Explain unavailable: select an installed Skill resource');
+      return setExplainModal({row: selectedRow, harness: harness.key, scroll: 0});
+    }
     if (input === 'q' || (key.ctrl && input === 'c')) return exit();
     if (input === '/') return setSearching(true);
     if (input === 's')
@@ -1174,6 +1344,20 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
             width: Math.max(12, width - 4),
           }),
         )
+      : explainModal
+        ? h(
+            Box,
+            {height: bodyHeight, paddingLeft: 2, paddingRight: 2, paddingTop: 1},
+            h(ExplainModal, {
+              row: explainModal.row,
+              harnessName: explainedHarness?.name ?? explainModal.harness,
+              harnessIndex: explainHarnessIndex,
+              harnessCount: Math.max(1, explainHarnesses.length),
+              lines: explainDetailLines,
+              scroll: explainModal.scroll,
+              height,
+            }),
+          )
       : modal
         ? h(
             Box,
@@ -1234,6 +1418,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
                     row: entry?.row,
                     info: entry?.relationship.info,
                     membership,
+                    visibility,
                     width: infoWidth,
                   })
               : null,
@@ -1254,6 +1439,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
                   row: instance,
                   info: instance?.targets[targets[instTarget]?.name ?? ''],
                   membership,
+                  visibility,
                   width: infoWidth,
                 })
               : null,
@@ -1271,6 +1457,8 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       {inverse: true, wrap: 'truncate-end'},
       targetInfoOpen
         ? ' esc close '
+        : explainModal
+          ? ' tab Harness  v visible  h hidden  d diagnosis  ↑↓/j/k scroll  PgUp/PgDn page  esc close '
         : modal
           ? ' ↑↓/jk scroll  PgUp/PgDn page  esc close '
         : manage
@@ -1285,7 +1473,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
           ? ' y confirm  n/esc cancel '
         : searching
           ? ` search: ${query || '…'}  enter apply  esc clear `
-          : ` ${feedback}${feedback ? '  ' : ''}${tab}:${columnName}  ←→/hl  ↑↓/jk${actionHint}  enter ${tab === 'target' && focusColumn === 0 ? 'details' : 'SKILL.md'}  m manage  / search  s sort:${sortLabel(sort)}  R refresh  tab  q `,
+          : ` ${feedback}${feedback ? '  ' : ''}${tab}:${columnName}  ←→/hl  ↑↓/jk${actionHint}  enter ${tab === 'target' && focusColumn === 0 ? 'details' : 'SKILL.md'}${selectedRow?.realPath ? '  e explain' : ''}  m manage  / search  s sort:${sortLabel(sort)}  R refresh  tab  q `,
     ),
   );
 }
