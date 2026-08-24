@@ -46,6 +46,12 @@ import {
   type VisibilityExplanation,
   type WantedVisibility,
 } from './explain.ts';
+import {
+  sharedOutdated,
+  sharedRefresh,
+  sharedUpdate,
+  type SharedUpdateAvailabilityEntry,
+} from './shared.ts';
 
 /** Below this width the passive summary column is hidden. */
 const WIDE_MIN = 80;
@@ -90,6 +96,19 @@ interface ExplainModalState {
   scroll: number;
 }
 
+type UpdateOutcome = 'updated' | 'skipped' | 'failed';
+
+interface UpdateItem extends SharedUpdateAvailabilityEntry {
+  outcome?: UpdateOutcome;
+  mark?: string;
+}
+
+interface UpdateModalState {
+  kind: 'refresh' | 'confirm' | 'result';
+  items: UpdateItem[];
+  scroll: number;
+}
+
 /** Existing relationships of one target, in inventory order (absent skills excluded). */
 function entriesFor(rows: Row[], targetName: string): RelEntry[] {
   return rows.flatMap((row) =>
@@ -119,6 +138,23 @@ function markKey(configDir: string, realPath: string): string {
 function statusColor(info: SkillInfo): string {
   if (info.presence === 'deadlink') return 'red';
   return info.presence === 'on' ? 'green' : 'yellow';
+}
+
+function updateText(row: Row): string | undefined {
+  const update = row.updateAvailability;
+  if (!update) return undefined;
+  return `${update.status}${update.checkedAt ? ` @ ${update.checkedAt}` : ''}`;
+}
+
+function updateColor(row: Row): string | undefined {
+  const status = row.updateAvailability?.status;
+  return status === 'available'
+    ? 'yellow'
+    : status === 'current'
+      ? 'green'
+      : status === 'check-failed' || status === 'upstream-missing'
+        ? 'red'
+        : undefined;
 }
 
 function statusSortValue(info?: SkillInfo): string {
@@ -271,6 +307,9 @@ function RelationshipList({
         showScope && entry.relationship.scope && entry.relationship.scope !== 'project'
           ? h(Text, {dimColor: true}, ` ·${entry.relationship.scope}`)
           : null,
+        updateText(entry.row)
+          ? h(Text, {color: updateColor(entry.row)}, ` · ${updateText(entry.row)}`)
+          : null,
       );
     }),
     entries.length === 0
@@ -310,6 +349,9 @@ function InstanceList({
           wrap: 'wrap',
         },
         row.displayName,
+        updateText(row)
+          ? h(Text, {color: updateColor(row)}, ` · ${updateText(row)}`)
+          : null,
       ),
     ),
     rows.length === 0
@@ -456,6 +498,12 @@ function InfoPanel({
           ...labeled('Bundles', membership?.bundles.join(', '), 'cyan'),
           ...labeled('Tags', membership?.tags.join(', '), 'green'),
           ...labeled('Presets', membership?.presets.join(', '), 'magenta'),
+          h(Text, {key: 'gap-update'}, ''),
+          ...labeled('Update availability', row.updateAvailability?.status, updateColor(row)),
+          ...labeled('Checked at', row.updateAvailability?.checkedAt),
+          ...(row.updateAvailability?.error
+            ? labeled('Update error', row.updateAvailability.error, 'red')
+            : []),
           h(Text, {key: 'gap-visibility'}, ''),
           h(Text, {key: 'visibility', bold: true, color: 'cyan'}, ' Effective Visibility'),
           ...(visibility?.harnesses.map((harness) =>
@@ -480,6 +528,76 @@ function BatchActivationModal({confirm}: {confirm: BatchConfirm}): ReactNode {
     ...lines.slice(0, 12).map((line, index) => h(Text, {key: `line-${index}`}, line)),
     lines.length > 12 ? h(Text, {dimColor: true}, `  … ${lines.length - 12} more`) : null,
     h(Text, {color: 'yellow'}, ' y confirm  n/esc cancel '),
+  );
+}
+
+function updateModalLines(modal: UpdateModalState): string[] {
+  const checked = modal.items.filter(({status}) => status !== 'unknown').length;
+  const current = modal.items.filter(({status}) => status === 'current').length;
+  const available = modal.items.filter(({status}) => status === 'available').length;
+  const updated = modal.items.filter(({outcome}) => outcome === 'updated').length;
+  const skipped = modal.kind === 'refresh'
+    ? modal.items.filter(({status}) => status === 'upstream-missing').length
+    : modal.items.filter(({outcome}) => outcome === 'skipped').length;
+  const failed = modal.kind === 'refresh'
+    ? modal.items.filter(({status}) => status === 'check-failed').length
+    : modal.items.filter(({outcome}) => outcome === 'failed').length;
+  const lines = [
+    `checked ${checked}  current ${current}  available ${available}  updated ${updated}  skipped ${skipped}  failed ${failed}`,
+    '',
+  ];
+  const groups = new Map<string, UpdateItem[]>();
+  for (const item of modal.items)
+    groups.set(item.source, [...(groups.get(item.source) ?? []), item]);
+  for (const [source, items] of groups) {
+    lines.push(source);
+    for (const item of items) {
+      const result = item.outcome === 'skipped'
+        ? `skipped (${item.status})`
+        : item.outcome ?? item.status;
+      lines.push(
+        `  ${item.name}: ${result}` +
+        (item.checkedAt ? `  checkedAt=${item.checkedAt}` : '') +
+        (item.error ? `  ${item.error}` : ''),
+      );
+    }
+    lines.push('');
+  }
+  return lines;
+}
+
+function UpdateModal({
+  modal,
+  height,
+}: {
+  modal: UpdateModalState;
+  height: number;
+}): ReactNode {
+  const lines = updateModalLines(modal);
+  const available = modal.items.filter(({status, outcome}) =>
+    status === 'available' && outcome !== 'skipped').length;
+  const title = modal.kind === 'refresh'
+    ? 'Refresh results'
+    : modal.kind === 'confirm'
+      ? `Update ${available} Skill${available === 1 ? '' : 's'}?`
+      : 'Update results';
+  const viewHeight = Math.max(1, height - 8);
+  return h(
+    Box,
+    {
+      flexGrow: 1,
+      flexDirection: 'column',
+      borderStyle: 'round',
+      borderColor: modal.kind === 'confirm' ? 'yellow' : 'cyan',
+      paddingX: 1,
+      overflow: 'hidden',
+    },
+    h(Text, {bold: true}, title),
+    ...lines.slice(modal.scroll, modal.scroll + viewHeight).map((line, index) =>
+      h(Text, {key: modal.scroll + index, wrap: 'truncate-end'}, line || ' ')),
+    modal.kind === 'confirm'
+      ? h(Text, {color: 'yellow'}, ' y confirm  n/esc cancel ')
+      : null,
   );
 }
 
@@ -734,6 +852,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   const [manage, setManage] = useState<ManageState | null>(null);
   const [batch, setBatch] = useState<{ marks: Set<string> } | null>(null);
   const [batchConfirm, setBatchConfirm] = useState<BatchConfirm | null>(null);
+  const [updateModal, setUpdateModal] = useState<UpdateModalState | null>(null);
   const [batchTag, setBatchTag] = useState<{ action: 'add' | 'rm'; value: string } | null>(null);
   const [feedback, setFeedback] = useState('');
 
@@ -871,6 +990,53 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         ? row?.relationships.find((candidate) => candidate.target === keep.target)
         : undefined;
     if (rel) setRelationshipKey(rel.info.path);
+    return next;
+  };
+
+  const refreshUpdates = (): void => {
+    try {
+      const result = sharedRefresh(home, projectPath);
+      refresh({
+        rowId: selectedRow?.id,
+        targetId: selectedRel?.targetId,
+        slot: selectedRel?.slot,
+      });
+      setUpdateModal({kind: 'refresh', items: result.entries, scroll: 0});
+    } catch (error) {
+      setFeedback((error as Error).message);
+    }
+  };
+
+  const beginUpdate = (): void => {
+    const marked = Boolean(batch && batch.marks.size > 0);
+    const candidates = marked
+      ? snapshot.rows.filter((row) =>
+          row.realPath && batch?.marks.has(markKey(home.configDir, row.realPath)))
+      : selectedRow ? [selectedRow] : [];
+    const unique = new Map<string, UpdateItem>();
+    for (const row of candidates) {
+      const update = row.updateAvailability ?? {
+        name: row.name,
+        slot: row.id,
+        source: row.sourceLabel,
+        status: 'unknown' as const,
+      };
+      const item: UpdateItem = {
+        ...update,
+        ...(update.status === 'available' ? {} : {outcome: 'skipped' as const}),
+        ...(marked && row.realPath ? {mark: markKey(home.configDir, row.realPath)} : {}),
+      };
+      unique.set(`${update.source}\0${update.slot}`, item);
+    }
+    const items = [...unique.values()];
+    const available = items.filter(({status}) => status === 'available').length;
+    if (available === 0) {
+      setFeedback(marked
+        ? 'Batch update: no marked Skills have an available update'
+        : 'Update unavailable: selected Skill is not available');
+      return;
+    }
+    setUpdateModal({kind: 'confirm', items, scroll: 0});
   };
 
   useInput((input, key) => {
@@ -1017,6 +1183,55 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       if (input && !key.ctrl && !key.meta) return setQuery((value) => value + input);
       return;
     }
+    if (updateModal) {
+      const lines = updateModalLines(updateModal);
+      if (key.downArrow || input === 'j')
+        return setUpdateModal({...updateModal, scroll: Math.min(Math.max(0, lines.length - 1), updateModal.scroll + 1)});
+      if (key.upArrow || input === 'k')
+        return setUpdateModal({...updateModal, scroll: Math.max(0, updateModal.scroll - 1)});
+      if (updateModal.kind === 'confirm' && input === 'y') {
+        let latest: Map<string, SharedUpdateAvailabilityEntry>;
+        try {
+          latest = new Map(sharedOutdated(home, projectPath).entries.map((item) => [item.slot, item]));
+        } catch (error) {
+          setFeedback((error as Error).message);
+          return;
+        }
+        const results: UpdateItem[] = [];
+        for (const item of updateModal.items) {
+          if (item.outcome === 'skipped') {
+            results.push(item);
+            continue;
+          }
+          const current = latest.get(item.slot);
+          if (current?.status !== 'available') {
+            results.push({...item, ...(current ?? {}), outcome: 'skipped'});
+            continue;
+          }
+          try {
+            sharedUpdate(home, [item.name], projectPath);
+            results.push({...item, outcome: 'updated'});
+          } catch (error) {
+            results.push({...item, outcome: 'failed', error: (error as Error).message});
+          }
+        }
+        const completed = new Set(results
+          .filter(({outcome, mark}) => outcome === 'updated' && mark)
+          .map(({mark}) => mark as string));
+        if (completed.size > 0)
+          setBatch((current) => current
+            ? {marks: new Set([...current.marks].filter((mark) => !completed.has(mark)))}
+            : current);
+        refresh({
+          rowId: selectedRow?.id,
+          targetId: selectedRel?.targetId,
+          slot: selectedRel?.slot,
+        });
+        return setUpdateModal({kind: 'result', items: results, scroll: 0});
+      }
+      if (input === 'n' || key.escape) return setUpdateModal(null);
+      return;
+    }
     if (batchConfirm) {
       if (input === 'y') {
         let applied = 0;
@@ -1112,6 +1327,8 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     }
     if (batch) {
       if (input === 'v' || key.escape) return setBatch(null);
+      if (input === 'r') return refreshUpdates();
+      if (input === 'u') return beginUpdate();
       if (key.tab) {
         setBatch({marks: new Set()});
         return setTab((value) => (value === 'target' ? 'skill' : 'target'));
@@ -1149,7 +1366,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       }
       if (input === 't' || input === 'T')
         return setBatchTag({action: input === 't' ? 'add' : 'rm', value: ''});
-      if (input === 'i' || input === 'u' || input === 'r' || input === 'o' || input === 'c' || input === 'm')
+      if (input === 'i' || input === 'o' || input === 'c' || input === 'm')
         return setFeedback('exit batch mode first (v)');
     }
     if (input === 'v') return setBatch({marks: new Set()});
@@ -1165,6 +1382,9 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     if (input === '/') return setSearching(true);
     if (input === 's')
       return setSort((value) => value === 'name' ? 'status' : value === 'status' ? 'source' : 'name');
+    if (input === 'r') return refreshUpdates();
+    if (input === 'u' && selectedRow?.updateAvailability?.status === 'available')
+      return beginUpdate();
     if (input === 'R') {
       const currentTarget = target?.name;
       const currentInstanceTarget = instanceTarget?.name;
@@ -1261,10 +1481,10 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       }
     }
     if (actionable && selectedInfo?.mirrored && selectedRel &&
-      (input === 'r' || input === 'o' || input === 'c' || input === 'u')) {
+      (input === 'S' || input === 'o' || input === 'c' || input === 'u' || input === 'x')) {
       if (selectedRel.readOnly)
         return setFeedback(`read-only: inherited from ${selectedRel.scope}`);
-      const kind = input === 'r'
+      const kind = input === 'S'
         ? 'mirror-sync'
         : input === 'o'
           ? 'mirror-overwrite'
@@ -1282,7 +1502,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         destination: selectedRow.realPath ?? '?',
       });
     }
-    if (input === 'u' && actionable && selectedInfo?.linked && selectedRel) {
+    if ((input === 'u' || input === 'x') && actionable && selectedInfo?.linked && selectedRel) {
       if (selectedRel.readOnly)
         return setFeedback(`read-only: inherited from ${selectedRel.scope}`);
       return setConfirmation({
@@ -1316,10 +1536,17 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     ? inheritedOn(selectedInfo)
       ? ''
       : selectedInfo && !selectedInfo.readOnly
-        ? ` space ${selectedInfo.underOff ? 'on' : 'off'}${selectedInfo.mirrored ? '  r sync  o overwrite  c convert  u remove' : selectedInfo.linked ? '  u unlink' : ''}`
+        ? ` space ${selectedInfo.underOff ? 'on' : 'off'}${selectedInfo.mirrored
+          ? `  S sync  o overwrite  c convert  ${selectedRow.updateAvailability?.status === 'available' ? 'x' : 'u'} remove`
+          : selectedInfo.linked
+            ? `  ${selectedRow.updateAvailability?.status === 'available' ? 'x' : 'u'} unlink`
+            : ''}`
         : selectedRow.realPath
           ? projectPath ? ' space on' : ' i link'
           : ''
+    : '';
+  const updateHint = selectedRow?.updateAvailability?.status === 'available'
+    ? '  u update'
     : '';
 
   return h(
@@ -1374,6 +1601,12 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
               bundles: membership?.bundles ?? [],
               manage,
             }),
+          )
+      : updateModal
+        ? h(
+            Box,
+            {height: bodyHeight, paddingLeft: 2, paddingRight: 2, paddingTop: 1},
+            h(UpdateModal, {modal: updateModal, height}),
           )
       : batchConfirm
         ? h(
@@ -1463,17 +1696,21 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
           ? ' ↑↓/jk scroll  PgUp/PgDn page  esc close '
         : manage
           ? ` ${feedback}${feedback ? '  ' : ''}j/k move  tab section  space toggle  a add  x rm tag  esc close `
+        : updateModal
+          ? updateModal.kind === 'confirm'
+            ? ' y confirm  n/esc cancel '
+            : ' ↑↓/j/k scroll  esc close '
         : batchConfirm
           ? ' y confirm  n/esc cancel '
         : batchTag
           ? ` tag ${batchTag.action === 'add' ? 'add' : 'rm'}: ${batchTag.value}`
         : batch
-          ? ` ${feedback}${feedback ? '  ' : ''}v/esc exit  space mark  o on  O off  t tag  T untag  ${batch.marks.size} marked `
+          ? ` ${feedback}${feedback ? '  ' : ''}${batch.marks.size} marked  v/esc exit  space mark  u update  r updates  o on  O off  t tag  T untag `
         : confirmation
           ? ' y confirm  n/esc cancel '
         : searching
           ? ` search: ${query || '…'}  enter apply  esc clear `
-          : ` ${feedback}${feedback ? '  ' : ''}${tab}:${columnName}  ←→/hl  ↑↓/jk${actionHint}  enter ${tab === 'target' && focusColumn === 0 ? 'details' : 'SKILL.md'}${selectedRow?.realPath ? '  e explain' : ''}  m manage  / search  s sort:${sortLabel(sort)}  R refresh  tab  q `,
+          : ` ${feedback}${feedback ? '  ' : ''}${tab}:${columnName}  ←→/hl  ↑↓/jk${actionHint}${updateHint}  enter ${tab === 'target' && focusColumn === 0 ? 'details' : 'SKILL.md'}${selectedRow?.realPath ? '  e explain' : ''}  m manage  / search  s sort:${sortLabel(sort)}  r updates  R refresh  tab  q `,
     ),
   );
 }
