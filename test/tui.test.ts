@@ -7,6 +7,7 @@ import { PassThrough } from 'node:stream';
 import { createElement as h } from 'react';
 import { render } from 'ink';
 import { App } from '../src/tui.ts';
+import { sharedRefresh } from '../src/shared.ts';
 
 const stripAnsi = (s: string): string =>
   s.replace(/\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][0-9A-B]/g, '');
@@ -139,6 +140,132 @@ async function renderApp(
     await flush();
   };
   return { stdin, stdout, send, flush, unmount: () => app.unmount() };
+}
+
+interface ManagedTuiSkill {
+  name: string;
+  source: string;
+  hash: string;
+  off?: boolean;
+}
+
+function setupManagedTui(skills: ManagedTuiSkill[], projectScope = false) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-tui-updates-'));
+  const userHome = path.join(root, 'home');
+  const configDir = path.join(root, 'config');
+  const project = path.join(root, 'project');
+  const bin = path.join(root, 'bin');
+  const npxLog = path.join(root, 'npx.jsonl');
+  const gitLog = path.join(root, 'git.jsonl');
+  fs.mkdirSync(userHome, {recursive: true});
+  fs.mkdirSync(configDir, {recursive: true});
+  fs.mkdirSync(project, {recursive: true});
+  fs.mkdirSync(bin, {recursive: true});
+  fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [
+      {key: 'claude', disabled: true},
+      {key: 'grok', disabled: true},
+      {key: 'pi', disabled: true},
+      {
+        key: 'shared',
+        discoveryRoot: path.join(userHome, '.agents', 'skills'),
+        parkingRoot: path.join(userHome, '.agents', '.skillspub-off', 'skills'),
+        lockFile: path.join(userHome, '.agents', '.skill-lock.json'),
+      },
+    ],
+    genericTargets: [],
+  }));
+  const scopeRoot = projectScope ? project : userHome;
+  const discovery = path.join(scopeRoot, '.agents', 'skills');
+  const parking = projectScope
+    ? path.join(project, '.skillspub', 'off', 'shared')
+    : path.join(userHome, '.agents', '.skillspub-off', 'skills');
+  const lockFile = projectScope
+    ? path.join(project, 'skills-lock.json')
+    : path.join(userHome, '.agents', '.skill-lock.json');
+  for (const skill of skills)
+    mkSkill(skill.off ? parking : discovery, skill.name, `# ${skill.name}`);
+  fs.mkdirSync(path.dirname(lockFile), {recursive: true});
+  fs.writeFileSync(lockFile, JSON.stringify({
+    version: 3,
+    skills: Object.fromEntries(skills.map((skill) => [skill.name, {
+      source: skill.source,
+      sourceType: 'github',
+      sourceUrl: `https://github.com/${skill.source}.git`,
+      skillPath: `skills/${skill.name}/SKILL.md`,
+      skillFolderHash: skill.hash,
+    }])),
+  }));
+  fs.writeFileSync(path.join(bin, 'git'), `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.TUI_GIT_LOG, JSON.stringify(args) + '\\n');
+const trees = JSON.parse(process.env.TUI_GIT_TREES || '{}');
+if (args[0] === 'clone') {
+  const source = args.at(-2);
+  const destination = args.at(-1);
+  if (!trees[source]) process.exit(1);
+  fs.mkdirSync(destination, {recursive: true});
+  fs.writeFileSync(destination + '.source', source);
+  for (const folder of Object.keys(trees[source]))
+    if (folder !== '.') fs.mkdirSync(path.join(destination, folder), {recursive: true});
+  process.exit(0);
+}
+if (args[0] === '-C' && args[2] === 'rev-parse') {
+  const source = fs.readFileSync(args[1] + '.source', 'utf8');
+  const revision = args.at(-1);
+  const folder = revision === 'HEAD^{tree}' ? '.' : revision.slice('HEAD:'.length);
+  if (!trees[source]?.[folder]) process.exit(1);
+  process.stdout.write(trees[source][folder] + '\\n');
+  process.exit(0);
+}
+process.exit(2);
+`, {mode: 0o755});
+  fs.writeFileSync(path.join(bin, 'npx'), `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.TUI_NPX_LOG, JSON.stringify({args, cwd: process.cwd()}) + '\\n');
+if (args[2] !== 'update') process.exit(2);
+const names = args.slice(3).filter((arg) => !arg.startsWith('-'));
+const failed = new Set(JSON.parse(process.env.TUI_NPX_FAIL_NAMES || '[]'));
+if (names.some((name) => failed.has(name))) process.exit(7);
+const base = args.includes('--global') ? process.env.HOME : process.cwd();
+for (const name of names)
+  fs.appendFileSync(path.join(base, '.agents', 'skills', name, 'SKILL.md'), '\\n# updated');
+`, {mode: 0o755});
+  return {
+    home: {configDir},
+    project,
+    discovery,
+    parking,
+    npxLog,
+    gitLog,
+    env: {
+      HOME: userHome,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}`,
+      TUI_GIT_LOG: gitLog,
+      TUI_NPX_LOG: npxLog,
+    },
+  };
+}
+
+function useFixtureEnv(
+  context: {after(callback: () => void): void},
+  env: Record<string, string>,
+): void {
+  const previous = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, env);
+  context.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    delete process.env.TUI_GIT_TREES;
+    delete process.env.TUI_NPX_FAIL_NAMES;
+  });
 }
 
 test('TUI startup reads legacy configuration without creating a Target registry or state', async () => {
@@ -1199,5 +1326,211 @@ test('Project Explain stays reachable when narrow and Esc preserves exact select
   await t.send('R');
   assert.match(t.stdout.frame(), /› demo/);
   assert.deepEqual(fs.readdirSync(project, {recursive: true}).sort(), before);
+  t.unmount();
+});
+
+test('TUI startup reads availability cache only and shows stale cache as unknown', async (context) => {
+  const fixture = setupManagedTui([
+    {name: 'cached', source: 'owner/repo', hash: 'cached-hash'},
+  ]);
+  useFixtureEnv(context, fixture.env);
+  process.env.TUI_GIT_TREES = JSON.stringify({
+    'https://github.com/owner/repo.git': {'skills/cached': 'cached-hash'},
+  });
+  sharedRefresh(fixture.home);
+  const callsBeforeRender = fs.readFileSync(fixture.gitLog, 'utf8');
+
+  const t = await renderApp(fixture.home, 130, 30);
+  await t.send('\t');
+  let frame = t.stdout.frame();
+  assert.match(frame, /Update availability: current/);
+  assert.match(frame, /cached · current @ \d{4}-\d{2}-\d{2}T/);
+  assert.equal(fs.readFileSync(fixture.gitLog, 'utf8'), callsBeforeRender);
+  await t.send('R');
+  assert.equal(fs.readFileSync(fixture.gitLog, 'utf8'), callsBeforeRender);
+  t.unmount();
+
+  fs.appendFileSync(path.join(fixture.discovery, 'cached', 'SKILL.md'), '\n# local change');
+  const stale = await renderApp(fixture.home, 130, 30);
+  await stale.send('\t');
+  frame = stale.stdout.frame();
+  assert.match(frame, /Update availability: unknown/);
+  assert.doesNotMatch(frame, /cached · unknown @/);
+  assert.equal(fs.readFileSync(fixture.gitLog, 'utf8'), callsBeforeRender);
+  stale.unmount();
+});
+
+test('r refreshes Global availability by source and preserves selection through failures', async (context) => {
+  const fixture = setupManagedTui([
+    {name: 'available', source: 'owner/one', hash: 'available-old'},
+    {name: 'current', source: 'owner/one', hash: 'current-hash'},
+    {name: 'missing', source: 'owner/one', hash: 'missing-old'},
+    {name: 'offline', source: 'owner/offline', hash: 'offline-old'},
+  ]);
+  useFixtureEnv(context, fixture.env);
+  process.env.TUI_GIT_TREES = JSON.stringify({
+    'https://github.com/owner/one.git': {
+      'skills/available': 'available-new',
+      'skills/current': 'current-hash',
+    },
+  });
+  const t = await renderApp(fixture.home, 120, 34);
+  await t.send('\t');
+  await t.send('j'); // current
+  assert.match(t.stdout.frame(), /› current/);
+  assert.match(t.stdout.frame(), /Update availability: unknown/);
+
+  await t.send('r');
+  let frame = t.stdout.frame();
+  assert.match(frame, /Refresh results/);
+  assert.match(frame, /checked 4.*current 1.*available 1.*updated 0.*skipped 1.*failed 1/);
+  assert.match(frame, /owner\/one[\s\S]*available: available/);
+  assert.match(frame, /current: current/);
+  assert.match(frame, /missing: upstream-missing/);
+  assert.match(frame, /owner\/offline[\s\S]*offline: check-failed/);
+  assert.match(frame, /checkedAt=/);
+  assert.equal((fs.readFileSync(fixture.gitLog, 'utf8').match(/"clone"/g) ?? []).length, 2);
+  await t.send('\x1b');
+  frame = t.stdout.frame();
+  assert.match(frame, /› current/);
+  t.unmount();
+});
+
+test('u confirms and updates one available OFF Global Skill without changing Desired state', async (context) => {
+  const fixture = setupManagedTui([
+    {name: 'off-skill', source: 'owner/repo', hash: 'old-hash', off: true},
+  ]);
+  useFixtureEnv(context, fixture.env);
+  process.env.TUI_GIT_TREES = JSON.stringify({
+    'https://github.com/owner/repo.git': {'skills/off-skill': 'new-hash'},
+  });
+  sharedRefresh(fixture.home);
+  const t = await renderApp(fixture.home, 120, 30);
+  await t.send('\t');
+
+  await t.send('u');
+  assert.match(t.stdout.frame(), /Update 1 Skill\?/);
+  assert.match(t.stdout.frame(), /owner\/repo[\s\S]*off-skill: available/);
+  assert.equal(fs.existsSync(fixture.npxLog), false);
+  await t.send('n');
+  assert.equal(fs.existsSync(fixture.npxLog), false);
+
+  await t.send('u');
+  await t.send('y');
+  const frame = t.stdout.frame();
+  assert.match(frame, /Update results/);
+  assert.match(frame, /updated 1/);
+  assert.match(frame, /off-skill: updated/);
+  assert.ok(fs.existsSync(path.join(fixture.parking, 'off-skill', 'SKILL.md')));
+  assert.equal(fs.existsSync(path.join(fixture.discovery, 'off-skill')), false);
+  const call = JSON.parse(fs.readFileSync(fixture.npxLog, 'utf8').trim());
+  assert.deepEqual(call.args, ['--yes', 'skills@1.5.21', 'update', 'off-skill', '--global']);
+  t.unmount();
+});
+
+test('available linked Skills keep update and unlink as distinct actions', async (context) => {
+  const fixture = setupManagedTui([
+    {name: 'linked-update', source: 'owner/repo', hash: 'old-hash'},
+  ]);
+  useFixtureEnv(context, fixture.env);
+  const consumer = path.join(path.dirname(fixture.discovery), 'consumer');
+  fs.mkdirSync(consumer, {recursive: true});
+  fs.symlinkSync(path.join(fixture.discovery, 'linked-update'), path.join(consumer, 'linked-update'));
+  const targetsFile = path.join(fixture.home.configDir, 'targets.json');
+  const targets = JSON.parse(fs.readFileSync(targetsFile, 'utf8'));
+  targets.genericTargets.push({
+    key: 'consumer',
+    kind: 'generic',
+    discoveryRoot: consumer,
+    parkingRoot: path.join(path.dirname(consumer), 'consumer-off'),
+    projectPath: '.consumer',
+  });
+  fs.writeFileSync(targetsFile, JSON.stringify(targets));
+  process.env.TUI_GIT_TREES = JSON.stringify({
+    'https://github.com/owner/repo.git': {'skills/linked-update': 'new-hash'},
+  });
+  sharedRefresh(fixture.home);
+  const t = await renderApp(fixture.home, 140, 30);
+  await t.send('\t');
+  await t.send('l');
+  await t.send('j');
+  let frame = t.stdout.frame();
+  assert.match(frame, /x unlink/);
+  assert.match(frame, /u update/);
+
+  await t.send('x');
+  assert.match(t.stdout.frame(), /Unlink relationship\?/);
+  await t.send('n');
+  await t.send('u');
+  frame = t.stdout.frame();
+  assert.match(frame, /Update 1 Skill\?/);
+  assert.ok(fs.lstatSync(path.join(consumer, 'linked-update')).isSymbolicLink());
+  t.unmount();
+});
+
+test('batch u updates only marked available Skills and preserves failed or skipped marks', async (context) => {
+  const fixture = setupManagedTui([
+    {name: 'a-success', source: 'owner/one', hash: 'success-old'},
+    {name: 'b-fail', source: 'owner/two', hash: 'fail-old'},
+    {name: 'c-current', source: 'owner/one', hash: 'current-hash'},
+  ]);
+  useFixtureEnv(context, fixture.env);
+  process.env.TUI_GIT_TREES = JSON.stringify({
+    'https://github.com/owner/one.git': {
+      'skills/a-success': 'success-new',
+      'skills/c-current': 'current-hash',
+    },
+    'https://github.com/owner/two.git': {'skills/b-fail': 'fail-new'},
+  });
+  process.env.TUI_NPX_FAIL_NAMES = JSON.stringify(['b-fail']);
+  sharedRefresh(fixture.home);
+  const t = await renderApp(fixture.home, 120, 34);
+  await t.send('\t');
+  await t.send('v');
+  await t.send(' ');
+  await t.send('j');
+  await t.send(' ');
+  await t.send('j');
+  await t.send(' ');
+  assert.match(t.stdout.frame(), /3 marked/);
+
+  await t.send('u');
+  let frame = t.stdout.frame();
+  assert.match(frame, /Update 2 Skills\?/);
+  assert.match(frame, /available 2.*skipped 1/);
+  assert.match(frame, /owner\/one[\s\S]*a-success: available[\s\S]*c-current: skipped \(current\)/);
+  assert.match(frame, /owner\/two[\s\S]*b-fail: available/);
+  await t.send('y');
+  frame = t.stdout.frame();
+  assert.match(frame, /Update results/);
+  assert.match(frame, /updated 1.*skipped 1.*failed 1/);
+  assert.match(frame, /a-success: updated/);
+  assert.match(frame, /b-fail: failed/);
+  assert.match(frame, /c-current: skipped \(current\)/);
+  const calls = fs.readFileSync(fixture.npxLog, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls.map(({args}) => args[3]).sort(), ['a-success', 'b-fail']);
+  await t.send('\x1b');
+  assert.match(t.stdout.frame(), /2 marked/);
+  t.unmount();
+});
+
+test('Project TUI update uses the exact project scope', async (context) => {
+  const fixture = setupManagedTui([
+    {name: 'project-skill', source: 'owner/project', hash: 'old-hash'},
+  ], true);
+  useFixtureEnv(context, fixture.env);
+  process.env.TUI_GIT_TREES = JSON.stringify({
+    'https://github.com/owner/project.git': {'skills/project-skill': 'new-hash'},
+  });
+  sharedRefresh(fixture.home, fixture.project);
+  const t = await renderApp(fixture.home, 120, 30, fixture.project);
+  await t.send('\t');
+  await t.send('u');
+  await t.send('y');
+  assert.match(t.stdout.frame(), /project-skill: updated/);
+  const call = JSON.parse(fs.readFileSync(fixture.npxLog, 'utf8').trim());
+  assert.equal(call.cwd, fs.realpathSync(fixture.project));
+  assert.equal(call.args.includes('--global'), false);
   t.unmount();
 });

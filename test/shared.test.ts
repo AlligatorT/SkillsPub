@@ -917,3 +917,23 @@ test('shared update refuses an identity-matching upstream-missing observation', 
   assert.equal(fs.readFileSync(lock, 'utf8'), before.lock);
   assert.equal(hashDirectory(path.join(discovery, 'missing')), before.skill);
 });
+
+test('shared update refuses an identity-matching check-failed observation', () => {
+  const {home, run, calls} = setup();
+  const discovery = path.join(home, '.agents', 'skills');
+  const lock = path.join(home, '.agents', '.skill-lock.json');
+  const sourceUrl = 'https://github.com/owner/offline.git';
+  writeSkill(discovery, 'offline', '# installed');
+  writeLock(lock, {offline: {
+    source: 'owner/offline', sourceType: 'github', sourceUrl,
+    skillPath: 'skills/offline/SKILL.md', skillFolderHash: 'old-hash',
+  }});
+  const refreshed = run(['shared', 'refresh']);
+  assert.equal(refreshed.status, 0, refreshed.stderr);
+
+  const refused = run(['shared', 'update', 'offline']);
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /cannot update check-failed Skill: offline/);
+  assert.equal(calls().length, 0);
+  assert.ok(fs.existsSync(path.join(discovery, 'offline', 'SKILL.md')));
+});

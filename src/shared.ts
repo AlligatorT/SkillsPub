@@ -114,9 +114,8 @@ function scan(home: Home, projectPath?: string, persist = false): InventoryScanR
     : scanGlobalInventory(home, targets, { persist });
 }
 
-function resolveTarget(home: Home, projectPath?: string): Target {
-  const exactProject = projectPath ? fs.realpathSync(projectPath) : undefined;
-  const report = scan(home, exactProject);
+function targetFromInventory(home: Home, report: InventoryScanReport): Target {
+  const exactProject = report.scope === 'project' ? report.projectPath : undefined;
   const matches = report.targets.filter((target) =>
     target.kind === 'shared' && target.key === 'shared' && target.writable &&
     (exactProject ? target.scope === 'project' : target.scope === 'global'));
@@ -137,6 +136,11 @@ function resolveTarget(home: Home, projectPath?: string): Target {
     cwd: exactProject ?? process.cwd(),
     lockFile: target.lockFile,
   };
+}
+
+function resolveTarget(home: Home, projectPath?: string): Target {
+  const exactProject = projectPath ? fs.realpathSync(projectPath) : undefined;
+  return targetFromInventory(home, scan(home, exactProject));
 }
 
 function validateName(name: string): string {
@@ -645,24 +649,34 @@ export function sharedRefresh(
   return withOperationLock(initial, () => refreshTarget(resolveTarget(home, projectPath)));
 }
 
+export function sharedOutdatedFromInventory(
+  home: Home,
+  report: InventoryScanReport,
+): SharedUpdateAvailabilityResult {
+  const target = targetFromInventory(home, report);
+  const skills = readNpxSkillsLock(target.lockFile);
+  return availabilityResult(target, skills, updateAvailabilityCache(target));
+}
+
 export function sharedOutdated(
   home: Home,
   projectPath?: string,
 ): SharedUpdateAvailabilityResult {
   const target = resolveTarget(home, projectPath);
-  const skills = readNpxSkillsLock(target.lockFile);
-  return availabilityResult(target, skills, updateAvailabilityCache(target));
+  return sharedOutdatedFromInventory(home, target.report);
 }
 
-function assertNoUpstreamMissing(target: Target, selected: NpxManagedSkill[]): void {
+function assertNoBlockedUpdate(target: Target, selected: NpxManagedSkill[]): void {
   const cached = updateAvailabilityCache(target);
-  const missing = selected.filter((skill) => {
+  const blocked = selected.flatMap((skill) => {
     const entry = cached.get(skill.slot);
-    return entry?.status === 'upstream-missing' &&
-      entry.identity === managedIdentity(target, skill).identity;
+    return entry && ['upstream-missing', 'check-failed'].includes(entry.status) &&
+      entry.identity === managedIdentity(target, skill).identity
+      ? [{name: skill.name, status: entry.status}]
+      : [];
   });
-  if (missing.length > 0)
-    throw new Error(`cannot update upstream-missing Skill: ${missing.map(({ name }) => name).join(', ')}`);
+  if (blocked.length > 0)
+    throw new Error(`cannot update ${blocked.map(({name, status}) => `${status} Skill: ${name}`).join(', ')}`);
 }
 
 /** One guarded Shared Target operation: snapshot Desired state, make Slots visible,
@@ -812,7 +826,7 @@ export function sharedUpdate(
     name: 'update',
     select(target) {
       const selected = managedSelection(target, names);
-      assertNoUpstreamMissing(target, selected);
+      assertNoBlockedUpdate(target, selected);
       return selected;
     },
     args: (selected, global) =>

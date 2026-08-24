@@ -3,6 +3,10 @@ import path from 'node:path';
 import type { Home } from './core.ts';
 import { inspectHarnesses } from './harnesses/registry.ts';
 import {
+  sharedOutdatedFromInventory,
+  type SharedUpdateAvailabilityEntry,
+} from './shared.ts';
+import {
   readStateFile,
   targetSlotId,
   scanGlobalInventory,
@@ -61,6 +65,7 @@ export interface SkillInstance {
   description?: string;
   provenance: SkillProvenance;
   sourceLabel: string;
+  updateAvailability?: SharedUpdateAvailabilityEntry;
   relationships: SkillRelationship[];
   targets: Record<string, SkillInfo | undefined>;
 }
@@ -356,6 +361,25 @@ export interface TuiSnapshot {
   };
 }
 
+function attachUpdateAvailability(
+  rows: Row[],
+  home: Home,
+  report: InventoryScanReport,
+): Row[] {
+  try {
+    const bySlot = new Map(sharedOutdatedFromInventory(home, report).entries.map((entry) => [entry.slot, entry]));
+    for (const row of rows) {
+      const shared = row.relationships.find((relationship) =>
+        relationship.target === 'shared' &&
+        relationship.scope === report.scope);
+      row.updateAvailability = shared ? bySlot.get(shared.slot) : undefined;
+    }
+  } catch {
+    // A missing/unreadable installer lock is not an Inventory failure.
+  }
+  return rows;
+}
+
 function visibleTargets(
   report: InventoryScanReport,
   harnesses: ReturnType<typeof inspectHarnesses>,
@@ -373,7 +397,7 @@ export function tuiSnapshot(home: Home): TuiSnapshot {
   return {
     targets: visibleTargets(report, harnesses),
     harnesses,
-    rows: projectRows(report),
+    rows: attachUpdateAvailability(projectRows(report), home, report),
     catalog: readViewState(home),
   };
 }
@@ -389,7 +413,7 @@ export function projectTuiSnapshot(home: Home, projectPath: string): TuiSnapshot
       harnesses,
     ),
     harnesses,
-    rows: projectRows(report),
+    rows: attachUpdateAvailability(projectRows(report), home, report),
     catalog: readViewState(home),
     project: report.projectPath,
   };
