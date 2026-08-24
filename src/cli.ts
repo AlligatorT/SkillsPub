@@ -40,9 +40,12 @@ import {
   sharedFind,
   planSharedRemove,
   sharedRemove,
+  sharedRefresh,
+  sharedOutdated,
   sharedUpdate,
   type SharedDescribeResult,
   type SharedFindResult,
+  type SharedUpdateAvailabilityResult,
 } from './shared.ts';
 import {
   addBundleMembers,
@@ -85,7 +88,7 @@ const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the sour
   skillspub bundle ls|show|create|add|rm ...
   skillspub tag add|rm|ls ...          manage global resource Tags
   skillspub preset create|add|rm|ls|show|activate|deactivate|reconcile|delete ...
-  skillspub shared find|describe|add|update|remove ...  manage the Shared Target via skills@1.5.21
+  skillspub shared find|describe|refresh|outdated|add|update|remove ...  manage the Shared Target via skills@1.5.21
   skillspub scan                       explicitly scan Global Skill Target inventory
   skillspub doctor [--repair --yes]    diagnose; explicitly confirm safe repairs
   skillspub project <path> scan|doctor|explain|shared|preset|mirror|harnesses ...  operate on exact Project Skill Targets
@@ -853,7 +856,7 @@ function cmdShared(
   args: string[],
   projectPath?: string,
   json = false,
-): SharedFindResult | SharedDescribeResult | undefined {
+): SharedFindResult | SharedDescribeResult | SharedUpdateAvailabilityResult | undefined {
   const [action, ...rest] = args;
   switch (action) {
     case 'find':
@@ -862,6 +865,22 @@ function cmdShared(
       if (rest.length !== 1 || rest[0].startsWith('-'))
         throw new Error('usage: skillspub shared describe <source>');
       return sharedDescribe(home, rest[0], projectPath, !json);
+    case 'refresh':
+    case 'outdated': {
+      if (rest.length > 0) throw new Error(`usage: skillspub shared ${action}`);
+      const result = action === 'refresh'
+        ? sharedRefresh(home, projectPath)
+        : sharedOutdated(home, projectPath);
+      if (!json) for (const entry of result.entries)
+        console.log([
+          entry.status,
+          entry.name,
+          entry.source,
+          entry.checkedAt ?? '-',
+          entry.error ?? '',
+        ].join('\t'));
+      return result;
+    }
     case 'add': {
       const { values, positionals } = parseArgs({
         args: rest,
@@ -915,7 +934,7 @@ function cmdShared(
       break;
     }
     default:
-      throw new Error('usage: skillspub shared find|describe|add|update|remove ...');
+      throw new Error('usage: skillspub shared find|describe|refresh|outdated|add|update|remove ...');
   }
 }
 

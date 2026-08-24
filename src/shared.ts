@@ -15,12 +15,14 @@ import {
 } from './inventory.ts';
 import {
   NPX_SKILLS_PACKAGE,
+  checkNpxSkillsSource,
   npxSkillsAddArgs,
   npxSkillsDescribeArgs,
   npxSkillsFindArgs,
   npxSkillsProvenanceLabel,
   npxSkillsRemoveArgs,
   npxSkillsUpdateArgs,
+  npxSkillsSourceKey,
   normalizeNpxSkillsName,
   parseNpxSkillsFindOutput,
   readNpxSkillsLock,
@@ -49,6 +51,32 @@ export interface SharedDescribeResult {
   source: string;
   output: string;
   warnings: string[];
+}
+
+export type SharedUpdateAvailabilityStatus =
+  'current' | 'available' | 'upstream-missing' | 'check-failed' | 'unknown';
+
+export interface SharedUpdateAvailabilityEntry {
+  name: string;
+  slot: string;
+  source: string;
+  skillPath?: string;
+  status: SharedUpdateAvailabilityStatus;
+  checkedAt?: string;
+  error?: string;
+}
+
+export interface SharedUpdateAvailabilityResult {
+  scope: 'global' | 'project';
+  projectPath?: string;
+  entries: SharedUpdateAvailabilityEntry[];
+}
+
+interface CachedUpdateAvailabilityEntry {
+  identity: string;
+  status: Exclude<SharedUpdateAvailabilityStatus, 'unknown'>;
+  checkedAt: string;
+  error?: string;
 }
 
 interface Target {
@@ -151,6 +179,90 @@ function withOperationLock<T>(target: Target, operation: () => T): T {
     fs.closeSync(descriptor);
     fs.rmSync(lock, { force: true });
   }
+}
+
+function managedIdentity(target: Target, skill: NpxManagedSkill): {
+  identity: string;
+  installed: boolean;
+} {
+  const current = relationship(target, skill.slot);
+  let installedHash = 'missing';
+  if (current) {
+    try {
+      installedHash = hashDirectory(current.path);
+    } catch {
+      installedHash = 'unreadable';
+    }
+  }
+  return {
+    identity: JSON.stringify({
+      name: skill.name,
+      source: skill.provenance.source,
+      sourceUrl: skill.provenance.sourceUrl,
+      sourceType: skill.sourceType,
+      ref: skill.ref,
+      skillPath: skill.provenance.skillPath,
+      skillFolderHash: skill.skillFolderHash,
+      computedHash: skill.computedHash,
+      installedHash,
+    }),
+    installed: installedHash !== 'missing' && installedHash !== 'unreadable',
+  };
+}
+
+function isCachedUpdateStatus(
+  value: unknown,
+): value is CachedUpdateAvailabilityEntry['status'] {
+  return typeof value === 'string' &&
+    ['current', 'available', 'upstream-missing', 'check-failed'].includes(value);
+}
+
+function updateAvailabilityCache(target: Target): Map<string, CachedUpdateAvailabilityEntry> {
+  const raw = readStateFile(target.report.stateFile).updateAvailability;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) ||
+      (raw as { version?: unknown }).version !== 1) return new Map();
+  const entries = (raw as { entries?: unknown }).entries;
+  if (!entries || typeof entries !== 'object' || Array.isArray(entries)) return new Map();
+  const result = new Map<string, CachedUpdateAvailabilityEntry>();
+  for (const [slot, value] of Object.entries(entries)) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const entry = value as Record<string, unknown>;
+    if (typeof entry.identity !== 'string' || !isCachedUpdateStatus(entry.status) ||
+        typeof entry.checkedAt !== 'string' ||
+        (entry.error !== undefined && typeof entry.error !== 'string')) continue;
+    result.set(slot, {
+      identity: entry.identity,
+      status: entry.status,
+      checkedAt: entry.checkedAt,
+      ...(entry.error ? { error: entry.error } : {}),
+    });
+  }
+  return result;
+}
+
+function availabilityResult(
+  target: Target,
+  skills: NpxManagedSkill[],
+  entries: Map<string, CachedUpdateAvailabilityEntry>,
+): SharedUpdateAvailabilityResult {
+  return {
+    scope: target.projectPath ? 'project' : 'global',
+    ...(target.projectPath ? { projectPath: target.projectPath } : {}),
+    entries: skills.map((skill) => {
+      const cached = entries.get(skill.slot);
+      const currentIdentity = managedIdentity(target, skill).identity;
+      const current = cached?.identity === currentIdentity ? cached : undefined;
+      return {
+        name: skill.name,
+        slot: skill.slot,
+        source: npxSkillsProvenanceLabel(skill.provenance),
+        ...(skill.provenance.skillPath ? { skillPath: skill.provenance.skillPath } : {}),
+        status: current?.status ?? 'unknown',
+        ...(current ? { checkedAt: current.checkedAt } : {}),
+        ...(current?.error ? { error: current.error } : {}),
+      };
+    }),
+  };
 }
 
 function managedSelection(target: Target, requested: string[]): NpxManagedSkill[] {
@@ -469,6 +581,90 @@ export function sharedDescribe(
   };
 }
 
+function refreshTarget(target: Target): SharedUpdateAvailabilityResult {
+  const skills = readNpxSkillsLock(target.lockFile);
+  const checkedAt = new Date().toISOString();
+  const cached = new Map<string, CachedUpdateAvailabilityEntry>();
+  const groups = new Map<string, NpxManagedSkill[]>();
+  const failed = (skill: NpxManagedSkill, error: string): void => {
+    cached.set(skill.slot, {
+      identity: managedIdentity(target, skill).identity,
+      status: 'check-failed',
+      checkedAt,
+      error,
+    });
+  };
+  for (const skill of skills) {
+    const installed = managedIdentity(target, skill);
+    if (!installed.installed) {
+      failed(skill, 'installed Skill is missing or unreadable');
+      continue;
+    }
+    if (!skill.provenance.skillPath || (!skill.skillFolderHash && !skill.computedHash)) {
+      failed(skill, 'installer lock lacks skillPath or content hash');
+      continue;
+    }
+    const key = npxSkillsSourceKey(skill);
+    if (!key) {
+      failed(skill, 'installer lock has no supported remote source');
+      continue;
+    }
+    groups.set(key, [...(groups.get(key) ?? []), skill]);
+  }
+  for (const group of groups.values()) {
+    try {
+      const results = new Map(checkNpxSkillsSource(group).map((entry) => [entry.slot, entry]));
+      for (const skill of group) {
+        const result = results.get(skill.slot);
+        cached.set(skill.slot, {
+          identity: managedIdentity(target, skill).identity,
+          status: result?.status ?? 'check-failed',
+          checkedAt,
+          ...(!result ? { error: 'source check returned no result' } : {}),
+          ...(result?.error ? { error: result.error } : {}),
+        });
+      }
+    } catch (error) {
+      for (const skill of group) failed(skill, (error as Error).message);
+    }
+  }
+  const state = readStateFile(target.report.stateFile);
+  state.updateAvailability = {
+    version: 1,
+    entries: Object.fromEntries(cached),
+  };
+  writeStateFile(target.report.stateFile, state);
+  return availabilityResult(target, skills, cached);
+}
+
+export function sharedRefresh(
+  home: Home,
+  projectPath?: string,
+): SharedUpdateAvailabilityResult {
+  const initial = resolveTarget(home, projectPath);
+  return withOperationLock(initial, () => refreshTarget(resolveTarget(home, projectPath)));
+}
+
+export function sharedOutdated(
+  home: Home,
+  projectPath?: string,
+): SharedUpdateAvailabilityResult {
+  const target = resolveTarget(home, projectPath);
+  const skills = readNpxSkillsLock(target.lockFile);
+  return availabilityResult(target, skills, updateAvailabilityCache(target));
+}
+
+function assertNoUpstreamMissing(target: Target, selected: NpxManagedSkill[]): void {
+  const cached = updateAvailabilityCache(target);
+  const missing = selected.filter((skill) => {
+    const entry = cached.get(skill.slot);
+    return entry?.status === 'upstream-missing' &&
+      entry.identity === managedIdentity(target, skill).identity;
+  });
+  if (missing.length > 0)
+    throw new Error(`cannot update upstream-missing Skill: ${missing.map(({ name }) => name).join(', ')}`);
+}
+
 /** One guarded Shared Target operation: snapshot Desired state, make Slots visible,
  *  run the skills CLI under the operation lock, restore Desired state, report Drift.
  *  add/update/remove below are only select/args/check/after over this template. */
@@ -614,7 +810,11 @@ export function sharedUpdate(
 ): SharedCommandResult {
   return guardedSkillsOp(home, projectPath, {
     name: 'update',
-    select: (target) => managedSelection(target, names),
+    select(target) {
+      const selected = managedSelection(target, names);
+      assertNoUpstreamMissing(target, selected);
+      return selected;
+    },
     args: (selected, global) =>
       npxSkillsUpdateArgs(selected.map(({ name }) => name), global),
   });
