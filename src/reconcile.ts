@@ -37,6 +37,7 @@ export interface PresetScope {
 }
 
 export interface PresetReconcilePlan extends ActivationPlan {
+  expectedCatalogState: string;
   claims: Record<string, string[]>;
   lastClaims: Record<string, string[]>;
   presetActivations: Record<string, string[]>;
@@ -69,10 +70,83 @@ export interface ActivationTarget {
 
 export interface ActivationPlan {
   report: InventoryScanReport;
+  expectedState: string;
   targets: ActivationTarget[];
   staleResourceIds: string[];
   /** State file this plan's intents persist to (project scans carry the project state). */
   stateFile: string;
+}
+
+function policyFingerprint(
+  file: string,
+  targets?: Array<{ slotId: string }>,
+): string {
+  const {
+    targetInventory: _targetInventory,
+    runtimeInventory: _runtimeInventory,
+    updateAvailability: _updateAvailability,
+    ...state
+  } = readStateFile(file);
+  if (!targets) return JSON.stringify(state);
+  const slots = new Set(targets.map(({ slotId }) => slotId));
+  const selected = (value: unknown): Record<string, unknown> =>
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).filter(([slotId]) => slots.has(slotId)))
+      : {};
+  const lastClaims = state.lastClaims && typeof state.lastClaims === 'object' &&
+    !Array.isArray(state.lastClaims)
+    ? Object.fromEntries(Object.entries(state.lastClaims).filter(([, slotIds]) =>
+        Array.isArray(slotIds) && slotIds.some((slotId) => slots.has(String(slotId)))))
+    : {};
+  return JSON.stringify({
+    baseIntent: selected(state.baseIntent),
+    claims: selected(state.claims),
+    lastClaims,
+    mirrors: selected(state.mirrors),
+  });
+}
+
+function planPreconditionFingerprint(
+  report: InventoryScanReport,
+  targets: ActivationTarget[],
+): string {
+  const resourceIds = new Set(targets.map(({ resourceId }) => resourceId).filter(Boolean));
+  const slotIds = new Set(targets.map(({ slotId }) => slotId));
+  return JSON.stringify({
+    resources: report.resources
+      .filter(({ id }) => resourceIds.has(id))
+      .map(({ id, hash }) => ({ id, hash }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+    relationships: report.relationships
+      .filter((relationship) =>
+        slotIds.has(targetSlotId(relationship.targetId, relationship.slot)) ||
+        Boolean(relationship.resourceId && resourceIds.has(relationship.resourceId)))
+      .map(({ targetId, slot, activation, form, path: entryPath, resourceId, target }) => ({
+        targetId, slot, activation, form, path: entryPath, resourceId, target,
+      }))
+      .sort((a, b) => `${a.targetId}\0${a.slot}\0${a.path}`.localeCompare(
+        `${b.targetId}\0${b.slot}\0${b.path}`,
+      )),
+  });
+}
+
+function concurrentModification(message: string): Error {
+  return Object.assign(new Error(message), { code: 'concurrent_modification' });
+}
+
+function assertPlanPreconditions(home: Home, plan: ActivationPlan): void {
+  const expectedPolicy = 'expectedCatalogState' in plan
+    ? policyFingerprint(plan.stateFile)
+    : policyFingerprint(plan.stateFile, plan.targets);
+  if (expectedPolicy !== plan.expectedState)
+    throw concurrentModification('policy state changed after preview; preview again');
+  const targets = [...new Map(plan.report.targets.map((target) => [target.key, target])).values()];
+  const actual = plan.report.scope === 'project'
+    ? scanProjectInventory(home, plan.report.projectPath!, targets, { persist: false })
+    : scanGlobalInventory(home, targets, { persist: false });
+  if (planPreconditionFingerprint(actual, plan.targets) !==
+    planPreconditionFingerprint(plan.report, plan.targets))
+    throw concurrentModification('Relationships or resources changed after preview; preview again');
 }
 
 function lexists(file: string): boolean {
@@ -356,7 +430,13 @@ export function planActivation(
 
   const unique = uniqueTargets(targets);
   preflightDependentLinks(report, unique);
-  return { report, targets: unique, staleResourceIds: [], stateFile: report.stateFile };
+  return {
+    report,
+    expectedState: policyFingerprint(report.stateFile, unique),
+    targets: unique,
+    staleResourceIds: [],
+    stateFile: report.stateFile,
+  };
 }
 
 function slotRelationship(
@@ -417,12 +497,12 @@ export function planToggle(
   const claims = readClaims(readStateFile(report.stateFile));
   const to: Activation = intent === 'off' && (claims[slotId]?.length ?? 0) > 0 ? 'on' : intent;
   // Claimed Slots stay ON: nothing moves, only Base intent is recorded.
-  const destination = from !== to
-    ? path.join(
+  const destination = from === to
+    ? undefined
+    : path.join(
         to === 'on' ? target.discoveryRoot : target.parkingRoot,
         path.basename(relationship.path),
-      )
-    : undefined;
+      );
   preflightTarget(relationship, from, to, destination);
   const syncMirror = relationship.form === 'mirror' && from === 'off' && to === 'on';
   if (syncMirror) assertMirrorMaySync(report, relationship);
@@ -440,7 +520,13 @@ export function planToggle(
     syncMirror,
   }];
   preflightDependentLinks(report, targets);
-  return { report, targets, staleResourceIds: [], stateFile: report.stateFile };
+  return {
+    report,
+    expectedState: policyFingerprint(report.stateFile, targets),
+    targets,
+    staleResourceIds: [],
+    stateFile: report.stateFile,
+  };
 }
 
 /** Create the missing Relationship from one existing resource; managed copy-only Targets use Mirror. */
@@ -461,7 +547,13 @@ export function planLink(
   };
   const targets = uniqueTargets(activationTargets(context, resource, target));
   preflightDependentLinks(report, targets);
-  return { report, targets, staleResourceIds: [], stateFile: report.stateFile };
+  return {
+    report,
+    expectedState: policyFingerprint(report.stateFile, targets),
+    targets,
+    staleResourceIds: [],
+    stateFile: report.stateFile,
+  };
 }
 
 /** Remove exactly one symlink Relationship. Local skill directories are never deleted. */
@@ -480,6 +572,7 @@ export function planUnlink(
   assertWritableParent(relationship.path);
   return {
     report,
+    expectedState: policyFingerprint(report.stateFile, [{ slotId }]),
     targets: [{
       slotId,
       targetId,
@@ -513,6 +606,7 @@ export function planMirrorAction(
   if (action === 'remove') assertUnlinkAllowed(report.stateFile, slotId);
   return {
     report,
+    expectedState: policyFingerprint(report.stateFile, [{ slotId }]),
     targets: [{
       slotId,
       targetId,
@@ -784,6 +878,7 @@ function updateMirrorMetadata(
 }
 
 export function applyActivationPlan(home: Home, plan: ActivationPlan): void {
+  assertPlanPreconditions(home, plan);
   const state = readStateFile(plan.stateFile);
   const baseIntent = { ...readBaseIntent(state as CatalogState) };
   for (const target of plan.targets) {
@@ -1081,6 +1176,8 @@ function planFromActivations(
   );
   return {
     report,
+    expectedState: policyFingerprint(stateFile),
+    expectedCatalogState: policyFingerprint(statePath(home)),
     targets,
     staleResourceIds: expanded.staleResourceIds,
     stateFile,
@@ -1165,6 +1262,9 @@ export function applyPresetReconcile(
   plan: PresetReconcilePlan,
   _scope: PresetScope = {},
 ): void {
+  assertPlanPreconditions(home, plan);
+  if (policyFingerprint(statePath(home)) !== plan.expectedCatalogState)
+    throw concurrentModification('Preset catalog changed after preview; preview again');
   const state = readStateFile(plan.stateFile);
   const baseIntent = { ...readBaseIntent(state as CatalogState) };
   for (const [slotId, activation] of Object.entries(plan.baseIntentDefaults))

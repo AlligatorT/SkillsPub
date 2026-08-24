@@ -71,6 +71,167 @@ test('ls --json returns one versioned document and no stderr', () => {
   });
 });
 
+test('JSON activation previews without changes and applies the same plan with --yes', () => {
+  const { configDir, skills } = setup();
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args, '--json'], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+
+  const preview = run(['off', 'grilling', 'a']);
+  assert.equal(preview.status, 0, preview.stderr || preview.stdout);
+  assert.equal(preview.stderr, '');
+  const previewDocument = JSON.parse(preview.stdout);
+  assert.equal(previewDocument.schemaVersion, 1);
+  assert.equal(previewDocument.ok, true);
+  assert.equal(previewDocument.data.applied, false);
+  assert.equal(previewDocument.data.plan.operation, 'activation');
+  assert.deepEqual(previewDocument.data.plan.targets.map((target: { targetId: string; slot: string; from: string; to: string }) => ({
+    targetId: target.targetId,
+    slot: target.slot,
+    from: target.from,
+    to: target.to,
+  })), [{ targetId: 'global:a', slot: 'grilling', from: 'on', to: 'off' }]);
+  assert.ok(fs.existsSync(path.join(skills, 'grilling', 'SKILL.md')));
+  assert.equal(fs.existsSync(path.join(configDir, 'state.json')), false);
+
+  const applied = run(['off', 'grilling', 'a', '--yes']);
+  assert.equal(applied.status, 0, applied.stderr || applied.stdout);
+  assert.equal(applied.stderr, '');
+  const appliedDocument = JSON.parse(applied.stdout);
+  assert.equal(appliedDocument.data.applied, true);
+  assert.deepEqual(appliedDocument.data.plan, previewDocument.data.plan);
+  assert.deepEqual(appliedDocument.data.remainingDrift, []);
+  assert.ok(fs.existsSync(path.join(configDir, '.skillspub-off', 'skills', 'grilling', 'SKILL.md')));
+  assert.equal(fs.existsSync(path.join(skills, 'grilling')), false);
+});
+
+test('JSON Link/Mirror plans stay dry until --yes and verify remaining Drift', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-json-mirror-'));
+  const sharedRoot = path.join(configDir, 'shared', 'skills');
+  const grokRoot = path.join(configDir, 'grok', 'skills');
+  const source = path.join(sharedRoot, 'example');
+  fs.mkdirSync(source, { recursive: true });
+  fs.writeFileSync(path.join(source, 'SKILL.md'), '# example\n');
+  fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [
+      { key: 'shared', discoveryRoot: sharedRoot, parkingRoot: path.join(configDir, 'shared', 'off') },
+      { key: 'grok', discoveryRoot: grokRoot, parkingRoot: path.join(configDir, 'grok', 'off') },
+      { key: 'pi', disabled: true },
+      { key: 'claude', disabled: true },
+    ],
+    genericTargets: [],
+  }));
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args, '--json'], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+  const sourceId = fs.realpathSync(source);
+
+  const linkPreview = run(['on', `skill:${sourceId}`, 'grok']);
+  assert.equal(linkPreview.status, 0, linkPreview.stderr || linkPreview.stdout);
+  const linkPreviewDocument = JSON.parse(linkPreview.stdout);
+  assert.equal(linkPreviewDocument.data.applied, false);
+  assert.equal(linkPreviewDocument.data.plan.targets[0].createForm, 'mirror');
+  assert.equal(fs.existsSync(path.join(grokRoot, 'example')), false);
+
+  const linkApplied = run(['on', `skill:${sourceId}`, 'grok', '--yes']);
+  assert.equal(linkApplied.status, 0, linkApplied.stderr || linkApplied.stdout);
+  assert.deepEqual(JSON.parse(linkApplied.stdout).data.plan, linkPreviewDocument.data.plan);
+  const mirrorFile = path.join(grokRoot, 'example', 'SKILL.md');
+  assert.equal(fs.readFileSync(mirrorFile, 'utf8'), '# example\n');
+
+  fs.appendFileSync(path.join(source, 'SKILL.md'), 'changed\n');
+  const syncPreview = run(['mirror', 'sync', 'global:grok', 'example']);
+  assert.equal(syncPreview.status, 0, syncPreview.stderr || syncPreview.stdout);
+  const syncPreviewDocument = JSON.parse(syncPreview.stdout);
+  assert.equal(syncPreviewDocument.data.applied, false);
+  assert.equal(fs.readFileSync(mirrorFile, 'utf8'), '# example\n');
+
+  const syncApplied = run(['mirror', 'sync', 'global:grok', 'example', '--yes']);
+  assert.equal(syncApplied.status, 0, syncApplied.stderr || syncApplied.stdout);
+  const syncAppliedDocument = JSON.parse(syncApplied.stdout);
+  assert.deepEqual(syncAppliedDocument.data.plan, syncPreviewDocument.data.plan);
+  assert.deepEqual(syncAppliedDocument.data.remainingDrift, []);
+  assert.equal(fs.readFileSync(mirrorFile, 'utf8'), '# example\nchanged\n');
+});
+
+test('JSON catalog mutations preview without state writes and apply the same plan', () => {
+  const { configDir, skills } = setup();
+  const resource = fs.realpathSync(path.join(skills, 'grilling'));
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args, '--json'], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+
+  const preview = run(['bundle', 'create', 'tools', `skill:${resource}`]);
+  assert.equal(preview.status, 0, preview.stderr || preview.stdout);
+  assert.equal(preview.stderr, '');
+  const previewDocument = JSON.parse(preview.stdout);
+  assert.equal(previewDocument.data.applied, false);
+  assert.equal(previewDocument.data.plan.operation, 'bundle.create');
+  assert.equal(fs.existsSync(path.join(configDir, 'state.json')), false);
+
+  const applied = run(['bundle', 'create', 'tools', `skill:${resource}`, '--yes']);
+  assert.equal(applied.status, 0, applied.stderr || applied.stdout);
+  assert.equal(applied.stderr, '');
+  const appliedDocument = JSON.parse(applied.stdout);
+  assert.equal(appliedDocument.data.applied, true);
+  assert.deepEqual(appliedDocument.data.plan, previewDocument.data.plan);
+  assert.deepEqual(appliedDocument.data.remainingDrift, []);
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(configDir, 'state.json'), 'utf8')).bundles.tools,
+    [resource],
+  );
+
+  for (const args of [
+    ['tag', 'add', `skill:${resource}`, 'backend'],
+    ['preset', 'create', 'work', `skill:${resource}`],
+  ]) {
+    const before = fs.readFileSync(path.join(configDir, 'state.json'), 'utf8');
+    const nextPreview = run(args);
+    assert.equal(nextPreview.status, 0, nextPreview.stderr || nextPreview.stdout);
+    const nextPreviewDocument = JSON.parse(nextPreview.stdout);
+    assert.equal(nextPreviewDocument.data.applied, false);
+    assert.equal(fs.readFileSync(path.join(configDir, 'state.json'), 'utf8'), before);
+
+    const nextApplied = run([...args, '--yes']);
+    assert.equal(nextApplied.status, 0, nextApplied.stderr || nextApplied.stdout);
+    const nextAppliedDocument = JSON.parse(nextApplied.stdout);
+    assert.equal(nextAppliedDocument.data.applied, true);
+    assert.deepEqual(nextAppliedDocument.data.plan, nextPreviewDocument.data.plan);
+  }
+  let state = JSON.parse(fs.readFileSync(path.join(configDir, 'state.json'), 'utf8'));
+  assert.deepEqual(state.tags[resource], ['backend']);
+  assert.deepEqual(state.presets.work.selectors, [`skill:${resource}`]);
+
+  for (const args of [
+    ['bundle', 'add', 'tools', `skill:${resource}`],
+    ['bundle', 'rm', 'tools', `skill:${resource}`],
+    ['tag', 'rm', `skill:${resource}`, 'backend'],
+    ['preset', 'add', 'work', `skill:${resource}`],
+    ['preset', 'rm', 'work', `skill:${resource}`],
+    ['preset', 'delete', 'work'],
+  ]) {
+    const before = fs.readFileSync(path.join(configDir, 'state.json'), 'utf8');
+    const nextPreview = run(args);
+    assert.equal(nextPreview.status, 0, nextPreview.stderr || nextPreview.stdout);
+    const nextPreviewDocument = JSON.parse(nextPreview.stdout);
+    assert.equal(nextPreviewDocument.data.applied, false);
+    assert.equal(fs.readFileSync(path.join(configDir, 'state.json'), 'utf8'), before);
+    const nextApplied = run([...args, '--yes']);
+    assert.equal(nextApplied.status, 0, nextApplied.stderr || nextApplied.stdout);
+    const nextAppliedDocument = JSON.parse(nextApplied.stdout);
+    assert.equal(nextAppliedDocument.data.applied, true);
+    assert.deepEqual(nextAppliedDocument.data.plan, nextPreviewDocument.data.plan);
+  }
+  state = JSON.parse(fs.readFileSync(path.join(configDir, 'state.json'), 'utf8'));
+  assert.deepEqual(state.bundles.tools, []);
+  assert.equal(state.tags[resource], undefined);
+  assert.equal(state.presets.work, undefined);
+});
+
 test('read-only inventory commands return only successful JSON envelopes', () => {
   const { configDir } = setup();
   const project = path.join(configDir, 'project');
@@ -205,7 +366,7 @@ test('JSON mode separates usage, domain, and runtime failures', () => {
   assertError(['bogus'], 2, 'usage_error');
   assertError([], 2, 'usage_error');
   assertError(['tui'], 2, 'usage_error');
-  assertError(['on', 'grilling', 'a'], 2, 'json_not_supported');
+  assertError(['off', 'grilling', 'a'], 1, 'ambiguous_selector');
 
   fs.writeFileSync(path.join(configDir, 'targets.json'), '{');
   assertError(['targets'], 1, 'runtime_error');
@@ -398,6 +559,57 @@ test('target migration previews, confirms, and backs up the legacy Runtime regis
   assert.match(run(['migrate', 'targets', '--yes']).stdout, /already migrated/);
 });
 
+test('JSON migration and repair preview safely and apply the same plan with --yes', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-json-maintenance-'));
+  const discoveryRoot = path.join(configDir, 'shared', 'skills');
+  const parkingRoot = path.join(configDir, 'shared', 'off');
+  const legacyFile = path.join(configDir, 'runtimes.json');
+  fs.mkdirSync(discoveryRoot, { recursive: true });
+  fs.writeFileSync(legacyFile, JSON.stringify({
+    version: 1,
+    runtimes: [{
+      key: 'shared',
+      kind: 'shared',
+      discoveryRoot,
+      parkingRoot,
+      projectPath: '.agents/skills',
+    }],
+  }));
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args, '--json'], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+
+  const migrationPreview = run(['migrate', 'targets']);
+  assert.equal(migrationPreview.status, 0, migrationPreview.stderr || migrationPreview.stdout);
+  const migrationPreviewDocument = JSON.parse(migrationPreview.stdout);
+  assert.equal(migrationPreviewDocument.data.applied, false);
+  assert.equal(fs.existsSync(path.join(configDir, 'targets.json')), false);
+  assert.ok(fs.existsSync(legacyFile));
+
+  const migrationApplied = run(['migrate', 'targets', '--yes']);
+  assert.equal(migrationApplied.status, 0, migrationApplied.stderr || migrationApplied.stdout);
+  const migrationAppliedDocument = JSON.parse(migrationApplied.stdout);
+  assert.equal(migrationAppliedDocument.data.applied, true);
+  assert.deepEqual(migrationAppliedDocument.data.plan, migrationPreviewDocument.data.plan);
+  assert.equal(fs.existsSync(legacyFile), false);
+
+  const broken = path.join(discoveryRoot, 'broken');
+  fs.symlinkSync('/missing/skill', broken);
+  const repairPreview = run(['doctor', '--repair']);
+  assert.equal(repairPreview.status, 0, repairPreview.stderr || repairPreview.stdout);
+  const repairPreviewDocument = JSON.parse(repairPreview.stdout);
+  assert.equal(repairPreviewDocument.data.applied, false);
+  assert.equal(fs.lstatSync(broken).isSymbolicLink(), true);
+
+  const repairApplied = run(['doctor', '--repair', '--yes']);
+  assert.equal(repairApplied.status, 0, repairApplied.stderr || repairApplied.stdout);
+  const repairAppliedDocument = JSON.parse(repairApplied.stdout);
+  assert.equal(repairAppliedDocument.data.applied, true);
+  assert.deepEqual(repairAppliedDocument.data.plan, repairPreviewDocument.data.plan);
+  assert.throws(() => fs.lstatSync(broken), /ENOENT/);
+});
+
 test('read-only Target commands do not migrate a legacy registry', () => {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-read-only-targets-'));
   const discoveryRoot = path.join(configDir, 'shared', 'skills');
@@ -520,9 +732,22 @@ test('Pi setup previews, confirms, and explicitly reconciles its managed Shared 
   assert.match(setup.stderr, /explicit reconcile/i);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(piHome, 'agent', 'settings.json'), 'utf8')), { theme: 'dark' });
 
-  const reconciled = run(['harnesses', 'pi', 'reconcile', '--yes']);
-  assert.equal(reconciled.status, 0, reconciled.stderr);
-  assert.match(reconciled.stdout, /verified/i);
+  const settingsFile = path.join(piHome, 'agent', 'settings.json');
+  const beforeJsonPreview = fs.readFileSync(settingsFile, 'utf8');
+  const reconcilePreview = run(['harnesses', 'pi', 'reconcile', '--json']);
+  assert.equal(reconcilePreview.status, 0, reconcilePreview.stderr || reconcilePreview.stdout);
+  assert.equal(reconcilePreview.stderr, '');
+  const reconcilePreviewDocument = JSON.parse(reconcilePreview.stdout);
+  assert.equal(reconcilePreviewDocument.data.applied, false);
+  assert.equal(fs.readFileSync(settingsFile, 'utf8'), beforeJsonPreview);
+
+  const reconciled = run(['harnesses', 'pi', 'reconcile', '--yes', '--json']);
+  assert.equal(reconciled.status, 0, reconciled.stderr || reconciled.stdout);
+  assert.equal(reconciled.stderr, '');
+  const reconciledDocument = JSON.parse(reconciled.stdout);
+  assert.equal(reconciledDocument.data.applied, true);
+  assert.deepEqual(reconciledDocument.data.plan, reconcilePreviewDocument.data.plan);
+  assert.equal(reconciledDocument.data.result.inspection.isolation.status, 'managed');
 });
 
 test('Claude Code inspect is read-only and setup reports its unsupported optional capability', () => {
@@ -614,9 +839,17 @@ test('Grok CLI supports read-only inspection and confirmed Global and Project se
   assert.match(preview.stdout, new RegExp(ancestorShared.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.deepEqual(fs.readdirSync(configDir, { recursive: true }).sort(), before);
 
-  const globalApplied = run(['harnesses', 'grok', 'setup', '--yes']);
-  assert.equal(globalApplied.status, 0, globalApplied.stderr);
-  assert.match(globalApplied.stdout, /Grok Build setup verified/);
+  const globalJsonPreview = run(['harnesses', 'grok', 'setup', '--json']);
+  assert.equal(globalJsonPreview.status, 0, globalJsonPreview.stderr || globalJsonPreview.stdout);
+  const globalJsonPreviewDocument = JSON.parse(globalJsonPreview.stdout);
+  assert.equal(globalJsonPreviewDocument.data.applied, false);
+  assert.doesNotMatch(JSON.stringify(globalJsonPreviewDocument.data.plan), /[0-9a-f]{8}-[0-9a-f-]{27}/i);
+
+  const globalApplied = run(['harnesses', 'grok', 'setup', '--yes', '--json']);
+  assert.equal(globalApplied.status, 0, globalApplied.stderr || globalApplied.stdout);
+  const globalAppliedDocument = JSON.parse(globalApplied.stdout);
+  assert.equal(globalAppliedDocument.data.applied, true);
+  assert.deepEqual(globalAppliedDocument.data.plan, globalJsonPreviewDocument.data.plan);
   fs.writeFileSync(
     path.join(grokHome, 'config.toml'),
     fs.readFileSync(path.join(grokHome, 'config.toml'), 'utf8')
@@ -1009,20 +1242,42 @@ test('preset activate/deactivate/reconcile update claims and Desired state', () 
   assert.equal(run(['scan']).status, 0);
   assert.equal(run(['preset', 'create', 'tools', 'skill:one']).status, 0);
 
-  const activated = run(['preset', 'activate', 'tools', 'shared']);
-  assert.equal(activated.status, 0, activated.stderr);
-  assert.match(activated.stdout, /Plan:/);
+  const activatePreview = run(['preset', 'activate', 'tools', 'shared', '--json']);
+  assert.equal(activatePreview.status, 0, activatePreview.stderr || activatePreview.stdout);
+  const activatePreviewDocument = JSON.parse(activatePreview.stdout);
+  assert.equal(activatePreviewDocument.data.applied, false);
+  const beforeActivate = fs.readFileSync(path.join(configDir, 'state.json'), 'utf8');
+
+  const activated = run(['preset', 'activate', 'tools', 'shared', '--yes', '--json']);
+  assert.equal(activated.status, 0, activated.stderr || activated.stdout);
+  const activatedDocument = JSON.parse(activated.stdout);
+  assert.equal(activatedDocument.data.applied, true);
+  assert.deepEqual(activatedDocument.data.plan, activatePreviewDocument.data.plan);
+  assert.notEqual(fs.readFileSync(path.join(configDir, 'state.json'), 'utf8'), beforeActivate);
   let state = JSON.parse(fs.readFileSync(path.join(configDir, 'state.json'), 'utf8'));
   assert.deepEqual(state.claims['global:shared\0one'], ['preset:tools']);
   assert.ok(state.presetActivations.tools.includes('shared'));
 
   state.baseIntent = { 'global:shared\0one': 'off' };
   fs.writeFileSync(path.join(configDir, 'state.json'), JSON.stringify(state));
-  const deactivated = run(['preset', 'deactivate', 'tools', 'shared']);
-  assert.equal(deactivated.status, 0, deactivated.stderr);
+  const deactivatePreview = run(['preset', 'deactivate', 'tools', 'shared', '--json']);
+  assert.equal(deactivatePreview.status, 0, deactivatePreview.stderr || deactivatePreview.stdout);
+  const deactivatePreviewDocument = JSON.parse(deactivatePreview.stdout);
+  assert.equal(deactivatePreviewDocument.data.applied, false);
+  const deactivated = run(['preset', 'deactivate', 'tools', 'shared', '--yes', '--json']);
+  assert.equal(deactivated.status, 0, deactivated.stderr || deactivated.stdout);
+  assert.deepEqual(JSON.parse(deactivated.stdout).data.plan, deactivatePreviewDocument.data.plan);
   assert.ok(fs.existsSync(path.join(parkingRoot, 'one', 'SKILL.md')));
   state = JSON.parse(fs.readFileSync(path.join(configDir, 'state.json'), 'utf8'));
   assert.equal(state.claims['global:shared\0one'], undefined);
+
+  const reconcilePreview = run(['preset', 'reconcile', '--json']);
+  assert.equal(reconcilePreview.status, 0, reconcilePreview.stderr || reconcilePreview.stdout);
+  const reconcilePreviewDocument = JSON.parse(reconcilePreview.stdout);
+  assert.equal(reconcilePreviewDocument.data.applied, false);
+  const reconciled = run(['preset', 'reconcile', '--yes', '--json']);
+  assert.equal(reconciled.status, 0, reconciled.stderr || reconciled.stdout);
+  assert.deepEqual(JSON.parse(reconciled.stdout).data.plan, reconcilePreviewDocument.data.plan);
 
   assert.equal(run(['preset', 'delete', 'tools', '--yes']).status, 0);
   assert.match(run(['preset', 'ls']).stdout, /no presets found/);
