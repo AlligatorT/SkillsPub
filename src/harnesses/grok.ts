@@ -216,6 +216,18 @@ function projectedRoots(target: SkillTarget, projectPath?: string): string[] {
   ]);
 }
 
+function scopedRoots(target: SkillTarget, projectPath?: string): Array<{
+  scope: 'global' | 'project' | 'parent';
+  discoveryRoot: string;
+}> {
+  const roots = projectedRoots(target, projectPath);
+  if (!projectPath) return [{ scope: 'global', discoveryRoot: roots[0] }];
+  return roots.map((discoveryRoot, index) => ({
+    scope: index === 0 ? 'project' : index === roots.length - 1 ? 'global' : 'parent',
+    discoveryRoot,
+  }));
+}
+
 function requiredSharedRoots(
   _home: Home,
   targets: SkillTarget[],
@@ -562,37 +574,96 @@ export const grokAdapter: HarnessAdapter = {
   },
   inspect(home, targets, projectPath) {
     const grokTarget = resolveGrokTarget(targets);
+    const sharedTarget = resolveSharedTarget(targets);
+    const claudeTarget = targets.find(({ key }) => key === 'claude');
+    const cursorRoot = path.join(os.homedir(), '.cursor');
+    const cursorTarget: SkillTarget = {
+      key: 'cursor',
+      kind: 'harness',
+      discoveryRoot: path.join(cursorRoot, 'skills'),
+      parkingRoot: path.join(cursorRoot, '.skillspub-off', 'skills'),
+      projectPath: '.cursor/skills',
+    };
     const root = grokHome(grokTarget);
     const selectedProject = projectPath ? path.resolve(projectPath) : undefined;
     const file = configFile(grokTarget);
     const detected = fs.existsSync(root) || Boolean(selectedProject && fs.existsSync(path.join(selectedProject, '.grok')));
-    const roots = requiredSharedRoots(home, targets, selectedProject);
+    const sharedRootPaths = requiredSharedRoots(home, targets, selectedProject);
+    const grokRoots = scopedRoots(grokTarget, selectedProject);
+    const sharedRoots = scopedRoots(sharedTarget, selectedProject);
+    const compatibilityRoots = [
+      ...(claudeTarget ? scopedRoots(claudeTarget, selectedProject).map((entry) => ({
+        ...entry,
+        targetKey: 'claude',
+      })) : []),
+      ...scopedRoots(cursorTarget, selectedProject).map((entry) => ({
+        ...entry,
+        targetKey: 'cursor',
+      })),
+    ];
     let sharedConsumption: HarnessInspection['sharedConsumption'];
     let isolation: HarnessInspection['isolation'];
+    let discoveryRoots: HarnessInspection['roots'];
     try {
       const config = readConfig(file);
-      let grokRoots = [grokTarget.discoveryRoot];
-      if (selectedProject) {
-        grokRoots = fs.existsSync(selectedProject)
-          ? operationGrokRoots(targets, selectedProject)
-          : [...grokRoots, path.join(selectedProject, grokTarget.projectPath)];
-      }
-      assertSafeConfig(config, grokRoots);
-      const sharedExcluded = roots.every((sharedRoot) => coversRoot(config.ignore, sharedRoot));
-      const isolated = sharedExcluded && !config.claudeSkills && !config.cursorSkills;
+      assertSafeConfig(config, grokRoots.map(({ discoveryRoot }) => discoveryRoot));
+      const sharedExcluded = sharedRootPaths.every((sharedRoot) => coversRoot(config.ignore, sharedRoot));
+      const compatibilityExcluded = compatibilityRoots.every(({ discoveryRoot, targetKey }) =>
+        coversRoot(config.ignore, discoveryRoot) ||
+        (targetKey === 'claude' ? !config.claudeSkills : !config.cursorSkills));
+      const isolated = sharedExcluded && compatibilityExcluded;
       sharedConsumption = sharedExcluded
-        ? { status: 'excluded', detail: `Grok Build excludes Shared skills at ${roots.join(', ')}.` }
-        : { status: 'enabled', detail: `Grok Build still discovers Shared skills at ${roots.join(', ')}.` };
+        ? { status: 'excluded', detail: `Grok Build excludes Shared skills at ${sharedRootPaths.join(', ')}.` }
+        : { status: 'enabled', detail: `Grok Build still discovers Shared skills at ${sharedRootPaths.join(', ')}.` };
       isolation = isolationStatus({
         home,
         file,
-        roots,
+        roots: sharedRootPaths,
         isolated,
         projectPath: selectedProject,
       });
+      discoveryRoots = [
+        ...grokRoots.map((entry) => ({
+          kind: 'harness' as const,
+          targetKey: 'grok',
+          ...entry,
+          consumption: 'consumed' as const,
+          reason: 'Grok Build discovers this native Skill Target.',
+        })),
+        ...sharedRoots.map((entry) => {
+          const excluded = coversRoot(config.ignore, entry.discoveryRoot);
+          return {
+            kind: 'shared' as const,
+            targetKey: 'shared',
+            ...entry,
+            consumption: excluded ? 'excluded' as const : 'consumed' as const,
+            reason: excluded
+              ? 'Grok Build settings ignore this Shared root.'
+              : 'Grok Build settings allow this Shared root.',
+          };
+        }),
+        ...compatibilityRoots.map((entry) => {
+          const enabled = entry.targetKey === 'claude' ? config.claudeSkills : config.cursorSkills;
+          const excluded = !enabled || coversRoot(config.ignore, entry.discoveryRoot);
+          return {
+            kind: 'compatibility' as const,
+            ...entry,
+            consumption: excluded ? 'excluded' as const : 'consumed' as const,
+            reason: excluded
+              ? `Grok Build excludes ${entry.targetKey} compatibility Skills here.`
+              : `Grok Build consumes ${entry.targetKey} compatibility Skills here.`,
+          };
+        }),
+      ];
     } catch (error) {
-      sharedConsumption = { status: 'unknown', detail: (error as Error).message };
-      isolation = { status: 'unknown', detail: (error as Error).message };
+      const detail = (error as Error).message;
+      sharedConsumption = { status: 'unknown', detail };
+      isolation = { status: 'unknown', detail };
+      discoveryRoots = [
+        ...grokRoots.map((entry) => ({ kind: 'harness' as const, targetKey: 'grok', ...entry })),
+        ...sharedRoots.map((entry) => ({ kind: 'shared' as const, targetKey: 'shared', ...entry })),
+        ...compatibilityRoots.map((entry) => ({ kind: 'compatibility' as const, ...entry })),
+      ].map((entry) => ({ ...entry, consumption: 'unknown' as const, reason: detail }));
     }
     return {
       key: 'grok',
@@ -607,6 +678,7 @@ export const grokAdapter: HarnessAdapter = {
           discoveryRoot: path.join(selectedProject, grokTarget.projectPath),
         }] : []),
       ],
+      roots: discoveryRoots,
       sharedConsumption,
       isolation,
       link: { supported: false },

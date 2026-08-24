@@ -143,22 +143,49 @@ function inspectShared(
   pi: SkillTarget,
   shared: SkillTarget,
   projectPath?: string,
-): HarnessInspection['sharedConsumption'] {
-  const global = readSettings(settingsFile(pi));
-  const roots = [shared.discoveryRoot];
-  const exclusions = [sharedExcluded(shared.discoveryRoot, global.skills)];
+): {
+  summary: HarnessInspection['sharedConsumption'];
+  roots: HarnessInspection['roots'];
+} {
+  const entries: Array<{
+    scope: 'global' | 'project';
+    discoveryRoot: string;
+    excluded: boolean;
+  }> = [{
+    scope: 'global' as const,
+    discoveryRoot: shared.discoveryRoot,
+    excluded: sharedExcluded(shared.discoveryRoot, readSettings(settingsFile(pi)).skills),
+  }];
   if (projectPath) {
-    const projectRoot = path.join(projectPath, shared.projectPath);
-    const projectSettings = readSettings(path.join(projectPath, '.pi', 'settings.json'));
-    roots.push(projectRoot);
-    exclusions.push(sharedExcluded(projectRoot, projectSettings.skills));
+    const discoveryRoot = path.join(projectPath, shared.projectPath);
+    entries.push({
+      scope: 'project',
+      discoveryRoot,
+      excluded: sharedExcluded(
+        discoveryRoot,
+        readSettings(path.join(projectPath, '.pi', 'settings.json')).skills,
+      ),
+    });
   }
-  if (exclusions.every(Boolean))
-    return { status: 'excluded', detail: `Pi Shared skills are excluded: ${roots.join(', ')}` };
-  const excluded = roots.filter((_, index) => exclusions[index]);
+  const excluded = entries.filter((entry) => entry.excluded);
+  const summary: HarnessInspection['sharedConsumption'] = excluded.length === entries.length
+    ? { status: 'excluded', detail: `Pi Shared skills are excluded: ${entries.map(({ discoveryRoot }) => discoveryRoot).join(', ')}` }
+    : {
+      status: 'enabled',
+      detail: `Pi discovers Shared skills at ${entries.map(({ discoveryRoot }) => discoveryRoot).join(', ')}${excluded.length ? `; excludes ${excluded.map(({ discoveryRoot }) => discoveryRoot).join(', ')}` : ''}`,
+    };
   return {
-    status: 'enabled',
-    detail: `Pi discovers Shared skills at ${roots.join(', ')}${excluded.length ? `; excludes ${excluded.join(', ')}` : ''}`,
+    summary,
+    roots: entries.map((entry) => ({
+      kind: 'shared',
+      targetKey: 'shared',
+      scope: entry.scope,
+      discoveryRoot: entry.discoveryRoot,
+      consumption: entry.excluded ? 'excluded' : 'consumed',
+      reason: entry.excluded
+        ? 'Pi settings exclude this Shared root.'
+        : 'Pi settings allow this Shared root.',
+    })),
   };
 }
 
@@ -267,12 +294,31 @@ export const piAdapter: HarnessAdapter = {
     const projectRoot = projectPath ? path.resolve(projectPath) : undefined;
     const file = settingsFile(piTarget);
     let sharedConsumption: HarnessInspection['sharedConsumption'];
+    let sharedRoots: HarnessInspection['roots'];
     let skills: string[] = [];
+    let configurationKnown = true;
     try {
       skills = readSettings(file).skills;
-      sharedConsumption = inspectShared(piTarget, sharedTarget, projectRoot);
+      const shared = inspectShared(piTarget, sharedTarget, projectRoot);
+      sharedConsumption = shared.summary;
+      sharedRoots = shared.roots;
     } catch (error) {
-      sharedConsumption = { status: 'unknown', detail: (error as Error).message };
+      configurationKnown = false;
+      const detail = (error as Error).message;
+      sharedConsumption = { status: 'unknown', detail };
+      sharedRoots = [
+        { scope: 'global' as const, discoveryRoot: sharedTarget.discoveryRoot },
+        ...(projectRoot ? [{
+          scope: 'project' as const,
+          discoveryRoot: path.join(projectRoot, sharedTarget.projectPath),
+        }] : []),
+      ].map((root) => ({
+        kind: 'shared' as const,
+        targetKey: 'shared',
+        ...root,
+        consumption: 'unknown' as const,
+        reason: detail,
+      }));
     }
     const detected = fs.existsSync(piTarget.discoveryRoot) || fs.existsSync(file) ||
       fs.existsSync(piHome(piTarget)) || Boolean(projectRoot && fs.existsSync(path.join(projectRoot, '.pi')));
@@ -288,6 +334,25 @@ export const piAdapter: HarnessAdapter = {
           scope: 'project' as const,
           discoveryRoot: path.join(projectRoot, piTarget.projectPath),
         }] : []),
+      ],
+      roots: [
+        {
+          kind: 'harness',
+          targetKey: 'pi',
+          scope: 'global',
+          discoveryRoot: piTarget.discoveryRoot,
+          consumption: configurationKnown ? 'consumed' : 'unknown',
+          reason: configurationKnown ? 'Pi discovers its Global Skill Target.' : sharedConsumption.detail,
+        },
+        ...(projectRoot ? [{
+          kind: 'harness' as const,
+          targetKey: 'pi',
+          scope: 'project' as const,
+          discoveryRoot: path.join(projectRoot, piTarget.projectPath),
+          consumption: configurationKnown ? 'consumed' as const : 'unknown' as const,
+          reason: configurationKnown ? 'Pi discovers the exact Project Skill Target.' : sharedConsumption.detail,
+        }] : []),
+        ...sharedRoots,
       ],
       sharedConsumption,
       isolation: isolation(

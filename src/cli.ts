@@ -4,6 +4,12 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { defaultHome } from './core.ts';
 import {
+  ExplainError,
+  explainVisibility,
+  type VisibilityExplanation,
+  type WantedVisibility,
+} from './explain.ts';
+import {
   inspectHarness,
   inspectHarnesses,
   planHarnessOperation,
@@ -74,6 +80,7 @@ const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the sour
   skillspub ls [--target T] [--tag T]  skill × Target matrix (+ untagged/deadlink hints)
   skillspub on|off <selector> <target...> [--yes]  update Skill Target relationships
   skillspub status <skill>             per-Target state of one skill
+  skillspub explain <selector> [--harness H] [--want visible|hidden]
   skillspub mirror sync|overwrite|remove|convert <target-id> <slot> [--yes]
   skillspub bundle ls|show|create|add|rm ...
   skillspub tag add|rm|ls ...          manage global resource Tags
@@ -81,7 +88,7 @@ const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the sour
   skillspub shared find|describe|add|update|remove ...  manage the Shared Target via skills@1.5.21
   skillspub scan                       explicitly scan Global Skill Target inventory
   skillspub doctor [--repair --yes]    diagnose; explicitly confirm safe repairs
-  skillspub project <path> scan|doctor|shared|preset|mirror|harnesses ...  operate on exact Project Skill Targets
+  skillspub project <path> scan|doctor|explain|shared|preset|mirror|harnesses ...  operate on exact Project Skill Targets
   skillspub targets                    list resolved Skill Targets
   skillspub harnesses [name inspect|setup|reconcile [--yes]]  inspect or configure a Harness
   skillspub migrate targets [--yes]    preview or migrate runtimes.json to targets.json
@@ -169,6 +176,74 @@ function supportsReadOnlyJson(command: string | undefined, args: string[]): bool
     return !actions?.has(args[command === 'harnesses' ? 1 : 0] ?? '');
   }
   return false;
+}
+
+function printExplanation(explanation: VisibilityExplanation): void {
+  const scope = explanation.scope.projectPath
+    ? `Project ${explanation.scope.projectPath}`
+    : 'Global';
+  console.log(`${explanation.resource.name} (${explanation.resource.realPath})`);
+  console.log(`Scope: ${scope}`);
+  for (const harness of explanation.harnesses) {
+    console.log(`\n${harness.name}: ${harness.effectiveVisibility}${harness.detected ? '' : ' (not detected)'}`);
+    console.log(`  support: ${harness.support}`);
+    console.log(`  Shared: ${harness.sharedConsumption.status} — ${harness.sharedConsumption.detail}`);
+    console.log(`  isolation: ${harness.isolation.status} — ${harness.isolation.detail}`);
+    for (const evidence of harness.evidence)
+      console.log(`  evidence: ${evidence.verifiedVersion} ${evidence.url} — ${evidence.detail}`);
+    for (const reason of harness.reasons) console.log(`  reason: ${reason.message}`);
+    for (const warning of harness.warnings) console.log(`  warning: ${warning.message}`);
+    for (const conflict of harness.conflicts) console.log(`  conflict: ${conflict.message}`);
+    for (const root of harness.roots) {
+      console.log(`  ${root.consumption}: ${root.path} — ${root.reason}`);
+      for (const relationship of root.relationships)
+        console.log(`    ${relationship.activation} ${relationship.form} ${relationship.path}${relationship.selected ? ' (selected)' : ''}`);
+    }
+    if (harness.plan) {
+      console.log(`  wanted: ${explanation.wanted}; executable: ${harness.plan.executable}`);
+      for (const step of harness.plan.steps)
+        console.log(`  step: ${step.operation} ${step.targetId}/${step.slot}`);
+      for (const blocker of harness.plan.blockers) console.log(`  blocker: ${blocker.message}`);
+    }
+  }
+}
+
+function cmdExplain(
+  home: ReturnType<typeof defaultHome>,
+  args: string[],
+  projectPath?: string,
+  json = false,
+): VisibilityExplanation {
+  const parsed = parseArgs({
+    args,
+    allowPositionals: true,
+    options: {
+      harness: { type: 'string' },
+      want: { type: 'string' },
+    },
+  });
+  if (parsed.positionals.length !== 1)
+    throw new Error('usage: skillspub explain <selector> [--harness H] [--want visible|hidden]');
+  if (parsed.values.want !== undefined &&
+    parsed.values.want !== 'visible' && parsed.values.want !== 'hidden')
+    throw new Error('usage: --want must be visible or hidden');
+  try {
+    const result = explainVisibility(home, parsed.positionals[0], {
+      projectPath,
+      harness: parsed.values.harness,
+      want: parsed.values.want as WantedVisibility | undefined,
+    });
+    if (!json) printExplanation(result);
+    return result;
+  } catch (error) {
+    if (!(error instanceof ExplainError)) throw error;
+    throw new CliError(
+      error.code,
+      error.message,
+      error.code === 'unknown_harness' ? 2 : 1,
+      error.details,
+    );
+  }
 }
 
 function pad(s: string, n: number): string {
@@ -989,6 +1064,9 @@ async function main(
       case 'status':
         data = cmdStatus(home, rest, json);
         break;
+      case 'explain':
+        data = cmdExplain(home, rest, undefined, json);
+        break;
       case 'mirror':
         cmdMirror(home, rest);
         break;
@@ -1019,13 +1097,15 @@ async function main(
         break;
       case 'project': {
         const [projectPath, projectCommand, ...projectArgs] = rest;
-        if (!projectPath) throw new Error('usage: skillspub project <path> scan|doctor|shared|preset|mirror|harnesses');
+        if (!projectPath) throw new Error('usage: skillspub project <path> scan|doctor|explain|shared|preset|mirror|harnesses');
         if (projectCommand === 'scan' && projectArgs.length === 0) {
           const report = scanProjectInventory(home, projectPath, undefined, { persist: false });
           if (json) data = report;
           else printScan(report);
         } else if (projectCommand === 'doctor')
           data = cmdDoctor(home, projectArgs, projectPath, json);
+        else if (projectCommand === 'explain')
+          data = cmdExplain(home, projectArgs, projectPath, json);
         else if (projectCommand === 'shared')
           data = cmdShared(home, projectArgs, projectPath, json);
         else if (projectCommand === 'preset')
@@ -1033,7 +1113,7 @@ async function main(
         else if (projectCommand === 'mirror') cmdMirror(home, projectArgs, projectPath);
         else if (projectCommand === 'harnesses')
           data = cmdHarnesses(home, projectArgs, projectPath, json);
-        else throw new Error('usage: skillspub project <path> scan|doctor|shared|preset|mirror|harnesses');
+        else throw new Error('usage: skillspub project <path> scan|doctor|explain|shared|preset|mirror|harnesses');
         break;
       }
       case 'targets':
