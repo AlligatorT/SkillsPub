@@ -44,6 +44,173 @@ test('ls prints matrix, off moves skill, status shows per-agent state', () => {
   assert.ok(fs.existsSync(path.join(skills, 'grilling', 'SKILL.md')));
 });
 
+test('ls --json returns one versioned document and no stderr', () => {
+  const { configDir } = setup();
+  const result = spawnSync('node', [CLI, 'ls', '--json'], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, '');
+  assert.equal(result.stdout.trim().split('\n').length, 1);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    schemaVersion: 1,
+    ok: true,
+    data: {
+      targets: ['a'],
+      rows: [{
+        name: 'grilling',
+        resourceId: fs.realpathSync(path.join(configDir, 'skills', 'grilling')),
+        relationships: [{ target: 'a', slot: 'grilling', presence: 'on', form: 'local' }],
+      }],
+      deadlinks: [],
+      untagged: ['grilling'],
+      warnings: [],
+    },
+  });
+});
+
+test('read-only inventory commands return only successful JSON envelopes', () => {
+  const { configDir } = setup();
+  const project = path.join(configDir, 'project');
+  fs.mkdirSync(project);
+  const commands = [
+    ['status', 'grilling'],
+    ['targets'],
+    ['scan'],
+    ['doctor'],
+    ['harnesses'],
+    ['bundle', 'ls'],
+    ['tag', 'ls'],
+    ['preset', 'ls'],
+    ['project', project, 'scan'],
+    ['project', project, 'doctor'],
+    ['project', project, 'harnesses'],
+    ['project', project, 'preset', 'ls'],
+  ];
+
+  for (const args of commands) {
+    const result = spawnSync('node', [CLI, ...args, '--json'], {
+      encoding: 'utf8',
+      env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+    });
+    assert.equal(result.status, 0, `${args.join(' ')}: ${result.stderr || result.stdout}`);
+    assert.equal(result.stderr, '', args.join(' '));
+    assert.equal(result.stdout.trim().split('\n').length, 1, args.join(' '));
+    const document = JSON.parse(result.stdout);
+    assert.equal(document.schemaVersion, 1, args.join(' '));
+    assert.equal(document.ok, true, args.join(' '));
+    assert.notEqual(document.data, undefined, args.join(' '));
+  }
+});
+
+test('read-only catalog and Harness detail commands return JSON data', () => {
+  const { configDir } = setup();
+  const project = path.join(configDir, 'project');
+  fs.mkdirSync(project);
+  const resource = fs.realpathSync(path.join(configDir, 'skills', 'grilling'));
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+  for (const args of [
+    ['bundle', 'create', 'tools', `skill:${resource}`],
+    ['tag', 'add', `skill:${resource}`, 'backend'],
+    ['preset', 'create', 'work', `skill:${resource}`],
+  ]) {
+    const result = run(args);
+    assert.equal(result.status, 0, `${args.join(' ')}: ${result.stderr}`);
+  }
+
+  const commands = [
+    ['bundle', 'show', 'tools'],
+    ['tag', 'ls', '--skill', `skill:${resource}`],
+    ['preset', 'show', 'work'],
+    ['harnesses', 'pi', 'inspect'],
+    ['project', project, 'harnesses', 'pi', 'inspect'],
+    ['project', project, 'preset', 'show', 'work'],
+  ];
+  for (const args of commands) {
+    const result = run([...args, '--json']);
+    assert.equal(result.status, 0, `${args.join(' ')}: ${result.stderr || result.stdout}`);
+    assert.equal(result.stderr, '', args.join(' '));
+    const document = JSON.parse(result.stdout);
+    assert.equal(document.schemaVersion, 1);
+    assert.equal(document.ok, true);
+    assert.ok(document.data);
+  }
+});
+
+test('JSON findings and warnings remain successful data', () => {
+  const { configDir } = setup();
+  fs.symlinkSync('/missing/skill', path.join(configDir, 'skills', 'broken'));
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args, '--json'], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+
+  const scan = run(['scan']);
+  assert.equal(scan.status, 0, scan.stderr);
+  assert.equal(scan.stderr, '');
+  const scanDocument = JSON.parse(scan.stdout);
+  assert.equal(scanDocument.ok, true);
+  assert.ok(scanDocument.data.inventory.findings.some(
+    (finding: { category: string }) => finding.category === 'structural',
+  ));
+
+  const legacy = run(['ls', '--agent', 'a']);
+  assert.equal(legacy.status, 0, legacy.stderr);
+  assert.equal(legacy.stderr, '');
+  assert.deepEqual(JSON.parse(legacy.stdout).data.warnings, [
+    '--agent is deprecated; use --target',
+  ]);
+});
+
+test('JSON mode separates usage, domain, and runtime failures', () => {
+  const { configDir } = setup();
+  const other = path.join(configDir, 'other');
+  fs.mkdirSync(path.join(other, 'grilling'), { recursive: true });
+  fs.writeFileSync(path.join(other, 'grilling', 'SKILL.md'), '# other');
+  fs.writeFileSync(
+    path.join(configDir, 'agents.conf'),
+    `a = ${path.join(configDir, 'skills')}\nb = ${other}\n`,
+  );
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+  const assertError = (args: string[], status: number, code: string) => {
+    const result = run([...args, '--json']);
+    assert.equal(result.status, status, `${args.join(' ')}: ${result.stderr || result.stdout}`);
+    assert.equal(result.stderr, '', args.join(' '));
+    assert.equal(result.stdout.trim().split('\n').length, 1, args.join(' '));
+    const document = JSON.parse(result.stdout);
+    assert.equal(document.schemaVersion, 1);
+    assert.equal(document.ok, false);
+    assert.equal(document.error.code, code);
+    assert.equal(typeof document.error.message, 'string');
+    return document.error;
+  };
+
+  const ambiguous = assertError(['status', 'grilling'], 1, 'ambiguous_selector');
+  assert.equal(ambiguous.details.matches.length, 2);
+  const selected = run(['status', ambiguous.details.matches[0].selector, '--json']);
+  assert.equal(selected.status, 0, selected.stderr || selected.stdout);
+  assert.equal(JSON.parse(selected.stdout).data.resourceId, ambiguous.details.matches[0].location);
+  assertError(['status'], 2, 'usage_error');
+  assertError(['status', 'grilling', 'extra'], 2, 'usage_error');
+  assertError(['ls', '--bogus'], 2, 'usage_error');
+  assertError(['shared', 'describe', '-x'], 2, 'usage_error');
+  assertError(['bogus'], 2, 'usage_error');
+  assertError([], 2, 'usage_error');
+  assertError(['tui'], 2, 'usage_error');
+  assertError(['on', 'grilling', 'a'], 2, 'json_not_supported');
+
+  fs.writeFileSync(path.join(configDir, 'targets.json'), '{');
+  assertError(['targets'], 1, 'runtime_error');
+});
+
 test('ls uses --target and preserves --agent as a deprecated alias', () => {
   const { configDir } = setup();
   const run = (args: string[]) => spawnSync('node', [CLI, ...args], {
@@ -128,20 +295,21 @@ test('explicit tui rejects non-TTY and unexpected arguments clearly', () => {
   assert.doesNotMatch(nonTty.stderr, /\x1b/);
 
   const extra = runProcess(['tui', 'extra']);
-  assert.equal(extra.status, 1);
+  assert.equal(extra.status, 2);
   assert.match(extra.stderr, /skillspub: usage: skillspub tui/);
 });
 
 test('renamed diagnostics use only the canonical identity', () => {
   const result = runProcess(['on']);
-  assert.equal(result.status, 1);
+  assert.equal(result.status, 2);
   assert.match(result.stderr, /skillspub: usage: skillspub on/);
   assert.doesNotMatch(result.stderr, /\bskm\b/);
 });
 
-test('unknown command prints usage and exits 1', () => {
-  const { run } = setup();
-  assert.throws(() => run(['bogus']));
+test('unknown command prints usage and exits 2', () => {
+  const result = runProcess(['bogus']);
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /^SkillsPub/);
 });
 
 test('scan reports live findings without persisting read-only state', () => {

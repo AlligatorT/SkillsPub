@@ -34,10 +34,12 @@ const command = args[2];
 const sanitize = (name) => name.toLowerCase().replace(/[^a-z0-9._]+/g, '-').replace(/^[.\\-]+|[.\\-]+$/g, '').substring(0, 255) || 'unnamed-skill';
 if (command === 'find') {
   process.stdout.write(process.env.NPX_STDOUT || '');
+  process.stderr.write(process.env.NPX_STDERR || '');
   process.exit(Number(process.env.NPX_FAIL || 0));
 }
 if (command === 'add' && args.includes('--list')) {
   process.stdout.write(process.env.NPX_STDOUT || '');
+  process.stderr.write(process.env.NPX_STDERR || '');
   process.exit(Number(process.env.NPX_FAIL || 0));
 }
 const global = args.includes('--global');
@@ -172,6 +174,46 @@ test('shared find preserves source + name candidates and falls back to raw outpu
   assert.match(result.stdout, /one\/repo@same\t12K installs/);
   assert.match(result.stdout, /two\/repo@same\t8 installs/);
   assert.deepEqual(calls()[0].args, ['--yes', PACKAGE, 'find', 'test query']);
+});
+
+test('shared read-only commands return structured JSON without stream leakage', () => {
+  const { root, run } = setup();
+  const project = path.join(root, 'project');
+  fs.mkdirSync(project);
+  const output = fs.readFileSync(path.join(FIXTURES, 'find-output.txt'), 'utf8');
+  const commands = [
+    ['shared', 'find', 'same'],
+    ['shared', 'describe', 'owner/repo'],
+    ['project', project, 'shared', 'find', 'same'],
+    ['project', project, 'shared', 'describe', 'owner/repo'],
+  ];
+
+  for (const args of commands) {
+    const result = run([...args, '--json'], {
+      NPX_STDOUT: args.includes('find') ? `\x1b[31m${output}\x1b[0m` : '\x1b[31mAvailable Skills\x1b[0m\n',
+      NPX_STDERR: '\x1b[33mupstream warning\x1b[0m\n',
+    });
+    assert.equal(result.status, 0, `${args.join(' ')}: ${result.stderr || result.stdout}`);
+    assert.equal(result.stderr, '', args.join(' '));
+    assert.equal(result.stdout.trim().split('\n').length, 1, args.join(' '));
+    const document = JSON.parse(result.stdout);
+    assert.equal(document.schemaVersion, 1);
+    assert.equal(document.ok, true);
+    assert.deepEqual(document.data.warnings, ['upstream warning']);
+    assert.doesNotMatch(result.stdout, /\x1b/);
+    if (args.includes('find')) assert.equal(document.data.candidates.length, 2);
+    else assert.equal(document.data.output, 'Available Skills\n');
+  }
+
+  const fallback = run(['shared', 'find', 'changed', '--json'], {
+    NPX_STDOUT: '\x1b]8;;https://example.com\x07changed upstream output\x1b]8;;\x07',
+  });
+  assert.equal(fallback.status, 0, fallback.stderr);
+  assert.equal(fallback.stderr, '');
+  const fallbackData = JSON.parse(fallback.stdout).data;
+  assert.deepEqual(fallbackData.candidates, []);
+  assert.equal(fallbackData.raw, 'changed upstream output');
+  assert.doesNotMatch(fallback.stdout, /\x1b/);
 });
 
 test('shared add writes only the Global or exact Project Shared Target', () => {

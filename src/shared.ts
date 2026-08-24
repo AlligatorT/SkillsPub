@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { stripVTControlCharacters } from 'node:util';
 import {
   hashDirectory,
   loadTargets,
@@ -26,6 +27,7 @@ import {
   runNpxSkills,
   sameNpxSkillsSource,
   type NpxManagedSkill,
+  type NpxSkillsCandidate,
   type NpxSkillsRunResult,
 } from './npx-skills.ts';
 import type { Home } from './core.ts';
@@ -34,6 +36,19 @@ import type { Home } from './core.ts';
 export interface SharedCommandResult {
   actual: string;
   drift: string[];
+}
+
+export interface SharedFindResult {
+  candidates: NpxSkillsCandidate[];
+  complete: boolean;
+  raw?: string;
+  warnings: string[];
+}
+
+export interface SharedDescribeResult {
+  source: string;
+  output: string;
+  warnings: string[];
 }
 
 interface Target {
@@ -400,25 +415,58 @@ function updateBaseIntent(target: Target, slots: string[], value?: 'on'): void {
   writeStateFile(target.report.stateFile, { ...state, baseIntent });
 }
 
-export function sharedFind(home: Home, query: string[], projectPath?: string): void {
+function cleanOutput(output: string): string {
+  return stripVTControlCharacters(output);
+}
+
+function outputWarnings(stderr: string): string[] {
+  return cleanOutput(stderr).split(/\r?\n/).filter(Boolean);
+}
+
+export function sharedFind(
+  home: Home,
+  query: string[],
+  projectPath?: string,
+  write = true,
+): SharedFindResult {
   if (query.length === 0) throw new Error('usage: skillspub shared find <query>');
   const target = resolveTarget(home, projectPath);
   const result = runNpxSkills(npxSkillsFindArgs(query), target.cwd, true);
-  if (result.stderr) process.stderr.write(result.stderr);
+  if (write && result.stderr) process.stderr.write(result.stderr);
   const parsed = parseNpxSkillsFindOutput(result.stdout);
-  if (!parsed.complete || parsed.candidates.length === 0) process.stdout.write(result.stdout);
-  else for (const candidate of parsed.candidates)
-    console.log(`${candidate.source}@${candidate.name}\t${candidate.installs ?? ''}\t${candidate.detailUrl}`);
+  if (write) {
+    if (!parsed.complete || parsed.candidates.length === 0) process.stdout.write(result.stdout);
+    else for (const candidate of parsed.candidates)
+      console.log(`${candidate.source}@${candidate.name}\t${candidate.installs ?? ''}\t${candidate.detailUrl}`);
+  }
   if (result.status !== 0) throw new Error(`skills find failed (exit ${result.status})`);
+  return {
+    candidates: parsed.candidates,
+    complete: parsed.complete,
+    ...(!parsed.complete || parsed.candidates.length === 0
+      ? { raw: cleanOutput(parsed.raw) }
+      : {}),
+    warnings: outputWarnings(result.stderr),
+  };
 }
 
-export function sharedDescribe(home: Home, source: string, projectPath?: string): void {
+export function sharedDescribe(
+  home: Home,
+  source: string,
+  projectPath?: string,
+  write = true,
+): SharedDescribeResult {
   validateSource(source);
   const target = resolveTarget(home, projectPath);
   const result = runNpxSkills(npxSkillsDescribeArgs(source), target.cwd, true);
-  if (result.stdout) process.stdout.write(result.stdout);
-  if (result.stderr) process.stderr.write(result.stderr);
+  if (write && result.stdout) process.stdout.write(result.stdout);
+  if (write && result.stderr) process.stderr.write(result.stderr);
   if (result.status !== 0) throw new Error(`skills description lookup failed (exit ${result.status})`);
+  return {
+    source,
+    output: cleanOutput(result.stdout),
+    warnings: outputWarnings(result.stderr),
+  };
 }
 
 /** One guarded Shared Target operation: snapshot Desired state, make Slots visible,

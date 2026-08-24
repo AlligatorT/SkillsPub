@@ -35,6 +35,8 @@ import {
   planSharedRemove,
   sharedRemove,
   sharedUpdate,
+  type SharedDescribeResult,
+  type SharedFindResult,
 } from './shared.ts';
 import {
   addBundleMembers,
@@ -98,6 +100,77 @@ export function shouldRunTui(
 
 const CELL: Record<string, string> = { on: 'on', off: 'off', deadlink: '!' };
 
+type JsonData = Record<string, unknown>;
+
+class CliError extends Error {
+  readonly code: string;
+  readonly exitCode: 1 | 2;
+  readonly details?: JsonData;
+
+  constructor(code: string, message: string, exitCode: 1 | 2, details?: JsonData) {
+    super(message);
+    this.code = code;
+    this.exitCode = exitCode;
+    this.details = details;
+  }
+}
+
+interface LsData extends JsonData {
+  targets: string[];
+  rows: Array<{
+    name: string;
+    resourceId: string;
+    relationships: Array<{
+      target: string;
+      slot: string;
+      presence: string;
+      form: string;
+    }>;
+  }>;
+  deadlinks: string[];
+  untagged: string[];
+  warnings: string[];
+}
+
+function writeJson(document: JsonData): void {
+  process.stdout.write(`${JSON.stringify(document)}\n`);
+}
+
+function errorInfo(error: unknown): {
+  code: string;
+  exitCode: 1 | 2;
+  details: JsonData;
+} {
+  if (error instanceof CliError)
+    return { code: error.code, exitCode: error.exitCode, details: error.details ?? {} };
+  const err = error as Error & { code?: string };
+  return err.code?.startsWith('ERR_PARSE_ARGS') || err.message.startsWith('usage:')
+    ? { code: 'usage_error', exitCode: 2, details: {} }
+    : { code: 'runtime_error', exitCode: 1, details: {} };
+}
+
+const MUTATING_COMMANDS = new Set(['on', 'off', 'mirror', 'migrate']);
+const MUTATING_ACTIONS: Record<string, ReadonlySet<string>> = {
+  harnesses: new Set(['setup', 'reconcile']),
+  bundle: new Set(['create', 'add', 'rm']),
+  tag: new Set(['add', 'rm']),
+  preset: new Set(['create', 'add', 'rm', 'activate', 'deactivate', 'reconcile', 'delete']),
+  shared: new Set(['add', 'update', 'remove']),
+};
+
+function supportsReadOnlyJson(command: string | undefined, args: string[]): boolean {
+  if (command === 'project') {
+    const [, projectCommand, ...projectArgs] = args;
+    return supportsReadOnlyJson(projectCommand, projectArgs);
+  }
+  if (!command || !MUTATING_COMMANDS.has(command)) {
+    if (command === 'doctor') return !args.includes('--repair');
+    const actions = MUTATING_ACTIONS[command ?? ''];
+    return !actions?.has(args[command === 'harnesses' ? 1 : 0] ?? '');
+  }
+  return false;
+}
+
 function pad(s: string, n: number): string {
   return s + ' '.repeat(Math.max(0, n - s.length));
 }
@@ -122,9 +195,13 @@ function printMatrix(rows: Row[], targetNames: string[]): void {
   }
 }
 
-function matchingInstances(rows: Row[], name: string): Row[] {
+function matchingInstances(rows: Row[], selector: string): Row[] {
+  if (selector.startsWith('skill:')) {
+    const resourceId = selector.slice('skill:'.length);
+    return rows.filter((row) => row.realPath === resourceId);
+  }
   return rows.filter((row) =>
-    row.relationships.some((relationship) => relationship.name === name),
+    row.relationships.some((relationship) => relationship.name === selector),
   );
 }
 
@@ -136,78 +213,94 @@ function variantLocation(row: Row): string {
 function refuseAmbiguousName(rows: Row[], name: string): void {
   const matches = matchingInstances(rows, name);
   if (matches.length < 2) return;
-  throw new Error(
+  const details = {
+    name,
+    matches: matches.map((row) => ({
+      name: row.displayName,
+      selector: `skill:${row.realPath ?? variantLocation(row)}`,
+      location: variantLocation(row),
+    })),
+  };
+  throw new CliError(
+    'ambiguous_selector',
     `skill name "${name}" is ambiguous:\n${matches
       .map((row) => `  - ${row.displayName}: ${variantLocation(row)}`)
       .join('\n')}\nUse skillspub tui to select a specific variant.`,
+    1,
+    details,
   );
 }
 
-function cmdLs(home: ReturnType<typeof defaultHome>, args: string[]): void {
+function cmdLs(
+  home: ReturnType<typeof defaultHome>,
+  args: string[],
+  json = false,
+): LsData | undefined {
   const { values } = parseArgs({
     args,
     options: { target: { type: 'string' }, agent: { type: 'string' }, tag: { type: 'string' } },
   });
   if (values.target && values.agent)
     throw new Error('usage: skillspub ls [--target T] [--tag T]');
-  if (values.agent) console.error('warning: --agent is deprecated; use --target');
+  const warnings = values.agent ? ['--agent is deprecated; use --target'] : [];
+  if (!json && warnings.length > 0) console.error(`warning: ${warnings[0]}`);
   const target = values.target ?? values.agent;
-  if (values.tag && !target) {
-    const report = scanGlobalInventory(home, undefined, { persist: false });
-    let selected: Set<string>;
-    try {
-      selected = new Set(expandSelector(home, `tag:${values.tag}`, report).resourceIds);
-    } catch (error) {
-      if ((error as Error).message === `unknown Tag: ${values.tag}`) {
-        console.log('no skills found');
-        return;
-      }
-      throw error;
-    }
-    const counts = new Map<string, number>();
-    for (const resource of report.resources)
-      counts.set(resource.name, (counts.get(resource.name) ?? 0) + 1);
-    const resources = report.resources.filter(({ id }) => selected.has(id));
-    if (resources.length === 0) {
-      console.log('no skills found');
-      return;
-    }
-    for (const resource of resources) {
-      const name = counts.get(resource.name) === 1
-        ? resource.name
-        : `${resource.name} (${resource.id})`;
-      const relationships = resource.relationships
-        .map(({ targetId, slot, activation }) => `${targetId}/${slot}:${activation}`)
-        .join(', ');
-      console.log(`${name}\tskill:${resource.id}\t${relationships}`);
-    }
-    return;
-  }
   const report = scanGlobalInventory(home, undefined, { persist: false });
   const targets = viewTargets(report);
   if (target && !targets.some((candidate) => candidate.name === target))
-    throw new Error(`unknown target: ${target}`);
+    throw new CliError('unknown_target', `unknown target: ${target}`, 1, { target });
   const { tags } = readViewState(home);
-  const rows = filterRows(
-    projectRows(report),
-    { target, tag: values.tag },
-    tags,
-  );
-  const cols = target ? [target] : targets.map((candidate) => candidate.name);
-  if (rows.length === 0) {
-    console.log('no skills found');
-    return;
+  let rows = filterRows(projectRows(report), { target, tag: values.tag }, tags);
+  if (values.tag && !target) {
+    try {
+      const selected = new Set(expandSelector(home, `tag:${values.tag}`, report).resourceIds);
+      rows = rows.filter((row) => row.realPath && selected.has(row.realPath));
+    } catch (error) {
+      if ((error as Error).message !== `unknown Tag: ${values.tag}`) throw error;
+      rows = [];
+    }
   }
-  printMatrix(rows, cols);
-  const dead = rows.flatMap((row) =>
+  const cols = target ? [target] : targets.map((candidate) => candidate.name);
+  const deadlinks = rows.flatMap((row) =>
     row.relationships
       .filter(({info}) => info.presence === 'deadlink')
       .map(({target, name, info}) => `${target}/${name} -> ${info.target ?? '?'}`),
   );
-  const unt = untagged(rows, tags);
-  if (dead.length > 0) console.log(`\n死链 (doctor 清理): ${dead.join(', ')}`);
-  if (unt.length > 0)
-    console.log(`未分类 (skillspub tag add): ${unt.join(', ')}`);
+  const untaggedRows = untagged(rows, tags);
+  const data: LsData = {
+    targets: cols,
+    rows: rows.map((row) => ({
+      name: row.displayName,
+      resourceId: row.realPath ?? row.relationships[0].info.path,
+      relationships: row.relationships.map(({ target, name, info }) => ({
+        target,
+        slot: name,
+        presence: info.presence,
+        form: info.form,
+      })),
+    })),
+    deadlinks,
+    untagged: untaggedRows,
+    warnings,
+  };
+  if (json) return data;
+  if (rows.length === 0) {
+    console.log('no skills found');
+    return;
+  }
+  if (values.tag && !target) {
+    for (const row of data.rows) {
+      const relationships = row.relationships
+        .map(({ target, slot, presence }) => `global:${target}/${slot}:${presence}`)
+        .join(', ');
+      console.log(`${row.name}\tskill:${row.resourceId}\t${relationships}`);
+    }
+    return;
+  }
+  printMatrix(rows, cols);
+  if (deadlinks.length > 0) console.log(`\n死链 (doctor 清理): ${deadlinks.join(', ')}`);
+  if (untaggedRows.length > 0)
+    console.log(`未分类 (skillspub tag add): ${untaggedRows.join(', ')}`);
 }
 
 function cmdOnOff(
@@ -277,18 +370,42 @@ function cmdMirror(home: ReturnType<typeof defaultHome>, args: string[], project
 function cmdStatus(
   home: ReturnType<typeof defaultHome>,
   args: string[],
-): void {
+  json = false,
+): JsonData | undefined {
   const [skill] = args;
-  if (!skill) throw new Error('usage: skillspub status <skill>');
+  if (!skill || args.length !== 1) throw new Error('usage: skillspub status <skill>');
   const report = scanGlobalInventory(home, undefined, { persist: false });
   const targets = viewTargets(report);
   const matches = matchingInstances(projectRows(report), skill);
   if (matches.length === 0) {
+    if (json) throw new CliError(
+      'resource_not_found',
+      `${skill} not found in any Target`,
+      1,
+      { selector: skill },
+    );
     console.error(`warning: ${skill} not found in any Target`);
     process.exitCode = 1;
     return;
   }
   refuseAmbiguousName(matches, skill);
+  if (json) {
+    const instance = matches[0];
+    return {
+      name: skill,
+      resourceId: instance.realPath ?? variantLocation(instance),
+      targets: targets.map((target) => ({
+        target: target.name,
+        relationships: relationships(instance, target.name).map(({ name, info }) => ({
+          slot: name,
+          presence: info.presence,
+          form: info.form,
+          path: info.path,
+          ...(info.target ? { linkTarget: info.target } : {}),
+        })),
+      })),
+    };
+  }
   for (const [index, instance] of matches.entries()) {
     if (matches.length > 1) {
       if (index > 0) console.log('');
@@ -308,9 +425,15 @@ function cmdStatus(
   }
 }
 
-function cmdTargets(home: ReturnType<typeof defaultHome>, args: string[]): void {
+function cmdTargets(
+  home: ReturnType<typeof defaultHome>,
+  args: string[],
+  json = false,
+): ReturnType<typeof loadTargets> | undefined {
   if (args.length > 0) throw new Error('usage: skillspub targets');
-  for (const target of loadTargets(home)) {
+  const targets = loadTargets(home);
+  if (json) return targets;
+  for (const target of targets) {
     console.log([
       target.key,
       target.kind,
@@ -344,11 +467,13 @@ function cmdHarnesses(
   home: ReturnType<typeof defaultHome>,
   args: string[],
   projectPath?: string,
-): void {
+  json = false,
+): ReturnType<typeof inspectHarnesses> | ReturnType<typeof inspectHarness> | undefined {
   const targets = loadTargets(home);
   const selectedProject = projectPath ? fs.realpathSync(projectPath) : undefined;
   if (args.length === 0) {
     const report = inspectHarnesses(home, targets, selectedProject);
+    if (json) return report;
     printHarnesses('Detected Harnesses:', report.detected);
     printHarnesses('Available Harnesses:', report.available);
     return;
@@ -358,7 +483,9 @@ function cmdHarnesses(
     rest.some((arg) => arg !== '--yes') || (action === 'inspect' && rest.length > 0))
     throw new Error('usage: skillspub harnesses [name inspect|setup|reconcile [--yes]]');
   if (action === 'inspect') {
-    printHarnesses(`${harness} Harness:`, [inspectHarness(harness, home, targets, selectedProject)]);
+    const inspection = inspectHarness(harness, home, targets, selectedProject);
+    if (json) return inspection;
+    printHarnesses(`${harness} Harness:`, [inspection]);
     return;
   }
   const plan = planHarnessOperation(
@@ -413,7 +540,11 @@ function prepareGlobalMutation(home: ReturnType<typeof defaultHome>): void {
   scanGlobalInventory(home);
 }
 
-function cmdTag(home: ReturnType<typeof defaultHome>, args: string[]): void {
+function cmdTag(
+  home: ReturnType<typeof defaultHome>,
+  args: string[],
+  json = false,
+): ReturnType<typeof tagsForResource> | ReturnType<typeof listTags> | undefined {
   const [action, resource, ...names] = args;
   switch (action) {
     case 'add': {
@@ -438,11 +569,13 @@ function cmdTag(home: ReturnType<typeof defaultHome>, args: string[]): void {
       });
       if (values.skill) {
         const resourceTags = tagsForResource(home, values.skill);
+        if (json) return resourceTags;
         console.log(`${resourceTags.name ?? resourceTags.id}\tskill:${resourceTags.id}${resourceTags.stale ? '\tstale' : ''}`);
         if (resourceTags.tags.length === 0) console.log('  no tags');
         else for (const tag of resourceTags.tags) console.log(`  ${tag}`);
       } else {
         const tags = listTags(home);
+        if (json) return tags;
         if (tags.length === 0) console.log('no tags found');
         else for (const tag of tags) console.log(`${tag.name}\t${tag.resources}`);
       }
@@ -498,13 +631,15 @@ function cmdPreset(
   home: ReturnType<typeof defaultHome>,
   args: string[],
   projectPath?: string,
-): void {
+  json = false,
+): JsonData | ReturnType<typeof listPresets> | undefined {
   const scope: PresetScope = projectPath ? { projectPath } : {};
   const [action, name, ...rest] = args;
   switch (action) {
     case 'ls': {
       if (name) throw new Error('usage: skillspub preset ls');
       const presets = listPresets(home);
+      if (json) return presets;
       if (presets.length === 0) console.log('no presets found');
       else for (const preset of presets)
         console.log(`${preset.name}\t${preset.selectors}`);
@@ -513,8 +648,9 @@ function cmdPreset(
     case 'show': {
       if (!name || rest.length > 0)
         throw new Error('usage: skillspub preset show <name>');
-      console.log(name);
       const selectors = showPreset(home, name);
+      if (json) return { name, selectors };
+      console.log(name);
       if (selectors.length === 0) console.log('  no selectors');
       else for (const item of selectors) console.log(`  ${item.selector}`);
       break;
@@ -581,12 +717,17 @@ function cmdPreset(
   }
 }
 
-function cmdBundle(home: ReturnType<typeof defaultHome>, args: string[]): void {
+function cmdBundle(
+  home: ReturnType<typeof defaultHome>,
+  args: string[],
+  json = false,
+): JsonData | ReturnType<typeof listBundles> | undefined {
   const [action, name, ...selectors] = args;
   switch (action) {
     case 'ls': {
       if (name) throw new Error('usage: skillspub bundle ls');
       const bundles = listBundles(home);
+      if (json) return bundles;
       if (bundles.length === 0) console.log('no bundles found');
       else for (const bundle of bundles) console.log(`${bundle.name}\t${bundle.members}`);
       break;
@@ -594,8 +735,9 @@ function cmdBundle(home: ReturnType<typeof defaultHome>, args: string[]): void {
     case 'show': {
       if (!name || selectors.length > 0)
         throw new Error('usage: skillspub bundle show <name>');
-      console.log(name);
       const members = showBundle(home, name);
+      if (json) return { name, members };
+      console.log(name);
       if (members.length === 0) console.log('  no members');
       else for (const member of members) {
         console.log(`  ${member.name ?? member.id}\tskill:${member.id}${member.stale ? '\tstale' : ''}`);
@@ -635,17 +777,16 @@ function cmdShared(
   home: ReturnType<typeof defaultHome>,
   args: string[],
   projectPath?: string,
-): void {
+  json = false,
+): SharedFindResult | SharedDescribeResult | undefined {
   const [action, ...rest] = args;
   switch (action) {
     case 'find':
-      sharedFind(home, rest, projectPath);
-      break;
+      return sharedFind(home, rest, projectPath, !json);
     case 'describe':
-      if (rest.length !== 1)
+      if (rest.length !== 1 || rest[0].startsWith('-'))
         throw new Error('usage: skillspub shared describe <source>');
-      sharedDescribe(home, rest[0], projectPath);
-      break;
+      return sharedDescribe(home, rest[0], projectPath, !json);
     case 'add': {
       const { values, positionals } = parseArgs({
         args: rest,
@@ -727,7 +868,8 @@ function cmdDoctor(
   home: ReturnType<typeof defaultHome>,
   args: string[],
   projectPath?: string,
-): void {
+  json = false,
+): DoctorReport | undefined {
   const { values } = parseArgs({
     args,
     options: {
@@ -742,6 +884,7 @@ function cmdDoctor(
     ? doctorProjectInventory(home, projectPath)
     : doctorGlobalInventory(home);
   const report = diagnose();
+  if (json) return report;
   printDoctor(report);
   if (!values.repair || report.repairs.length === 0) return;
   if (!values.yes)
@@ -811,10 +954,20 @@ async function main(
   stdinIsTty = Boolean(process.stdin.isTTY),
   stdoutIsTty = Boolean(process.stdout.isTTY),
 ): Promise<void> {
-  const [cmd, ...rest] = args;
+  const json = args.includes('--json');
+  const [cmd, ...rest] = args.filter((arg) => arg !== '--json');
   const home = defaultHome({ migrate: false });
   try {
-    if (shouldRunTui(cmd, stdinIsTty, stdoutIsTty)) {
+    let data: unknown;
+    if (json && cmd === 'tui')
+      throw new CliError('usage_error', 'skillspub tui does not support --json', 2);
+    if (json && !supportsReadOnlyJson(cmd, rest))
+      throw new CliError(
+        'json_not_supported',
+        'JSON mode for mutating commands is not available yet',
+        2,
+      );
+    if (!json && shouldRunTui(cmd, stdinIsTty, stdoutIsTty)) {
       let projectPath: string | undefined;
       const args = [...rest];
       while (args.length > 0) {
@@ -825,7 +978,7 @@ async function main(
       await (await import('./tui.ts')).runTui(home, { projectPath });
     } else switch (cmd) {
       case 'ls':
-        cmdLs(home, rest);
+        data = cmdLs(home, rest, json);
         break;
       case 'on':
         cmdOnOff(home, true, rest);
@@ -834,62 +987,88 @@ async function main(
         cmdOnOff(home, false, rest);
         break;
       case 'status':
-        cmdStatus(home, rest);
+        data = cmdStatus(home, rest, json);
         break;
       case 'mirror':
         cmdMirror(home, rest);
         break;
       case 'bundle':
-        cmdBundle(home, rest);
+        data = cmdBundle(home, rest, json);
         break;
       case 'tag':
-        cmdTag(home, rest);
+        data = cmdTag(home, rest, json);
         break;
       case 'preset':
-        cmdPreset(home, rest);
+        data = cmdPreset(home, rest, undefined, json);
         break;
       case 'shared':
-        cmdShared(home, rest);
+        data = cmdShared(home, rest, undefined, json);
         break;
       case 'scan': {
         if (rest.length > 0) throw new Error('usage: skillspub scan');
         const report = scanGlobalInventory(home, undefined, { persist: false });
-        printScan(report);
-        printHarnessDrift(home, report.targets);
+        if (json) data = { inventory: report, harnesses: inspectHarnesses(home, report.targets) };
+        else {
+          printScan(report);
+          printHarnessDrift(home, report.targets);
+        }
         break;
       }
       case 'doctor':
-        cmdDoctor(home, rest);
+        data = cmdDoctor(home, rest, undefined, json);
         break;
       case 'project': {
         const [projectPath, projectCommand, ...projectArgs] = rest;
         if (!projectPath) throw new Error('usage: skillspub project <path> scan|doctor|shared|preset|mirror|harnesses');
-        if (projectCommand === 'scan' && projectArgs.length === 0)
-          printScan(scanProjectInventory(home, projectPath, undefined, { persist: false }));
-        else if (projectCommand === 'doctor') cmdDoctor(home, projectArgs, projectPath);
-        else if (projectCommand === 'shared') cmdShared(home, projectArgs, projectPath);
-        else if (projectCommand === 'preset') cmdPreset(home, projectArgs, projectPath);
+        if (projectCommand === 'scan' && projectArgs.length === 0) {
+          const report = scanProjectInventory(home, projectPath, undefined, { persist: false });
+          if (json) data = report;
+          else printScan(report);
+        } else if (projectCommand === 'doctor')
+          data = cmdDoctor(home, projectArgs, projectPath, json);
+        else if (projectCommand === 'shared')
+          data = cmdShared(home, projectArgs, projectPath, json);
+        else if (projectCommand === 'preset')
+          data = cmdPreset(home, projectArgs, projectPath, json);
         else if (projectCommand === 'mirror') cmdMirror(home, projectArgs, projectPath);
-        else if (projectCommand === 'harnesses') cmdHarnesses(home, projectArgs, projectPath);
+        else if (projectCommand === 'harnesses')
+          data = cmdHarnesses(home, projectArgs, projectPath, json);
         else throw new Error('usage: skillspub project <path> scan|doctor|shared|preset|mirror|harnesses');
         break;
       }
       case 'targets':
-        cmdTargets(home, rest);
+        data = cmdTargets(home, rest, json);
         break;
       case 'harnesses':
-        cmdHarnesses(home, rest);
+        data = cmdHarnesses(home, rest, undefined, json);
         break;
       case 'migrate':
         cmdMigrate(home, rest);
         break;
       default:
+        if (json) throw new Error(`usage: ${cmd ? `unknown command ${cmd}` : 'skillspub <command>'}`);
         process.stderr.write(USAGE);
-        process.exit(cmd === undefined ? 0 : 1);
+        process.exitCode = cmd === undefined ? 0 : 2;
+        return;
     }
+    if (json) writeJson({ schemaVersion: 1, ok: true, data });
   } catch (err) {
-    console.error(`skillspub: ${(err as Error).message}`);
-    process.exit(1);
+    if (json) {
+      const { code, exitCode, details } = errorInfo(err);
+      writeJson({
+        schemaVersion: 1,
+        ok: false,
+        error: {
+          code,
+          message: (err as Error).message,
+          details,
+        },
+      });
+      process.exitCode = exitCode;
+    } else {
+      console.error(`skillspub: ${(err as Error).message}`);
+      process.exitCode = errorInfo(err).exitCode;
+    }
   }
 }
 

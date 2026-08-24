@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import { stripVTControlCharacters } from 'node:util';
 
 export const NPX_SKILLS_PACKAGE = 'skills@1.5.21';
 
@@ -28,7 +29,6 @@ export interface NpxSkillsRunResult {
   stderr: string;
 }
 
-const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 const SHARED_TARGET_TRANSPORT = ['--agent', 'codex'];
 
 export function normalizeNpxSkillsName(name: string): string {
@@ -43,7 +43,7 @@ export function parseNpxSkillsFindOutput(raw: string): {
   complete: boolean;
   raw: string;
 } {
-  const lines = raw.replace(ANSI, '').split(/\r?\n/);
+  const lines = stripVTControlCharacters(raw).split(/\r?\n/);
   const candidates: NpxSkillsCandidate[] = [];
   const resultLines = lines.filter((line) =>
     /^\S+@\S+(?:\s+.+ installs)?$/.test(line.trim())).length;
