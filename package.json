@@ -4,18 +4,38 @@
   "description": "SkillsPub multi-agent skills on/off manager — disk is the source of truth",
   "type": "module",
   "files": [
-    "src",
-    "SKILL.md"
+    "dist",
+    "SKILL.md",
+    "README.md",
+    "LICENSE"
   ],
   "bin": {
-    "skillspub": "src/cli.ts"
+    "skillspub": "dist/cli.js"
   },
   "engines": {
-    "node": ">=22.20"
+    "node": ">=22.20.0"
   },
   "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
     "test": "node --test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:package": "node scripts/check-package.mjs",
+    "audit:release": "node scripts/audit-release.mjs",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build && npm run audit:release && npm run check:package"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AlligatorT/SkillsPub.git"
+  },
+  "homepage": "https://github.com/AlligatorT/SkillsPub",
+  "bugs": {
+    "url": "https://github.com/AlligatorT/SkillsPub/issues"
+  },
+  "license": "MIT",
+  "author": "AlligatorT",
+  "publishConfig": {
+    "access": "public"
   },
   "devDependencies": {
     "@types/node": "^22",
