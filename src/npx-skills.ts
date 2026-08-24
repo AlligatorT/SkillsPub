@@ -1,5 +1,8 @@
 import { spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 
 export const NPX_SKILLS_PACKAGE = 'skills@1.5.21';
@@ -21,6 +24,18 @@ export interface NpxManagedSkill {
   name: string;
   slot: string;
   provenance: NpxSkillsProvenance;
+  sourceType?: string;
+  ref?: string;
+  skillFolderHash?: string;
+  computedHash?: string;
+}
+
+export type NpxSkillsUpdateStatus = 'current' | 'available' | 'upstream-missing';
+
+export interface NpxSkillsUpdateCheck {
+  slot: string;
+  status: NpxSkillsUpdateStatus | 'check-failed';
+  error?: string;
 }
 
 export interface NpxSkillsRunResult {
@@ -135,7 +150,9 @@ export function readNpxSkillsLock(file: string): NpxManagedSkill[] {
   const slots = new Set<string>();
   return Object.entries(skills ?? {}).map(([name, entry]) => {
     if (!isRecord(entry)) throw new Error(`${file}: lock skill entry must be an object: ${name}`);
-    for (const field of ['source', 'sourceUrl', 'skillPath'] as const) {
+    for (const field of [
+      'source', 'sourceUrl', 'skillPath', 'sourceType', 'ref', 'skillFolderHash', 'computedHash',
+    ] as const) {
       if (entry[field] !== undefined && typeof entry[field] !== 'string')
         throw new Error(`${file}: lock skill ${name}.${field} must be a string`);
     }
@@ -150,8 +167,109 @@ export function readNpxSkillsLock(file: string): NpxManagedSkill[] {
         sourceUrl: entry.sourceUrl as string | undefined,
         skillPath: entry.skillPath as string | undefined,
       },
+      ...(entry.sourceType ? { sourceType: entry.sourceType as string } : {}),
+      ...(entry.ref ? { ref: entry.ref as string } : {}),
+      ...(entry.skillFolderHash ? { skillFolderHash: entry.skillFolderHash as string } : {}),
+      ...(entry.computedHash ? { computedHash: entry.computedHash as string } : {}),
     };
   });
+}
+
+function sourceLocation(skill: NpxManagedSkill): string | undefined {
+  if (skill.provenance.sourceUrl) return skill.provenance.sourceUrl;
+  const source = skill.provenance.source;
+  if ((!skill.sourceType || skill.sourceType === 'github') && source &&
+      /^[^/\s]+\/[^/\s]+$/.test(source))
+    return `https://github.com/${source}.git`;
+  return undefined;
+}
+
+export function npxSkillsSourceKey(skill: NpxManagedSkill): string | undefined {
+  const location = sourceLocation(skill);
+  return location ? JSON.stringify([location, skill.ref ?? '']) : undefined;
+}
+
+function skillFolder(skillPath: string): string {
+  const normalized = skillPath.replaceAll('\\', '/');
+  if (path.posix.isAbsolute(normalized) || normalized.includes('\0') ||
+      normalized.split('/').some((part) => part === '..') || normalized.includes(':') ||
+      path.posix.basename(normalized).toLowerCase() !== 'skill.md')
+    throw new Error(`unsafe installer skillPath: ${skillPath}`);
+  return path.posix.dirname(normalized);
+}
+
+function computeNpxSkillsFolderHash(root: string): string {
+  const files: Array<{ relativePath: string; content: Buffer }> = [];
+  const visit = (directory: string): void => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (entry.name === '.git' || entry.name === 'node_modules') continue;
+      const file = path.join(directory, entry.name);
+      if (entry.isDirectory()) visit(file);
+      else if (entry.isFile()) files.push({
+        relativePath: path.relative(root, file).split(path.sep).join('/'),
+        content: fs.readFileSync(file),
+      });
+    }
+  };
+  visit(root);
+  files.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+  const hash = crypto.createHash('sha256');
+  for (const file of files) hash.update(file.relativePath).update(file.content);
+  return hash.digest('hex');
+}
+
+export function checkNpxSkillsSource(skills: NpxManagedSkill[]): NpxSkillsUpdateCheck[] {
+  if (skills.length === 0) return [];
+  const source = sourceLocation(skills[0]);
+  const key = npxSkillsSourceKey(skills[0]);
+  if (!source || !key || skills.some((skill) => npxSkillsSourceKey(skill) !== key))
+    throw new Error('installer lock has no consistent remote source');
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-refresh-'));
+  const checkout = path.join(temporary, 'source');
+  try {
+    const args = ['clone', '--quiet', '--depth', '1'];
+    if (skills[0].ref) args.push('--branch', skills[0].ref);
+    args.push('--', source, checkout);
+    const cloned = spawnSync('git', args, {
+      encoding: 'utf8',
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      stdio: 'pipe',
+      timeout: 30_000,
+    });
+    if (cloned.error) throw cloned.error;
+    if (cloned.status !== 0)
+      throw new Error(`git clone failed: ${(cloned.stderr || `exit ${cloned.status ?? 1}`).trim()}`);
+    return skills.map((skill) => {
+      try {
+        const expectedHash = skill.computedHash ?? skill.skillFolderHash;
+        if (!skill.provenance.skillPath || !expectedHash)
+          throw new Error(`${skill.name}: installer lock lacks skillPath or content hash`);
+        const folder = skillFolder(skill.provenance.skillPath);
+        const directory = path.join(checkout, folder);
+        if (!fs.statSync(directory, { throwIfNoEntry: false })?.isDirectory())
+          return { slot: skill.slot, status: 'upstream-missing' };
+        let latestHash: string;
+        if (!skill.computedHash && (!skill.sourceType || skill.sourceType === 'github')) {
+          const revision = folder === '.' ? 'HEAD^{tree}' : `HEAD:${folder}`;
+          const result = spawnSync('git', ['-C', checkout, 'rev-parse', '--verify', revision], {
+            encoding: 'utf8',
+            stdio: 'pipe',
+          });
+          if (result.error) throw result.error;
+          if (result.status !== 0) return { slot: skill.slot, status: 'upstream-missing' };
+          latestHash = result.stdout.trim();
+        } else latestHash = computeNpxSkillsFolderHash(directory);
+        return {
+          slot: skill.slot,
+          status: latestHash === expectedHash ? 'current' : 'available',
+        };
+      } catch (error) {
+        return { slot: skill.slot, status: 'check-failed', error: (error as Error).message };
+      }
+    });
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
 }
 
 function sourceParts(value: string): { source: string; skill?: string } {

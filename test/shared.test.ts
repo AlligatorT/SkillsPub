@@ -22,6 +22,7 @@ function setup() {
   const config = path.join(root, 'config');
   const bin = path.join(root, 'bin');
   const log = path.join(root, 'npx.jsonl');
+  const gitLog = path.join(root, 'git.jsonl');
   fs.mkdirSync(home, { recursive: true });
   fs.mkdirSync(bin, { recursive: true });
   const npx = path.join(bin, 'npx');
@@ -82,12 +83,46 @@ if (command === 'add') {
   fs.writeFileSync(lockFile, JSON.stringify(lock));
 }
 `, { mode: 0o755 });
+  fs.writeFileSync(path.join(bin, 'git'), `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.GIT_LOG, JSON.stringify({ args }) + '\\n');
+const trees = JSON.parse(process.env.GIT_TREES || '{}');
+const files = JSON.parse(process.env.GIT_FILES || '{}');
+if (args[0] === 'clone') {
+  const source = args.at(-2);
+  const destination = args.at(-1);
+  if (!trees[source]) process.exit(1);
+  fs.mkdirSync(destination, { recursive: true });
+  fs.writeFileSync(destination + '.source', source);
+  for (const folder of Object.keys(trees[source]))
+    if (folder !== '.') fs.mkdirSync(path.join(destination, folder), { recursive: true });
+  for (const [file, content] of Object.entries(files[source] || {})) {
+    const destinationFile = path.join(destination, file);
+    fs.mkdirSync(path.dirname(destinationFile), { recursive: true });
+    fs.writeFileSync(destinationFile, content);
+  }
+  process.exit(0);
+}
+if (args[0] === '-C' && args[2] === 'rev-parse') {
+  const source = fs.readFileSync(args[1] + '.source', 'utf8');
+  const revision = args.at(-1);
+  const folder = revision === 'HEAD^{tree}' ? '.' : revision.slice('HEAD:'.length);
+  const hash = trees[source]?.[folder];
+  if (!hash) process.exit(1);
+  process.stdout.write(hash + '\\n');
+  process.exit(0);
+}
+process.exit(2);
+`, { mode: 0o755 });
 
   const env = {
     ...process.env,
     HOME: home,
     SKILLSPUB_CONFIG_DIR: config,
     NPX_LOG: log,
+    GIT_LOG: gitLog,
     PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}`,
   };
   const run = (args: string[], extra: Record<string, string> = {}) =>
@@ -95,7 +130,10 @@ if (command === 'add') {
   const calls = () => fs.existsSync(log)
     ? fs.readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))
     : [];
-  return { root, home, config, log, run, calls };
+  const gitCalls = () => fs.existsSync(gitLog)
+    ? fs.readFileSync(gitLog, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    : [];
+  return { root, home, config, log, gitLog, run, calls, gitCalls };
 }
 
 function writeSkill(root: string, name: string, body = '# skill') {
@@ -422,8 +460,8 @@ test('mutation preflight rejects malformed policy state and non-v3 installer loc
   assert.ok(fs.existsSync(path.join(staleLock.home, '.agents', 'skills', 'managed', 'SKILL.md')));
 });
 
-test('Shared Target operation lock prevents concurrent mutation', () => {
-  const { home, run, calls } = setup();
+test('Shared Target operation lock prevents concurrent mutation or refresh', () => {
+  const { home, run, calls, gitCalls } = setup();
   const lock = path.join(home, '.agents', '.skill-lock.json');
   writeSkill(path.join(home, '.agents', 'skills'), 'managed');
   writeLock(lock, { managed: { source: 'owner/repo' } });
@@ -432,7 +470,11 @@ test('Shared Target operation lock prevents concurrent mutation', () => {
   const result = run(['shared', 'update', 'managed']);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /operation already in progress/);
+  const refresh = run(['shared', 'refresh']);
+  assert.equal(refresh.status, 1);
+  assert.match(refresh.stderr, /operation already in progress/);
   assert.equal(calls().length, 0);
+  assert.equal(gitCalls().length, 0);
 });
 
 test('active Preset claims keep updated skills ON and block remove', () => {
@@ -678,4 +720,200 @@ test('shared remove passes only managed names and leaves external entries untouc
     '--yes', PACKAGE, 'remove', 'managed', '--agent', 'codex', '--global',
   ]);
   assert.equal(calls()[0].args.includes('--all'), false);
+});
+
+test('shared refresh checks each source once and caches per-Skill results without source mutation', () => {
+  const { home, config, run, calls, gitCalls } = setup();
+  const discovery = path.join(home, '.agents', 'skills');
+  const lock = path.join(home, '.agents', '.skill-lock.json');
+  const names = ['current', 'available', 'missing', 'invalid'];
+  for (const name of names) writeSkill(discovery, name, `# ${name}`);
+  const sourceUrl = 'https://github.com/owner/repo.git';
+  writeLock(lock, {
+    current: {
+      source: 'owner/repo', sourceType: 'github', sourceUrl,
+      skillPath: 'SKILL.md', skillFolderHash: 'same-hash',
+    },
+    available: {
+      source: 'owner/repo', sourceType: 'github', sourceUrl,
+      skillPath: 'skills/available/SKILL.md', skillFolderHash: 'old-hash',
+    },
+    missing: {
+      source: 'owner/repo', sourceType: 'github', sourceUrl,
+      skillPath: 'skills/missing/SKILL.md', skillFolderHash: 'missing-hash',
+    },
+    invalid: {
+      source: 'owner/repo', sourceType: 'github', sourceUrl,
+      skillPath: '../invalid/SKILL.md', skillFolderHash: 'invalid-hash',
+    },
+  });
+  const before = {
+    lock: fs.readFileSync(lock, 'utf8'),
+    skills: Object.fromEntries(names.map((name) => [
+      name, hashDirectory(path.join(discovery, name)),
+    ])),
+  };
+
+  const refreshed = run(['shared', 'refresh', '--json'], {
+    GIT_TREES: JSON.stringify({
+      [sourceUrl]: {
+        '.': 'same-hash',
+        'skills/available': 'new-hash',
+        'skills/unrelated': 'unrelated-change',
+      },
+    }),
+  });
+  assert.equal(refreshed.status, 0, refreshed.stderr);
+  const result = JSON.parse(refreshed.stdout);
+  assert.equal(result.schemaVersion, 1);
+  assert.equal(result.ok, true);
+  assert.equal(result.data.scope, 'global');
+  assert.deepEqual(result.data.entries.map(({ name, status }: { name: string; status: string }) =>
+    [name, status]), [
+    ['current', 'current'],
+    ['available', 'available'],
+    ['missing', 'upstream-missing'],
+    ['invalid', 'check-failed'],
+  ]);
+  assert.match(result.data.entries[3].error, /unsafe installer skillPath/);
+  assert.ok(result.data.entries.every(({ checkedAt }: { checkedAt: string }) =>
+    !Number.isNaN(Date.parse(checkedAt))));
+  assert.equal(gitCalls().filter(({ args }: { args: string[] }) => args[0] === 'clone').length, 1);
+  assert.equal(calls().length, 0);
+  assert.equal(fs.readFileSync(lock, 'utf8'), before.lock);
+  assert.deepEqual(Object.fromEntries(names.map((name) => [
+    name, hashDirectory(path.join(discovery, name)),
+  ])), before.skills);
+  assert.ok(fs.existsSync(path.join(config, 'state.json')));
+
+  const refreshedAfterUnrelatedChange = run(['shared', 'refresh', '--json'], {
+    GIT_TREES: JSON.stringify({
+      [sourceUrl]: {
+        '.': 'same-hash',
+        'skills/available': 'new-hash',
+        'skills/unrelated': 'another-unrelated-change',
+      },
+    }),
+  });
+  assert.equal(refreshedAfterUnrelatedChange.status, 0, refreshedAfterUnrelatedChange.stderr);
+  assert.deepEqual(JSON.parse(refreshedAfterUnrelatedChange.stdout).data.entries.map(
+    ({ status }: { status: string }) => status,
+  ), ['current', 'available', 'upstream-missing', 'check-failed']);
+  assert.equal(gitCalls().filter(({ args }: { args: string[] }) => args[0] === 'clone').length, 2);
+});
+
+test('shared outdated is cache-only and invalidates observations after local or provenance changes', () => {
+  const { home, config, run, calls, gitCalls } = setup();
+  const discovery = path.join(home, '.agents', 'skills');
+  const lock = path.join(home, '.agents', '.skill-lock.json');
+  const sourceUrl = 'https://github.com/owner/repo.git';
+  writeSkill(discovery, 'cached', '# original');
+  writeLock(lock, { cached: {
+    source: 'owner/repo', sourceType: 'github', sourceUrl,
+    skillPath: 'skills/cached/SKILL.md', skillFolderHash: 'same-hash',
+  } });
+  const trees = JSON.stringify({ [sourceUrl]: { 'skills/cached': 'same-hash' } });
+  const refreshed = run(['shared', 'refresh'], { GIT_TREES: trees });
+  assert.equal(refreshed.status, 0, refreshed.stderr);
+  const stateFile = path.join(config, 'state.json');
+  const state = fs.readFileSync(stateFile, 'utf8');
+  const gitCount = gitCalls().length;
+
+  const cached = run(['shared', 'outdated', '--json']);
+  assert.equal(cached.status, 0, cached.stderr);
+  assert.equal(JSON.parse(cached.stdout).data.entries[0].status, 'current');
+  assert.equal(gitCalls().length, gitCount);
+  assert.equal(calls().length, 0);
+  assert.equal(fs.readFileSync(stateFile, 'utf8'), state);
+
+  fs.writeFileSync(path.join(discovery, 'cached', 'SKILL.md'), '# locally changed');
+  const localChange = JSON.parse(run(['shared', 'outdated', '--json']).stdout).data.entries[0];
+  assert.equal(localChange.status, 'unknown');
+  assert.equal(localChange.checkedAt, undefined);
+  fs.writeFileSync(path.join(discovery, 'cached', 'SKILL.md'), '# original');
+  writeLock(lock, { cached: {
+    source: 'owner/repo', sourceType: 'github', sourceUrl,
+    skillPath: 'other/cached/SKILL.md', skillFolderHash: 'same-hash',
+  } });
+  const pathChange = JSON.parse(run(['shared', 'outdated', '--json']).stdout).data.entries[0];
+  assert.equal(pathChange.status, 'unknown');
+  writeLock(lock, { cached: {
+    source: 'owner/other', sourceType: 'github', sourceUrl: 'https://github.com/owner/other.git',
+    skillPath: 'skills/cached/SKILL.md', skillFolderHash: 'same-hash',
+  } });
+  const provenanceChange = JSON.parse(run(['shared', 'outdated', '--json']).stdout).data.entries[0];
+  assert.equal(provenanceChange.status, 'unknown');
+  assert.equal(gitCalls().length, gitCount);
+  assert.equal(fs.readFileSync(stateFile, 'utf8'), state);
+});
+
+test('Project refresh isolates its cache and source failures from successful sources', () => {
+  const { root, config, run, calls, gitCalls } = setup();
+  const project = path.join(root, 'project');
+  const sibling = path.join(root, 'sibling');
+  const discovery = path.join(project, '.agents', 'skills');
+  const goodUrl = 'https://github.com/owner/good.git';
+  const offlineUrl = 'https://github.com/owner/offline.git';
+  fs.mkdirSync(sibling, { recursive: true });
+  writeSkill(discovery, 'good');
+  writeSkill(discovery, 'offline');
+  writeLock(path.join(project, 'skills-lock.json'), {
+    good: {
+      source: 'owner/good', sourceType: 'github', sourceUrl: goodUrl,
+      skillPath: 'skills/good/SKILL.md',
+      computedHash: '59bfce6dee5279c51634686ecc194d945ec527dc12558e6df0364c862e87d371',
+    },
+    offline: {
+      source: 'owner/offline', sourceType: 'github', sourceUrl: offlineUrl,
+      skillPath: 'skills/offline/SKILL.md', skillFolderHash: 'offline-hash',
+    },
+  });
+  const refreshed = run(['project', project, 'shared', 'refresh', '--json'], {
+    GIT_TREES: JSON.stringify({ [goodUrl]: { 'skills/good': 'git-tree-hash' } }),
+    GIT_FILES: JSON.stringify({ [goodUrl]: { 'skills/good/SKILL.md': '# good' } }),
+  });
+  assert.equal(refreshed.status, 0, refreshed.stderr);
+  const data = JSON.parse(refreshed.stdout).data;
+  assert.equal(data.scope, 'project');
+  assert.equal(data.projectPath, fs.realpathSync(project));
+  assert.deepEqual(data.entries.map(({ name, status }: { name: string; status: string }) =>
+    [name, status]), [['good', 'current'], ['offline', 'check-failed']]);
+  assert.match(data.entries[1].error, /git clone failed/);
+  assert.equal(gitCalls().filter(({ args }: { args: string[] }) => args[0] === 'clone').length, 2);
+  assert.equal(calls().length, 0);
+  assert.ok(fs.existsSync(path.join(project, '.skillspub', 'state.json')));
+  assert.equal(fs.existsSync(path.join(config, 'state.json')), false);
+
+  const siblingResult = run(['project', sibling, 'shared', 'outdated', '--json']);
+  assert.equal(siblingResult.status, 0, siblingResult.stderr);
+  assert.deepEqual(JSON.parse(siblingResult.stdout).data.entries, []);
+  assert.equal(fs.existsSync(path.join(sibling, '.skillspub')), false);
+  assert.equal(fs.existsSync(path.join(config, 'state.json')), false);
+});
+
+test('shared update refuses an identity-matching upstream-missing observation', () => {
+  const { home, run, calls } = setup();
+  const discovery = path.join(home, '.agents', 'skills');
+  const lock = path.join(home, '.agents', '.skill-lock.json');
+  const sourceUrl = 'https://github.com/owner/repo.git';
+  writeSkill(discovery, 'missing', '# installed');
+  writeLock(lock, { missing: {
+    source: 'owner/repo', sourceType: 'github', sourceUrl,
+    skillPath: 'skills/missing/SKILL.md', skillFolderHash: 'old-hash',
+  } });
+  const refreshed = run(['shared', 'refresh'], {
+    GIT_TREES: JSON.stringify({ [sourceUrl]: { 'skills/other': 'other-hash' } }),
+  });
+  assert.equal(refreshed.status, 0, refreshed.stderr);
+  const before = {
+    lock: fs.readFileSync(lock, 'utf8'),
+    skill: hashDirectory(path.join(discovery, 'missing')),
+  };
+
+  const refused = run(['shared', 'update', 'missing']);
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /cannot update upstream-missing Skill: missing/);
+  assert.equal(calls().length, 0);
+  assert.equal(fs.readFileSync(lock, 'utf8'), before.lock);
+  assert.equal(hashDirectory(path.join(discovery, 'missing')), before.skill);
 });
