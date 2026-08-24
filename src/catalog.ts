@@ -119,32 +119,19 @@ export function showBundle(home: Home, name: string): BundleMember[] {
 }
 
 export function createBundle(home: Home, name: string, selectors: string[]): number {
-  assertManualBundle(name);
-  const state = readState(home);
-  const bundles = readBundles(state);
-  if (bundles[name]) throw new Error(`bundle already exists: ${name}`);
-  const members = selectors.map((selector) => resourceId(selector, state));
-  state.bundles = {
-    ...bundles,
-    [name]: [...new Set(members)].sort((a, b) => a.localeCompare(b)),
-  };
-  writeState(home, state);
-  return state.bundles[name].length;
+  const plan = planCatalogMutation(home, undefined, {
+    operation: 'bundle.create', name, selectors,
+  });
+  applyCatalogMutation(home, plan);
+  return plan.changed;
 }
 
 export function addBundleMembers(home: Home, name: string, selectors: string[]): number {
-  assertManualBundle(name);
-  if (selectors.length === 0) throw new Error('bundle add requires at least one skill selector');
-  const state = readState(home);
-  const bundles = readBundles(state);
-  const current = bundles[name];
-  if (!current) throw new Error(`unknown bundle: ${name}`);
-  const members = selectors.map((selector) => resourceId(selector, state));
-  const next = [...new Set([...current, ...members])]
-    .sort((a, b) => a.localeCompare(b));
-  state.bundles = { ...bundles, [name]: next };
-  writeState(home, state);
-  return next.length - current.length;
+  const plan = planCatalogMutation(home, undefined, {
+    operation: 'bundle.add', name, selectors,
+  });
+  applyCatalogMutation(home, plan);
+  return plan.changed;
 }
 
 export function removeBundleMembers(
@@ -152,22 +139,11 @@ export function removeBundleMembers(
   name: string,
   selectors?: string[],
 ): number | undefined {
-  assertManualBundle(name);
-  const state = readState(home);
-  const bundles = readBundles(state);
-  const current = bundles[name];
-  if (!current) throw new Error(`unknown bundle: ${name}`);
-  if (!selectors || selectors.length === 0) {
-    const { [name]: _, ...remaining } = bundles;
-    state.bundles = remaining;
-    writeState(home, state);
-    return undefined;
-  }
-  const removed = new Set(selectors.map((selector) => resourceId(selector, state, current)));
-  const next = current.filter((member) => !removed.has(member));
-  state.bundles = { ...bundles, [name]: next };
-  writeState(home, state);
-  return current.length - next.length;
+  const plan = planCatalogMutation(home, undefined, {
+    operation: 'bundle.rm', name, selectors: selectors ?? [],
+  });
+  applyCatalogMutation(home, plan);
+  return selectors?.length ? plan.changed : undefined;
 }
 
 export interface TagSummary {
@@ -188,15 +164,11 @@ function assertTagNames(tags: string[]): void {
 }
 
 export function addResourceTags(home: Home, selector: string, names: string[]): number {
-  assertTagNames(names);
-  const state = readState(home);
-  const tags = readTags(state);
-  const id = resourceId(selector, state);
-  const current = tags[id] ?? [];
-  const next = [...new Set([...current, ...names])].sort((a, b) => a.localeCompare(b));
-  state.tags = { ...tags, [id]: next };
-  writeState(home, state);
-  return next.length - current.length;
+  const plan = planCatalogMutation(home, undefined, {
+    operation: 'tag.add', resource: selector, names,
+  });
+  applyCatalogMutation(home, plan);
+  return plan.changed;
 }
 
 export function removeResourceTags(
@@ -204,19 +176,11 @@ export function removeResourceTags(
   selector: string,
   names?: string[],
 ): number {
-  const state = readState(home);
-  const tags = readTags(state);
-  const id = resourceId(selector, state, Object.keys(tags));
-  const current = tags[id] ?? [];
-  if (names && names.some((tag) => !tag)) throw new Error('tags must be non-empty');
-  const removed = names?.length
-    ? new Set(names)
-    : new Set(current);
-  const next = current.filter((tag) => !removed.has(tag));
-  const { [id]: _, ...remaining } = tags;
-  state.tags = next.length > 0 ? { ...remaining, [id]: next } : remaining;
-  writeState(home, state);
-  return current.length - next.length;
+  const plan = planCatalogMutation(home, undefined, {
+    operation: 'tag.rm', resource: selector, names: names ?? [],
+  });
+  applyCatalogMutation(home, plan);
+  return plan.changed;
 }
 
 export function listTags(home: Home): TagSummary[] {
@@ -276,29 +240,19 @@ export function showPreset(home: Home, name: string): PresetSelector[] {
 }
 
 export function createPreset(home: Home, name: string, selectors: string[]): number {
-  assertPresetName(name);
-  const state = readState(home);
-  const presets = readPresets(state);
-  if (presets[name]) throw new Error(`preset already exists: ${name}`);
-  const normalized = [...new Set(selectors.map((selector) =>
-    normalizePresetSelector(selector, state)))].sort((a, b) => a.localeCompare(b));
-  state.presets = { ...presets, [name]: { selectors: normalized } };
-  writeState(home, state);
-  return normalized.length;
+  const plan = planCatalogMutation(home, undefined, {
+    operation: 'preset.create', name, selectors,
+  });
+  applyCatalogMutation(home, plan);
+  return plan.changed;
 }
 
 export function addPresetSelectors(home: Home, name: string, selectors: string[]): number {
-  assertPresetName(name);
-  if (selectors.length === 0) throw new Error('preset add requires at least one selector');
-  const state = readState(home);
-  const presets = readPresets(state);
-  const current = presets[name];
-  if (!current) throw new Error(`unknown preset: ${name}`);
-  const added = selectors.map((selector) => normalizePresetSelector(selector, state));
-  const next = [...new Set([...current.selectors, ...added])].sort((a, b) => a.localeCompare(b));
-  state.presets = { ...presets, [name]: { selectors: next } };
-  writeState(home, state);
-  return next.length - current.selectors.length;
+  const plan = planCatalogMutation(home, undefined, {
+    operation: 'preset.add', name, selectors,
+  });
+  applyCatalogMutation(home, plan);
+  return plan.changed;
 }
 
 export function removePresetSelectors(
@@ -306,25 +260,174 @@ export function removePresetSelectors(
   name: string,
   selectors?: string[],
 ): number | undefined {
-  assertPresetName(name);
+  const plan = planCatalogMutation(home, undefined, {
+    operation: 'preset.rm', name, selectors: selectors ?? [],
+  });
+  applyCatalogMutation(home, plan);
+  return plan.changed;
+}
+
+export type CatalogMutation =
+  | { operation: 'bundle.create'; name: string; selectors: string[] }
+  | { operation: 'bundle.add'; name: string; selectors: string[] }
+  | { operation: 'bundle.rm'; name: string; selectors: string[] }
+  | { operation: 'tag.add'; resource: string; names: string[] }
+  | { operation: 'tag.rm'; resource: string; names: string[] }
+  | { operation: 'preset.create'; name: string; selectors: string[] }
+  | { operation: 'preset.add'; name: string; selectors: string[] }
+  | { operation: 'preset.rm'; name: string; selectors: string[] };
+
+export interface CatalogMutationPlan {
+  operation: CatalogMutation['operation'];
+  collection: 'bundles' | 'tags' | 'presets';
+  expected: Record<string, unknown>;
+  next: Record<string, unknown>;
+  changed: number;
+}
+
+function catalogPlanningState(
+  home: Home,
+  report?: InventoryScanReport,
+): CatalogState {
   const state = readState(home);
-  const presets = readPresets(state);
-  const current = presets[name];
-  if (!current) throw new Error(`unknown preset: ${name}`);
-  if (!selectors || selectors.length === 0) {
-    throw new Error('removing a Preset definition requires: skillspub preset delete <name> [--yes]');
-  }
-  const removed = new Set(selectors.map((selector) => {
-    try {
-      return normalizePresetSelector(selector, state);
-    } catch {
-      return selector;
+  if (!report) return state;
+  return {
+    ...state,
+    targetInventory: {
+      resources: Object.fromEntries(report.resources.map(({ id, name }) => [id, { name }])),
+    },
+  };
+}
+
+export function planCatalogMutation(
+  home: Home,
+  report: InventoryScanReport | undefined,
+  mutation: CatalogMutation,
+): CatalogMutationPlan {
+  const state = catalogPlanningState(home, report);
+  if (mutation.operation === 'bundle.create' ||
+    mutation.operation === 'bundle.add' || mutation.operation === 'bundle.rm') {
+    assertManualBundle(mutation.name);
+    const expected = readBundles(state);
+    const current = expected[mutation.name];
+    let members: string[] | undefined;
+    if (mutation.operation === 'bundle.create') {
+      if (current) throw new Error(`bundle already exists: ${mutation.name}`);
+      members = [...new Set(mutation.selectors.map((selector) => resourceId(selector, state)))]
+        .sort((a, b) => a.localeCompare(b));
+    } else {
+      if (!current) throw new Error(`unknown bundle: ${mutation.name}`);
+      if (mutation.operation === 'bundle.add') {
+        if (mutation.selectors.length === 0)
+          throw new Error('bundle add requires at least one skill selector');
+        members = [...new Set([
+          ...current,
+          ...mutation.selectors.map((selector) => resourceId(selector, state)),
+        ])].sort((a, b) => a.localeCompare(b));
+      } else if (mutation.selectors.length > 0) {
+        const removed = new Set(mutation.selectors.map((selector) =>
+          resourceId(selector, state, current)));
+        members = current.filter((member) => !removed.has(member));
+      }
     }
-  }));
-  const next = current.selectors.filter((selector) => !removed.has(selector));
-  state.presets = { ...presets, [name]: { selectors: next } };
+    const { [mutation.name]: _, ...remaining } = expected;
+    const next = members === undefined
+      ? remaining
+      : { ...expected, [mutation.name]: members };
+    return {
+      operation: mutation.operation,
+      collection: 'bundles',
+      expected,
+      next,
+      changed: current ? Math.abs(current.length - (members?.length ?? 0)) : members?.length ?? 0,
+    };
+  }
+
+  if (mutation.operation === 'tag.add' || mutation.operation === 'tag.rm') {
+    if (mutation.operation === 'tag.add') assertTagNames(mutation.names);
+    else if (mutation.names.some((name) => !name)) throw new Error('tags must be non-empty');
+    const expected = readTags(state);
+    const id = resourceId(mutation.resource, state, Object.keys(expected));
+    const current = expected[id] ?? [];
+    const names = mutation.operation === 'tag.add'
+      ? [...new Set([...current, ...mutation.names])].sort((a, b) => a.localeCompare(b))
+      : current.filter((name) => !(mutation.names.length > 0
+          ? new Set(mutation.names)
+          : new Set(current)).has(name));
+    const { [id]: _, ...remaining } = expected;
+    const next = names.length > 0 ? { ...remaining, [id]: names } : remaining;
+    return {
+      operation: mutation.operation,
+      collection: 'tags',
+      expected,
+      next,
+      changed: Math.abs(current.length - names.length),
+    };
+  }
+
+  assertPresetName(mutation.name);
+  const expected = readPresets(state);
+  const current = expected[mutation.name];
+  let selectors: string[];
+  if (mutation.operation === 'preset.create') {
+    if (current) throw new Error(`preset already exists: ${mutation.name}`);
+    selectors = [...new Set(mutation.selectors.map((selector) =>
+      normalizePresetSelector(selector, state)))].sort((a, b) => a.localeCompare(b));
+  } else {
+    if (!current) throw new Error(`unknown preset: ${mutation.name}`);
+    if (mutation.operation === 'preset.add') {
+      if (mutation.selectors.length === 0)
+        throw new Error('preset add requires at least one selector');
+      selectors = [...new Set([
+        ...current.selectors,
+        ...mutation.selectors.map((selector) => normalizePresetSelector(selector, state)),
+      ])].sort((a, b) => a.localeCompare(b));
+    } else {
+      if (mutation.selectors.length === 0)
+        throw new Error('removing a Preset definition requires: skillspub preset delete <name> [--yes]');
+      const removed = new Set(mutation.selectors.map((selector) => {
+        try {
+          return normalizePresetSelector(selector, state);
+        } catch {
+          return selector;
+        }
+      }));
+      selectors = current.selectors.filter((selector) => !removed.has(selector));
+    }
+  }
+  const next = { ...expected, [mutation.name]: { selectors } };
+  return {
+    operation: mutation.operation,
+    collection: 'presets',
+    expected,
+    next,
+    changed: current ? Math.abs(current.selectors.length - selectors.length) : selectors.length,
+  };
+}
+
+export function applyCatalogMutation(home: Home, plan: CatalogMutationPlan): { changed: number } {
+  const state = readState(home);
+  const current = plan.collection === 'bundles'
+    ? readBundles(state)
+    : plan.collection === 'tags'
+      ? readTags(state)
+      : readPresets(state);
+  if (JSON.stringify(current) !== JSON.stringify(plan.expected))
+    throw Object.assign(
+      new Error(`${plan.collection} changed after preview; preview again`),
+      { code: 'concurrent_modification' },
+    );
+  if (plan.collection === 'bundles') state.bundles = plan.next as Record<string, string[]>;
+  else if (plan.collection === 'tags') state.tags = plan.next as Record<string, string[]>;
+  else state.presets = plan.next as Record<string, PresetDefinition>;
   writeState(home, state);
-  return current.selectors.length - next.length;
+  const written = readState(home)[plan.collection] ?? {};
+  if (JSON.stringify(written) !== JSON.stringify(plan.next))
+    throw Object.assign(
+      new Error(`${plan.collection} verification failed`),
+      { code: 'apply_failed', details: { partialEffects: 'unknown' } },
+    );
+  return { changed: plan.changed };
 }
 
 export function expandSelector(

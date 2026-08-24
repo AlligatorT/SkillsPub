@@ -295,6 +295,72 @@ test('shared describe passes through pinned add --list output', () => {
   assert.deepEqual(calls()[0].args, ['--yes', PACKAGE, 'add', 'owner/repo', '--list']);
 });
 
+test('JSON Shared add previews without invoking npx and applies the same plan with --yes', () => {
+  const { home, run, calls } = setup();
+  const preview = run(['shared', 'add', 'owner/repo', '--skill', 'Example', '--json']);
+  assert.equal(preview.status, 0, preview.stderr || preview.stdout);
+  assert.equal(preview.stderr, '');
+  const previewDocument = JSON.parse(preview.stdout);
+  assert.equal(previewDocument.data.applied, false);
+  assert.equal(previewDocument.data.plan.operation, 'shared.add');
+  assert.equal(calls().length, 0);
+  assert.equal(fs.existsSync(path.join(home, '.agents', 'skills', 'example')), false);
+
+  const applied = run(['shared', 'add', 'owner/repo', '--skill', 'Example', '--yes', '--json']);
+  assert.equal(applied.status, 0, applied.stderr || applied.stdout);
+  assert.equal(applied.stderr, '');
+  const appliedDocument = JSON.parse(applied.stdout);
+  assert.equal(appliedDocument.data.applied, true);
+  assert.deepEqual(appliedDocument.data.plan, previewDocument.data.plan);
+  assert.deepEqual(appliedDocument.data.remainingDrift, []);
+  assert.equal(calls().length, 1);
+  assert.ok(fs.existsSync(path.join(home, '.agents', 'skills', 'example', 'SKILL.md')));
+
+  const projectSetup = setup();
+  const project = path.join(projectSetup.root, 'project');
+  fs.mkdirSync(project);
+  const projectPreview = projectSetup.run([
+    'project', project, 'shared', 'add', 'owner/repo', '--skill', 'Example', '--json',
+  ]);
+  assert.equal(projectPreview.status, 0, projectPreview.stderr || projectPreview.stdout);
+  assert.equal(JSON.parse(projectPreview.stdout).data.applied, false);
+  assert.equal(projectSetup.calls().length, 0);
+  const projectApplied = projectSetup.run([
+    'project', project, 'shared', 'add', 'owner/repo', '--skill', 'Example', '--yes', '--json',
+  ]);
+  assert.equal(projectApplied.status, 0, projectApplied.stderr || projectApplied.stdout);
+  assert.deepEqual(
+    JSON.parse(projectApplied.stdout).data.plan,
+    JSON.parse(projectPreview.stdout).data.plan,
+  );
+  assert.ok(fs.existsSync(path.join(project, '.agents', 'skills', 'example', 'SKILL.md')));
+});
+
+test('JSON Shared update and remove are plan-only until --yes', () => {
+  const { home, run, calls } = setup();
+  assert.equal(run(['shared', 'add', 'owner/repo', '--skill', 'Example']).status, 0);
+  const baselineCalls = calls().length;
+
+  for (const args of [
+    ['shared', 'update', 'example'],
+    ['shared', 'remove', 'example'],
+  ]) {
+    const preview = run([...args, '--json']);
+    assert.equal(preview.status, 0, preview.stderr || preview.stdout);
+    const previewDocument = JSON.parse(preview.stdout);
+    assert.equal(previewDocument.data.applied, false);
+    assert.equal(calls().length, baselineCalls + (args[1] === 'remove' ? 1 : 0));
+
+    const applied = run([...args, '--yes', '--json']);
+    assert.equal(applied.status, 0, applied.stderr || applied.stdout);
+    const appliedDocument = JSON.parse(applied.stdout);
+    assert.equal(appliedDocument.data.applied, true);
+    assert.deepEqual(appliedDocument.data.plan, previewDocument.data.plan);
+  }
+  assert.equal(fs.existsSync(path.join(home, '.agents', 'skills', 'example')), false);
+  assert.equal(calls().length, baselineCalls + 2);
+});
+
 test('shared add uses the upstream normalized Slot name', () => {
   const { home, run } = setup();
   const result = run(['shared', 'add', 'owner/repo', '--skill', 'Foo@Bar']);
@@ -391,6 +457,14 @@ test('failed shared update restores desired OFF entries and releases the operati
   assert.equal(fs.existsSync(`${lock}.skillspub-operation-lock`), false);
   assert.equal(JSON.parse(fs.readFileSync(stateFile, 'utf8')).baseIntent[slot], JSON.parse(before).baseIntent[slot]);
   assert.deepEqual(calls()[0].args, ['--yes', PACKAGE, 'update', 'off-skill', '--global']);
+
+  const jsonResult = run(['shared', 'update', 'off-skill', '--yes', '--json'], { NPX_FAIL: '7' });
+  assert.equal(jsonResult.status, 1);
+  assert.equal(jsonResult.stderr, '');
+  const document = JSON.parse(jsonResult.stdout);
+  assert.equal(document.error.code, 'apply_failed');
+  assert.equal(typeof document.error.details.actual, 'string');
+  assert.ok(Array.isArray(document.error.details.remainingDrift));
 });
 
 test('spawn errors still restore desired OFF entries and report Actual state', () => {
@@ -470,6 +544,10 @@ test('Shared Target operation lock prevents concurrent mutation or refresh', () 
   const result = run(['shared', 'update', 'managed']);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /operation already in progress/);
+  const jsonResult = run(['shared', 'update', 'managed', '--json']);
+  assert.equal(jsonResult.status, 1);
+  assert.equal(jsonResult.stderr, '');
+  assert.equal(JSON.parse(jsonResult.stdout).error.code, 'concurrent_modification');
   const refresh = run(['shared', 'refresh']);
   assert.equal(refresh.status, 1);
   assert.match(refresh.stderr, /operation already in progress/);
@@ -553,6 +631,14 @@ test('shared remove previews and confirms dependent Link and Mirror cascades', (
       'global:consumer\0mirror': { sourceId: fs.realpathSync(source), hash: hashDirectory(source) },
     },
   }));
+
+  const jsonPreview = run(['shared', 'remove', 'managed', '--json']);
+  assert.equal(jsonPreview.status, 0, jsonPreview.stderr || jsonPreview.stdout);
+  const jsonPlan = JSON.parse(jsonPreview.stdout).data.plan;
+  assert.equal(jsonPlan.dependencies.length, 2);
+  assert.ok(jsonPlan.warnings.some((warning: string) =>
+    warning.includes('projects outside this scan may retain broken Links')));
+  assert.equal(calls().length, 0);
 
   const preview = run(['shared', 'remove', 'managed']);
   assert.equal(preview.status, 1);

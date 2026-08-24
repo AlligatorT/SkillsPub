@@ -98,7 +98,21 @@ export interface SharedRemovalDependency {
 }
 
 export interface SharedRemovalPlan {
+  operation: 'shared.remove';
+  targetId: string;
+  slots: string[];
   dependencies: SharedRemovalDependency[];
+  warnings: string[];
+}
+
+export interface SharedMutationPlan {
+  operation: 'shared.add' | 'shared.update';
+  targetId: string;
+  slots: string[];
+  source?: string;
+  replace?: boolean;
+  currentSource?: string;
+  replacement?: { from: string; to: string };
 }
 
 interface StagedDependencies {
@@ -165,6 +179,16 @@ function relationship(target: Target, slot: string): TargetRelationship | undefi
 }
 
 
+function concurrentModification(message: string): Error {
+  return Object.assign(new Error(message), { code: 'concurrent_modification' });
+}
+
+function assertNoOperationLock(target: Target): void {
+  const lock = `${target.lockFile}.skillspub-operation-lock`;
+  if (fs.existsSync(lock))
+    throw concurrentModification(`Shared Target operation already in progress: ${lock}`);
+}
+
 function withOperationLock<T>(target: Target, operation: () => T): T {
   const lock = `${target.lockFile}.skillspub-operation-lock`;
   fs.mkdirSync(path.dirname(lock), { recursive: true });
@@ -173,7 +197,7 @@ function withOperationLock<T>(target: Target, operation: () => T): T {
     descriptor = fs.openSync(lock, 'wx');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'EEXIST')
-      throw new Error(`Shared Target operation already in progress: ${lock}`);
+      throw concurrentModification(`Shared Target operation already in progress: ${lock}`);
     throw error;
   }
   try {
@@ -458,6 +482,7 @@ export function planSharedRemove(
   if (names.length === 0) throw new Error('usage: skillspub shared remove <managed-name...>');
   const target = resolveTarget(home, projectPath);
   validatePolicyState(target);
+  assertNoOperationLock(target);
   const selected = managedSelection(target, names);
   const claims = claimedSlots(readStateFile(target.report.stateFile));
   for (const skill of selected) {
@@ -467,7 +492,73 @@ export function planSharedRemove(
   desiredFor(target, selected);
   const dependencies = removalDependencies(target, selected);
   assertRemovalDependenciesAllowed(target, dependencies);
-  return { dependencies };
+  return {
+    operation: 'shared.remove',
+    targetId: target.target.id,
+    slots: selected.map(({ slot }) => slot),
+    dependencies,
+    warnings: [
+      'SkillsPub has no central project index; projects outside this scan may retain broken Links.',
+    ],
+  };
+}
+
+export function planSharedAdd(
+  home: Home,
+  source: string,
+  name: string,
+  replace: boolean,
+  projectPath?: string,
+): SharedMutationPlan {
+  validateSource(source);
+  const slot = validateName(name);
+  const target = resolveTarget(home, projectPath);
+  validatePolicyState(target);
+  assertNoOperationLock(target);
+  const existing = relationship(target, slot);
+  const slotInfo = target.report.slots.find((item) =>
+    item.targetId === target.target.id && item.name === slot);
+  let currentSource: string | undefined;
+  let replacement: SharedMutationPlan['replacement'];
+  if (existing) {
+    currentSource = npxSkillsProvenanceLabel(slotInfo?.provenance);
+    if (!sameNpxSkillsSource(source, name, slotInfo?.provenance))
+      replacement = { from: currentSource, to: source };
+    desiredFor(target, [{ name: existing.name, slot, provenance: slotInfo?.provenance ?? {} }]);
+  } else {
+    for (const root of [target.target.discoveryRoot, target.target.parkingRoot]) {
+      const candidate = path.join(root, slot);
+      if (fs.lstatSync(candidate, { throwIfNoEntry: false }))
+        throw new Error(`path conflict: ${candidate}`);
+    }
+  }
+  return {
+    operation: 'shared.add',
+    targetId: target.target.id,
+    slots: [slot],
+    source,
+    replace,
+    ...(currentSource ? { currentSource } : {}),
+    ...(replacement ? { replacement } : {}),
+  };
+}
+
+export function planSharedUpdate(
+  home: Home,
+  names: string[],
+  projectPath?: string,
+): SharedMutationPlan {
+  const target = resolveTarget(home, projectPath);
+  validatePolicyState(target);
+  assertNoOperationLock(target);
+  const selected = managedSelection(target, names);
+  assertNoBlockedUpdate(target, selected);
+  desiredFor(target, selected);
+  return {
+    operation: 'shared.update',
+    targetId: target.target.id,
+    slots: selected.map(({ slot }) => slot),
+  };
 }
 
 function ensureVisible(target: Target, skills: NpxManagedSkill[]): void {
@@ -624,7 +715,7 @@ function refreshTarget(target: Target): SharedUpdateAvailabilityResult {
           identity: managedIdentity(target, skill).identity,
           status: result?.status ?? 'check-failed',
           checkedAt,
-          ...(!result ? { error: 'source check returned no result' } : {}),
+          ...(result ? {} : { error: 'source check returned no result' }),
           ...(result?.error ? { error: result.error } : {}),
         });
       }
@@ -705,6 +796,19 @@ interface SharedOp {
   after?(target: Target, selected: NpxManagedSkill[], actual: string): void;
 }
 
+function sharedApplyFailure(
+  operation: SharedOp['name'],
+  reason: string,
+  actual: string,
+  drift: string[],
+  partialEffects: 'present' | 'none-detected' | 'unknown',
+): Error {
+  return Object.assign(
+    new Error(`skills ${operation} failed (${reason})\nActual: ${actual}\nRemaining drift: ${drift.join(', ') || 'none'}`),
+    { code: 'apply_failed', details: { actual, remainingDrift: drift, partialEffects } },
+  );
+}
+
 function guardedSkillsOp(
   home: Home,
   projectPath: string | undefined,
@@ -757,10 +861,21 @@ function guardedSkillsOp(
     }
     if (runFailed || checkError) {
       const reason = failure?.message ?? checkError?.message ?? `exit ${result?.status ?? 1}`;
-      throw new Error(`skills ${op.name} failed (${reason})\nActual: ${actual}\nRemaining drift: ${drift.join(', ') || 'none'}`);
+      throw sharedApplyFailure(
+        op.name,
+        reason,
+        actual,
+        drift,
+        drift.length > 0 ? 'present' : 'none-detected',
+      );
     }
-    op.after?.(target, selected, actual);
-    staged?.commit();
+    try {
+      op.after?.(target, selected, actual);
+      staged?.commit();
+    } catch (error) {
+      actual = finalActual(target, slots, drift);
+      throw sharedApplyFailure(op.name, (error as Error).message, actual, drift, 'unknown');
+    }
     return { actual, drift };
   });
 }
@@ -782,10 +897,8 @@ export function sharedAdd(
         item.targetId === target.target.id && item.name === slot);
       if (existing) {
         const current = npxSkillsProvenanceLabel(slotInfo?.provenance);
-        if (!sameNpxSkillsSource(source, name, slotInfo?.provenance)) {
-          console.log(`Replace: ${current} -> ${source}`);
-          if (!replace) throw new Error('source replacement requires --replace');
-        }
+        if (!sameNpxSkillsSource(source, name, slotInfo?.provenance) && !replace)
+          throw new Error(`source replacement requires --replace (${current} -> ${source})`);
       } else {
         for (const root of [target.target.discoveryRoot, target.target.parkingRoot]) {
           const candidate = path.join(root, slot);
@@ -842,7 +955,7 @@ export function sharedRemove(
   const { cascadeConfirmed = false, projectPath, expected } = options;
   const preview = planSharedRemove(home, names, projectPath);
   if (expected && !sameDependencies(expected.dependencies, preview.dependencies))
-    throw new Error('dependent Relationships changed after preview');
+    throw concurrentModification('dependent Relationships changed after preview');
   if (preview.dependencies.length > 0 && !cascadeConfirmed)
     throw new Error('dependent Relationships will also be deleted; rerun with --yes');
   let dependencies: SharedRemovalDependency[] = [];

@@ -58,6 +58,22 @@ test('selector expansion reads current Bundle membership every time', () => {
   assert.deepEqual(expandSelector(home, 'bundle:tools', report).resourceIds, [ids.two]);
 });
 
+test('activation apply rejects changed preconditions before writing policy state', () => {
+  const { home, runtime, discoveryRoot } = setup();
+  scanGlobalInventory(home, [runtime]);
+  const plan = planActivation(home, 'skill:one', ['shared'], 'off', { targets: [runtime] });
+  const stateFile = path.join(home.configDir, 'state.json');
+  const before = fs.readFileSync(stateFile, 'utf8');
+  fs.appendFileSync(path.join(discoveryRoot, 'one', 'SKILL.md'), '\nchanged');
+
+  assert.throws(
+    () => applyActivationPlan(home, plan),
+    (error: unknown) => (error as { code?: string }).code === 'concurrent_modification',
+  );
+  assert.equal(fs.readFileSync(stateFile, 'utf8'), before);
+  assert.ok(fs.existsSync(path.join(discoveryRoot, 'one', 'SKILL.md')));
+});
+
 test('Tag selectors expand current resource membership and retain stale references', () => {
   const { home, runtime } = setup();
   const report = scanGlobalInventory(home, [runtime]);

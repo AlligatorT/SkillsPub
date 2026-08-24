@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import fs from 'node:fs';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultHome } from './core.ts';
 import {
@@ -23,6 +24,7 @@ import {
   doctorProjectInventory,
   scanGlobalInventory,
   scanProjectInventory,
+  readStateFile,
   type DoctorReport,
   type InventoryScanReport,
 } from './inventory.ts';
@@ -38,7 +40,9 @@ import {
   sharedAdd,
   sharedDescribe,
   sharedFind,
+  planSharedAdd,
   planSharedRemove,
+  planSharedUpdate,
   sharedRemove,
   sharedRefresh,
   sharedOutdated,
@@ -51,18 +55,22 @@ import {
   addBundleMembers,
   addPresetSelectors,
   addResourceTags,
+  applyCatalogMutation,
   createBundle,
   createPreset,
   expandSelector,
   listBundles,
   listPresets,
   listTags,
+  readState,
   removeBundleMembers,
   removePresetSelectors,
   removeResourceTags,
   showBundle,
+  planCatalogMutation,
   showPreset,
   tagsForResource,
+  type CatalogMutation,
 } from './catalog.ts';
 import {
   activatePreset,
@@ -146,17 +154,23 @@ function writeJson(document: JsonData): void {
   process.stdout.write(`${JSON.stringify(document)}\n`);
 }
 
-function errorInfo(error: unknown): {
+function errorInfo(error: unknown, mutation = false): {
   code: string;
   exitCode: 1 | 2;
   details: JsonData;
 } {
   if (error instanceof CliError)
     return { code: error.code, exitCode: error.exitCode, details: error.details ?? {} };
-  const err = error as Error & { code?: string };
-  return err.code?.startsWith('ERR_PARSE_ARGS') || err.message.startsWith('usage:')
-    ? { code: 'usage_error', exitCode: 2, details: {} }
-    : { code: 'runtime_error', exitCode: 1, details: {} };
+  const err = error as Error & { code?: string; details?: JsonData };
+  if (err.code?.startsWith('ERR_PARSE_ARGS') || err.message.startsWith('usage:'))
+    return { code: 'usage_error', exitCode: 2, details: {} };
+  if (err.code && ['preflight_error', 'concurrent_modification', 'io_error', 'apply_failed']
+    .includes(err.code))
+    return { code: err.code, exitCode: 1, details: err.details ?? {} };
+  if (err.code && /^(EACCES|EEXIST|EIO|ENOENT|ENOSPC|EPERM|EROFS)$/.test(err.code))
+    return { code: 'io_error', exitCode: 1, details: { errno: err.code } };
+  if (mutation) return { code: 'preflight_error', exitCode: 1, details: {} };
+  return { code: 'runtime_error', exitCode: 1, details: {} };
 }
 
 const MUTATING_COMMANDS = new Set(['on', 'off', 'mirror', 'migrate']);
@@ -168,17 +182,15 @@ const MUTATING_ACTIONS: Record<string, ReadonlySet<string>> = {
   shared: new Set(['add', 'update', 'remove']),
 };
 
-function supportsReadOnlyJson(command: string | undefined, args: string[]): boolean {
+function isMutationCommand(command: string | undefined, args: string[]): boolean {
   if (command === 'project') {
     const [, projectCommand, ...projectArgs] = args;
-    return supportsReadOnlyJson(projectCommand, projectArgs);
+    return isMutationCommand(projectCommand, projectArgs);
   }
-  if (!command || !MUTATING_COMMANDS.has(command)) {
-    if (command === 'doctor') return !args.includes('--repair');
-    const actions = MUTATING_ACTIONS[command ?? ''];
-    return !actions?.has(args[command === 'harnesses' ? 1 : 0] ?? '');
-  }
-  return false;
+  if (command === 'doctor') return args.includes('--repair');
+  if (command && MUTATING_COMMANDS.has(command)) return true;
+  const actions = MUTATING_ACTIONS[command ?? ''];
+  return actions?.has(args[command === 'harnesses' ? 1 : 0] ?? '') ?? false;
 }
 
 function printExplanation(explanation: VisibilityExplanation): void {
@@ -381,11 +393,69 @@ function cmdLs(
     console.log(`未分类 (skillspub tag add): ${untaggedRows.join(', ')}`);
 }
 
+function activationPlanData(plan: ReturnType<typeof planActivation>, operation = 'activation'): JsonData {
+  return {
+    operation,
+    targets: plan.targets.map((target) => ({
+      targetId: target.targetId,
+      targetKey: target.targetKey,
+      slot: target.slot,
+      resourceId: target.resourceId,
+      from: target.from,
+      intent: target.intent,
+      to: target.to,
+      ...(target.destination ? { destination: target.destination } : {}),
+      ...(target.createForm ? { createForm: target.createForm } : {}),
+      ...(target.mirrorAction ? { mirrorAction: target.mirrorAction } : {}),
+      ...(target.syncMirror ? { syncMirror: true } : {}),
+      ...(target.remove ? { remove: true } : {}),
+    })),
+    staleResourceIds: plan.staleResourceIds,
+  };
+}
+
+function activationApplyError(
+  home: ReturnType<typeof defaultHome>,
+  plan: ReturnType<typeof planActivation>,
+  error: unknown,
+  projectPath?: string,
+): never {
+  const cause = error as Error & { code?: string };
+  if (cause.code === 'concurrent_modification') throw new CliError(
+    'concurrent_modification',
+    cause.message,
+    1,
+    { partialEffects: 'none', remainingDrift: [] },
+  );
+  let driftRemaining: string[] = [];
+  let scanError: string | undefined;
+  try {
+    const report = projectPath
+      ? scanProjectInventory(home, projectPath)
+      : scanGlobalInventory(home);
+    driftRemaining = remainingDrift(plan, report);
+  } catch (scanFailure) {
+    scanError = (scanFailure as Error).message;
+  }
+  const drift = scanError ? `could not rescan: ${scanError}` : driftRemaining.join(', ') || 'none';
+  throw new CliError(
+    'apply_failed',
+    `${cause.message}\nRemaining drift: ${drift}`,
+    1,
+    {
+      partialEffects: driftRemaining.length > 0 ? 'present' : 'unknown',
+      remainingDrift: driftRemaining,
+      ...(scanError ? { scanError } : {}),
+    },
+  );
+}
+
 function cmdOnOff(
   home: ReturnType<typeof defaultHome>,
   on: boolean,
   args: string[],
-): void {
+  json = false,
+): JsonData | undefined {
   const [skill, ...names] = args;
   if (!skill || names.length === 0)
     throw new Error(
@@ -398,18 +468,22 @@ function cmdOnOff(
   const confirmed = names.includes('--yes');
   const targets = names.filter((name) => name !== '--yes');
   const plan = planActivation(home, skill, targets, on ? 'on' : 'off');
-  console.log('Plan:');
-  if (plan.targets.length === 0) console.log('  no current Target Slots');
-  else for (const target of plan.targets) {
-    const intent = target.intent === target.to
-      ? ''
-      : ` (Base intent ${target.intent}; claimed ${target.to})`;
-    const mirror = target.createForm === 'mirror'
-      ? ' (create Mirror)'
-      : target.syncMirror ? ' (synchronize Mirror)' : '';
-    console.log(
-      `  ${target.targetId}/${target.slot}\t${target.from} -> ${target.to}${intent}${mirror}`,
-    );
+  const planData = activationPlanData(plan);
+  if (json && !confirmed) return { applied: false, plan: planData };
+  if (!json) {
+    console.log('Plan:');
+    if (plan.targets.length === 0) console.log('  no current Target Slots');
+    else for (const target of plan.targets) {
+      const intent = target.intent === target.to
+        ? ''
+        : ` (Base intent ${target.intent}; claimed ${target.to})`;
+      const mirror = target.createForm === 'mirror'
+        ? ' (create Mirror)'
+        : target.syncMirror ? ' (synchronize Mirror)' : '';
+      console.log(
+        `  ${target.targetId}/${target.slot}\t${target.from} -> ${target.to}${intent}${mirror}`,
+      );
+    }
   }
   if (!confirmed && plan.targets.some((target) =>
     target.from === 'missing' && target.to === 'on')) {
@@ -418,31 +492,51 @@ function cmdOnOff(
   try {
     applyActivationPlan(home, plan);
   } catch (error) {
-    let drift: string;
-    try {
-      const remaining = remainingDrift(plan, scanGlobalInventory(home));
-      drift = remaining.length > 0 ? remaining.join(', ') : 'none';
-    } catch (scanError) {
-      drift = `could not rescan: ${(scanError as Error).message}`;
-    }
-    throw new Error(`${(error as Error).message}\nRemaining drift: ${drift}`);
+    activationApplyError(home, plan, error);
   }
-  scanGlobalInventory(home);
+  const report = scanGlobalInventory(home);
+  if (json) return {
+    applied: true,
+    plan: planData,
+    result: { verified: true },
+    remainingDrift: remainingDrift(plan, report),
+  };
 }
 
-function cmdMirror(home: ReturnType<typeof defaultHome>, args: string[], projectPath?: string): void {
+function cmdMirror(
+  home: ReturnType<typeof defaultHome>,
+  args: string[],
+  projectPath?: string,
+  json = false,
+): JsonData | undefined {
   const [action, targetId, slot, ...rest] = args;
   if (!['sync', 'overwrite', 'remove', 'convert'].includes(action ?? '') || !targetId || !slot ||
     rest.some((arg) => arg !== '--yes'))
     throw new Error('usage: skillspub mirror sync|overwrite|remove|convert <target-id> <slot> [--yes]');
-  const plan = planMirrorAction(home, targetId, slot, action as 'sync' | 'overwrite' | 'remove' | 'convert',
-    projectPath ? { projectPath } : {});
-  const target = plan.targets[0];
-  console.log(`Mirror plan: ${action} ${target?.targetId}/${target?.slot}`);
-  if (!rest.includes('--yes')) return;
-  applyActivationPlan(home, plan);
-  if (projectPath) scanProjectInventory(home, projectPath);
-  else scanGlobalInventory(home);
+  const scope = projectPath ? { projectPath } : {};
+  const plan = planMirrorAction(home, targetId, slot, action as 'sync' | 'overwrite' | 'remove' | 'convert', scope);
+  const planData = activationPlanData(plan, `mirror.${action}`);
+  const confirmed = rest.includes('--yes');
+  if (json && !confirmed) return { applied: false, plan: planData };
+  if (!json) {
+    const target = plan.targets[0];
+    console.log(`Mirror plan: ${action} ${target?.targetId}/${target?.slot}`);
+  }
+  if (!confirmed) return;
+  try {
+    applyActivationPlan(home, plan);
+  } catch (error) {
+    activationApplyError(home, plan, error, projectPath);
+  }
+  const report = projectPath
+    ? scanProjectInventory(home, projectPath)
+    : scanGlobalInventory(home);
+  if (json) return {
+    applied: true,
+    plan: planData,
+    result: { verified: true },
+    remainingDrift: remainingDrift(plan, report),
+  };
 }
 
 function cmdStatus(
@@ -546,7 +640,7 @@ function cmdHarnesses(
   args: string[],
   projectPath?: string,
   json = false,
-): ReturnType<typeof inspectHarnesses> | ReturnType<typeof inspectHarness> | undefined {
+): JsonData | ReturnType<typeof inspectHarnesses> | ReturnType<typeof inspectHarness> | undefined {
   const targets = loadTargets(home);
   const selectedProject = projectPath ? fs.realpathSync(projectPath) : undefined;
   if (args.length === 0) {
@@ -573,16 +667,53 @@ function cmdHarnesses(
     targets,
     selectedProject,
   );
-  console.log(plan.title);
-  for (const line of plan.lines) console.log(`  ${line}`);
-  if (!rest.includes('--yes')) return;
-  plan.apply();
-  if (plan.recovery?.length) {
-    console.log('Manual recovery:');
-    for (const line of plan.recovery) console.log(`  ${line}`);
+  const stableLine = (line: string): string =>
+    line.replace(/\d{10,}-[0-9a-f]{8}-[0-9a-f-]{27}/gi, '<recovery-id>');
+  const planData = {
+    operation: `harness.${action}`,
+    harness,
+    ...(selectedProject ? { projectPath: selectedProject } : {}),
+    title: plan.title,
+    steps: plan.lines.map(stableLine),
+    ...(plan.recovery?.length ? { recovery: plan.recovery.map(stableLine) } : {}),
+  };
+  const confirmed = rest.includes('--yes');
+  if (json && !confirmed) return { applied: false, plan: planData };
+  if (!json) {
+    console.log(plan.title);
+    for (const line of plan.lines) console.log(`  ${line}`);
   }
-  const inspection = plan.verify();
-  console.log(`${inspection.name} ${action} verified.`);
+  if (!confirmed) return;
+  let inspection: ReturnType<typeof plan.verify>;
+  try {
+    plan.apply();
+    inspection = plan.verify();
+  } catch (error) {
+    const cause = error as Error & { code?: string };
+    throw new CliError(
+      cause.code === 'concurrent_modification' ? 'concurrent_modification' : 'apply_failed',
+      cause.message,
+      1,
+      {
+        partialEffects: cause.code === 'concurrent_modification' ? 'none' : 'unknown',
+        recovery: plan.recovery ?? [],
+      },
+    );
+  }
+  if (!json) {
+    if (plan.recovery?.length) {
+      console.log('Manual recovery:');
+      for (const line of plan.recovery) console.log(`  ${line}`);
+    }
+    console.log(`${inspection.name} ${action} verified.`);
+    return;
+  }
+  return {
+    applied: true,
+    plan: planData,
+    result: { inspection, recovery: plan.recovery ?? [] },
+    remainingDrift: [],
+  };
 }
 
 function printTargetMigration(home: ReturnType<typeof defaultHome>): ReturnType<typeof planTargetMigration> {
@@ -603,15 +734,49 @@ function printTargetMigration(home: ReturnType<typeof defaultHome>): ReturnType<
   return plan;
 }
 
-function cmdMigrate(home: ReturnType<typeof defaultHome>, args: string[]): void {
+function cmdMigrate(
+  home: ReturnType<typeof defaultHome>,
+  args: string[],
+  json = false,
+): JsonData | undefined {
   const [subject, ...rest] = args;
   if (subject !== 'targets' || rest.some((arg) => arg !== '--yes'))
     throw new Error('usage: skillspub migrate targets [--yes]');
-  const plan = printTargetMigration(home);
-  if (plan.status === 'already-migrated') return;
-  if (!rest.includes('--yes')) return;
-  applyTargetMigration(home, plan);
-  console.log(`Migrated Target registry: ${plan.targetFile}`);
+  const plan = json ? planTargetMigration(home) : printTargetMigration(home);
+  const planData = { operation: 'migrate.targets', ...plan };
+  const confirmed = rest.includes('--yes');
+  if (json && !confirmed) return { applied: false, plan: planData };
+  if (plan.status === 'already-migrated') {
+    if (json) return {
+      applied: confirmed,
+      plan: planData,
+      result: { status: 'already-migrated', targets: loadTargets(home) },
+      remainingDrift: [],
+    };
+    return;
+  }
+  if (!confirmed) return;
+  try {
+    applyTargetMigration(home, plan);
+  } catch (error) {
+    const cause = error as Error & { code?: string };
+    throw new CliError(
+      cause.code === 'concurrent_modification' ? 'concurrent_modification' : 'apply_failed',
+      cause.message,
+      1,
+      { partialEffects: cause.code === 'concurrent_modification' ? 'none' : 'unknown' },
+    );
+  }
+  if (!json) {
+    console.log(`Migrated Target registry: ${plan.targetFile}`);
+    return;
+  }
+  return {
+    applied: true,
+    plan: planData,
+    result: { status: 'migrated', targets: loadTargets(home) },
+    remainingDrift: [],
+  };
 }
 
 function prepareGlobalMutation(home: ReturnType<typeof defaultHome>): void {
@@ -622,12 +787,16 @@ function cmdTag(
   home: ReturnType<typeof defaultHome>,
   args: string[],
   json = false,
-): ReturnType<typeof tagsForResource> | ReturnType<typeof listTags> | undefined {
-  const [action, resource, ...names] = args;
+): JsonData | ReturnType<typeof tagsForResource> | ReturnType<typeof listTags> | undefined {
+  const confirmed = json && args.includes('--yes');
+  const [action, resource, ...names] = json ? args.filter((arg) => arg !== '--yes') : args;
   switch (action) {
     case 'add': {
       if (!resource || names.length === 0)
         throw new Error('usage: skillspub tag add <resource> <tag...>');
+      if (json) return runCatalogMutation(home, {
+        operation: 'tag.add', resource, names,
+      }, confirmed);
       prepareGlobalMutation(home);
       const added = addResourceTags(home, resource, names);
       console.log(`added ${added} tag${added === 1 ? '' : 's'} to ${resource}`);
@@ -635,6 +804,9 @@ function cmdTag(
     }
     case 'rm': {
       if (!resource) throw new Error('usage: skillspub tag rm <resource> [<tag...>]');
+      if (json) return runCatalogMutation(home, {
+        operation: 'tag.rm', resource, names,
+      }, confirmed);
       prepareGlobalMutation(home);
       const removed = removeResourceTags(home, resource, names);
       console.log(`removed ${removed} tag${removed === 1 ? '' : 's'} from ${resource}`);
@@ -681,28 +853,70 @@ function printPresetPlan(plan: PresetReconcilePlan): void {
   }
 }
 
+function presetPlanData(plan: PresetReconcilePlan, operation: string): JsonData {
+  return {
+    ...activationPlanData(plan, operation),
+    claims: plan.claims,
+    lastClaims: plan.lastClaims,
+    presetActivations: plan.presetActivations,
+    baseIntentDefaults: plan.baseIntentDefaults,
+  };
+}
+
 function runPresetPlan(
   home: ReturnType<typeof defaultHome>,
   plan: PresetReconcilePlan,
   scope: PresetScope,
-): void {
-  printPresetPlan(plan);
+  operation: string,
+  json = false,
+  confirmed = false,
+): JsonData | undefined {
+  const planData = presetPlanData(plan, operation);
+  if (json && !confirmed) return { applied: false, plan: planData };
+  if (!json) printPresetPlan(plan);
   try {
     applyPresetReconcile(home, plan, scope);
   } catch (error) {
-    let drift: string;
-    try {
-      const report = scope.projectPath
-        ? scanProjectInventory(home, scope.projectPath)
-        : scanGlobalInventory(home);
-      drift = remainingDrift(plan, report).join(', ') || 'none';
-    } catch (scanError) {
-      drift = `could not rescan: ${(scanError as Error).message}`;
-    }
-    throw new Error(`${(error as Error).message}\nRemaining drift: ${drift}`);
+    activationApplyError(home, plan, error, scope.projectPath);
   }
-  if (scope.projectPath) scanProjectInventory(home, scope.projectPath);
-  else scanGlobalInventory(home);
+  const report = scope.projectPath
+    ? scanProjectInventory(home, scope.projectPath)
+    : scanGlobalInventory(home);
+  if (json) return {
+    applied: true,
+    plan: planData,
+    result: { verified: true },
+    remainingDrift: remainingDrift(plan, report),
+  };
+}
+
+function presetDeletePlanData(
+  home: ReturnType<typeof defaultHome>,
+  name: string,
+  projectPath?: string,
+): JsonData {
+  const selectors = showPreset(home, name);
+  const globalState = readState(home);
+  const globalTargets = (globalState.presetActivations as Record<string, string[]> | undefined)?.[name] ?? [];
+  const deactivations: JsonData[] = [];
+  if (globalTargets.length > 0)
+    deactivations.push(presetPlanData(deactivatePreset(home, name, globalTargets), 'preset.deactivate'));
+  if (projectPath) {
+    const realProject = fs.realpathSync(projectPath);
+    const projectState = readStateFile(path.join(realProject, '.skillspub', 'state.json'));
+    const projectTargets = (projectState.presetActivations as Record<string, string[]> | undefined)?.[name] ?? [];
+    if (projectTargets.length > 0) deactivations.push(presetPlanData(
+      deactivatePreset(home, name, projectTargets, { projectPath: realProject }),
+      'preset.deactivate',
+    ));
+  }
+  return {
+    operation: 'preset.delete',
+    name,
+    selectors,
+    deactivations,
+    ...(projectPath ? { projectPath: fs.realpathSync(projectPath) } : {}),
+  };
 }
 
 function cmdPreset(
@@ -712,7 +926,8 @@ function cmdPreset(
   json = false,
 ): JsonData | ReturnType<typeof listPresets> | undefined {
   const scope: PresetScope = projectPath ? { projectPath } : {};
-  const [action, name, ...rest] = args;
+  const confirmed = json && args.includes('--yes');
+  const [action, name, ...rest] = json ? args.filter((arg) => arg !== '--yes') : args;
   switch (action) {
     case 'ls': {
       if (name) throw new Error('usage: skillspub preset ls');
@@ -735,6 +950,9 @@ function cmdPreset(
     }
     case 'create': {
       if (!name) throw new Error('usage: skillspub preset create <name> [<selector...>]');
+      if (json) return runCatalogMutation(home, {
+        operation: 'preset.create', name, selectors: rest,
+      }, confirmed);
       prepareGlobalMutation(home);
       const count = createPreset(home, name, rest);
       console.log(`created preset ${name} with ${count} selector${count === 1 ? '' : 's'}`);
@@ -743,6 +961,9 @@ function cmdPreset(
     case 'add': {
       if (!name || rest.length === 0)
         throw new Error('usage: skillspub preset add <name> <selector...>');
+      if (json) return runCatalogMutation(home, {
+        operation: 'preset.add', name, selectors: rest,
+      }, confirmed);
       prepareGlobalMutation(home);
       const added = addPresetSelectors(home, name, rest);
       console.log(`added ${added} selector${added === 1 ? '' : 's'} to ${name}`);
@@ -750,6 +971,9 @@ function cmdPreset(
     }
     case 'rm': {
       if (!name) throw new Error('usage: skillspub preset rm <name> [<selector...>]');
+      if (json) return runCatalogMutation(home, {
+        operation: 'preset.rm', name, selectors: rest,
+      }, confirmed);
       prepareGlobalMutation(home);
       const removed = removePresetSelectors(home, name, rest);
       console.log(removed === undefined
@@ -760,31 +984,64 @@ function cmdPreset(
     case 'activate': {
       if (!name || rest.length === 0)
         throw new Error('usage: skillspub preset activate <name> <target...>');
-      runPresetPlan(home, activatePreset(home, name, rest, scope), scope);
-      break;
+      return runPresetPlan(
+        home,
+        activatePreset(home, name, rest, scope),
+        scope,
+        'preset.activate',
+        json,
+        confirmed,
+      );
     }
     case 'deactivate': {
       if (!name || rest.length === 0)
         throw new Error('usage: skillspub preset deactivate <name> <target...>');
-      runPresetPlan(home, deactivatePreset(home, name, rest, scope), scope);
-      break;
+      return runPresetPlan(
+        home,
+        deactivatePreset(home, name, rest, scope),
+        scope,
+        'preset.deactivate',
+        json,
+        confirmed,
+      );
     }
     case 'reconcile': {
       const presetName = name;
       const targets = rest;
-      runPresetPlan(
+      return runPresetPlan(
         home,
         planPresetReconcile(home, presetName, targets.length > 0 ? targets : undefined, scope),
         scope,
+        'preset.reconcile',
+        json,
+        confirmed,
       );
-      break;
     }
     case 'delete': {
-      if (!name) throw new Error('usage: skillspub preset delete <name> [--yes]');
-      const yes = rest.includes('--yes');
-      if (rest.some((arg) => arg !== '--yes'))
+      if (!name || rest.some((arg) => arg !== '--yes'))
         throw new Error('usage: skillspub preset delete <name> [--yes]');
-      deletePreset(home, name, { yes, projectPath });
+      if (json) {
+        const plan = presetDeletePlanData(home, name, projectPath);
+        if (!confirmed) return { applied: false, plan };
+        try {
+          deletePreset(home, name, { yes: true, projectPath });
+        } catch (error) {
+          const cause = error as Error & { code?: string };
+          throw new CliError(
+            cause.code === 'concurrent_modification' ? 'concurrent_modification' : 'apply_failed',
+            cause.message,
+            1,
+            { partialEffects: cause.code === 'concurrent_modification' ? 'none' : 'unknown' },
+          );
+        }
+        return {
+          applied: true,
+          plan,
+          result: { deleted: true },
+          remainingDrift: [],
+        };
+      }
+      deletePreset(home, name, { yes: args.includes('--yes'), projectPath });
       console.log(`deleted preset ${name}`);
       break;
     }
@@ -795,12 +1052,28 @@ function cmdPreset(
   }
 }
 
+function runCatalogMutation(
+  home: ReturnType<typeof defaultHome>,
+  mutation: CatalogMutation,
+  confirmed: boolean,
+): JsonData {
+  const plan = planCatalogMutation(
+    home,
+    scanGlobalInventory(home, undefined, { persist: false }),
+    mutation,
+  );
+  if (!confirmed) return { applied: false, plan };
+  const result = applyCatalogMutation(home, plan);
+  return { applied: true, plan, result, remainingDrift: [] };
+}
+
 function cmdBundle(
   home: ReturnType<typeof defaultHome>,
   args: string[],
   json = false,
 ): JsonData | ReturnType<typeof listBundles> | undefined {
-  const [action, name, ...selectors] = args;
+  const confirmed = json && args.includes('--yes');
+  const [action, name, ...selectors] = json ? args.filter((arg) => arg !== '--yes') : args;
   switch (action) {
     case 'ls': {
       if (name) throw new Error('usage: skillspub bundle ls');
@@ -824,6 +1097,9 @@ function cmdBundle(
     }
     case 'create': {
       if (!name) throw new Error('usage: skillspub bundle create <name> [<skill>...]');
+      if (json) return runCatalogMutation(home, {
+        operation: 'bundle.create', name, selectors,
+      }, confirmed);
       prepareGlobalMutation(home);
       const count = createBundle(home, name, selectors);
       console.log(`created bundle ${name} with ${count} member${count === 1 ? '' : 's'}`);
@@ -832,6 +1108,9 @@ function cmdBundle(
     case 'add': {
       if (!name || selectors.length === 0)
         throw new Error('usage: skillspub bundle add <name> <skill...>');
+      if (json) return runCatalogMutation(home, {
+        operation: 'bundle.add', name, selectors,
+      }, confirmed);
       prepareGlobalMutation(home);
       const added = addBundleMembers(home, name, selectors);
       console.log(`added ${added} member${added === 1 ? '' : 's'} to ${name}`);
@@ -839,6 +1118,9 @@ function cmdBundle(
     }
     case 'rm': {
       if (!name) throw new Error('usage: skillspub bundle rm <name> [<skill>...]');
+      if (json) return runCatalogMutation(home, {
+        operation: 'bundle.rm', name, selectors,
+      }, confirmed);
       prepareGlobalMutation(home);
       const removed = removeBundleMembers(home, name, selectors);
       console.log(removed === undefined
@@ -856,8 +1138,9 @@ function cmdShared(
   args: string[],
   projectPath?: string,
   json = false,
-): SharedFindResult | SharedDescribeResult | SharedUpdateAvailabilityResult | undefined {
-  const [action, ...rest] = args;
+): JsonData | SharedFindResult | SharedDescribeResult | SharedUpdateAvailabilityResult | undefined {
+  const confirmed = json && args.includes('--yes');
+  const [action, ...rest] = json ? args.filter((arg) => arg !== '--yes') : args;
   switch (action) {
     case 'find':
       return sharedFind(home, rest, projectPath, !json);
@@ -893,7 +1176,31 @@ function cmdShared(
       });
       if (positionals.length !== 1 || !values.skill)
         throw new Error('usage: skillspub shared add <source> --skill <name> [--replace]');
-      const result = sharedAdd(home, positionals[0], values.skill, Boolean(values.replace), projectPath);
+      const plan = planSharedAdd(
+        home,
+        positionals[0],
+        values.skill,
+        Boolean(values.replace),
+        projectPath,
+      );
+      if (plan.replacement && !values.replace) {
+        if (!json) console.log(`Replace: ${plan.replacement.from} -> ${plan.replacement.to}`);
+        if (json) throw new CliError(
+          'preflight_error',
+          'source replacement requires --replace',
+          1,
+          { plan, requiredOption: '--replace' },
+        );
+      }
+      if (json && !confirmed) return { applied: false, plan };
+      const result = sharedAdd(
+        home,
+        positionals[0],
+        values.skill,
+        Boolean(values.replace),
+        projectPath,
+      );
+      if (json) return { applied: true, plan, result, remainingDrift: result.drift };
       console.log(`Actual: ${result.actual}`);
       console.log(`Remaining drift: ${result.drift.join(', ') || 'none'}`);
       console.log('Running Harnesses must reload/restart to read the final Shared Target state.');
@@ -902,11 +1209,17 @@ function cmdShared(
     case 'update': {
       if (rest.some((arg) => arg.startsWith('-')))
         throw new Error('usage: skillspub shared update [<managed-name>...]');
+      if (!json) {
+        const result = sharedUpdate(home, rest, projectPath);
+        console.log(`Actual: ${result.actual}`);
+        console.log(`Remaining drift: ${result.drift.join(', ') || 'none'}`);
+        console.log('Running Harnesses must reload/restart to read the final Shared Target state.');
+        break;
+      }
+      const plan = planSharedUpdate(home, rest, projectPath);
+      if (!confirmed) return { applied: false, plan };
       const result = sharedUpdate(home, rest, projectPath);
-      console.log(`Actual: ${result.actual}`);
-      console.log(`Remaining drift: ${result.drift.join(', ') || 'none'}`);
-      console.log('Running Harnesses must reload/restart to read the final Shared Target state.');
-      break;
+      return { applied: true, plan, result, remainingDrift: result.drift };
     }
     case 'remove': {
       const { values, positionals } = parseArgs({
@@ -918,16 +1231,20 @@ function cmdShared(
       if (positionals.length === 0)
         throw new Error('usage: skillspub shared remove <managed-name...> [--yes]');
       const preview = planSharedRemove(home, positionals, projectPath);
-      console.log('Removal plan:');
-      if (preview.dependencies.length === 0) console.log('  no scanned dependent Relationships');
-      else for (const dependency of preview.dependencies)
-        console.log(`  - ${dependency.targetId}/${dependency.slot}: ${dependency.form} ${dependency.path}`);
-      console.log('Warning: SkillsPub has no central project index; projects outside this scan may retain broken Links.');
+      if (json && !confirmed) return { applied: false, plan: preview };
+      if (!json) {
+        console.log('Removal plan:');
+        if (preview.dependencies.length === 0) console.log('  no scanned dependent Relationships');
+        else for (const dependency of preview.dependencies)
+          console.log(`  - ${dependency.targetId}/${dependency.slot}: ${dependency.form} ${dependency.path}`);
+        for (const warning of preview.warnings) console.log(`Warning: ${warning}`);
+      }
       const result = sharedRemove(home, positionals, {
-        cascadeConfirmed: Boolean(values.yes),
+        cascadeConfirmed: json ? true : Boolean(values.yes),
         projectPath,
         expected: preview,
       });
+      if (json) return { applied: true, plan: preview, result, remainingDrift: result.drift };
       console.log(`Actual: ${result.actual}`);
       console.log(`Remaining drift: ${result.drift.join(', ') || 'none'}`);
       console.log('Running Harnesses must reload/restart to read the final Shared Target state.');
@@ -963,7 +1280,7 @@ function cmdDoctor(
   args: string[],
   projectPath?: string,
   json = false,
-): DoctorReport | undefined {
+): JsonData | DoctorReport | undefined {
   const { values } = parseArgs({
     args,
     options: {
@@ -978,20 +1295,50 @@ function cmdDoctor(
     ? doctorProjectInventory(home, projectPath)
     : doctorGlobalInventory(home);
   const report = diagnose();
-  if (json) return report;
-  printDoctor(report);
-  if (!values.repair || report.repairs.length === 0) return;
+  if (json && !values.repair) return report;
+  const plan = {
+    operation: 'doctor.repair',
+    scope: report.scope,
+    ...(report.projectPath ? { projectPath: report.projectPath } : {}),
+    repairs: report.repairs,
+  };
+  if (json && !values.yes) return { applied: false, plan };
+  if (!json) printDoctor(report);
+  if (!values.repair || report.repairs.length === 0) {
+    if (json) return {
+      applied: Boolean(values.yes),
+      plan,
+      result: { completed: [], report },
+      remainingDrift: [],
+    };
+    return;
+  }
   if (!values.yes)
     throw new Error('repairs require confirmation; rerun with --repair --yes');
 
   const result = applyDoctorRepairs(report.repairs);
+  const remaining = diagnose();
+  if (json) {
+    if (result.failed) throw new CliError(
+      'partial_apply',
+      `repair failed: ${result.failed.repair.path}: ${result.failed.error}`,
+      1,
+      { completed: result.completed, failed: result.failed, remaining },
+    );
+    return {
+      applied: true,
+      plan,
+      result: { completed: result.completed, report: remaining },
+      remainingDrift: remaining.repairs.map(({ path }) => path),
+    };
+  }
   console.log(`Applied repairs: ${result.completed.length}`);
   if (result.failed) {
     console.error(`Repair failed: ${result.failed.repair.path}: ${result.failed.error}`);
-    printDoctor(diagnose());
+    printDoctor(remaining);
     throw new Error('repair stopped; remaining anomalies are shown above');
   }
-  printDoctor(diagnose());
+  printDoctor(remaining);
 }
 
 function printHarnessDrift(
@@ -1050,17 +1397,14 @@ async function main(
 ): Promise<void> {
   const json = args.includes('--json');
   const [cmd, ...rest] = args.filter((arg) => arg !== '--json');
+  const mutation = isMutationCommand(cmd, rest);
   const home = defaultHome({ migrate: false });
   try {
     let data: unknown;
     if (json && cmd === 'tui')
       throw new CliError('usage_error', 'skillspub tui does not support --json', 2);
-    if (json && !supportsReadOnlyJson(cmd, rest))
-      throw new CliError(
-        'json_not_supported',
-        'JSON mode for mutating commands is not available yet',
-        2,
-      );
+    if (json && rest.includes('--yes') && !mutation)
+      throw new CliError('usage_error', '--yes is only valid for mutating commands', 2);
     if (!json && shouldRunTui(cmd, stdinIsTty, stdoutIsTty)) {
       let projectPath: string | undefined;
       const args = [...rest];
@@ -1075,10 +1419,10 @@ async function main(
         data = cmdLs(home, rest, json);
         break;
       case 'on':
-        cmdOnOff(home, true, rest);
+        data = cmdOnOff(home, true, rest, json);
         break;
       case 'off':
-        cmdOnOff(home, false, rest);
+        data = cmdOnOff(home, false, rest, json);
         break;
       case 'status':
         data = cmdStatus(home, rest, json);
@@ -1087,7 +1431,7 @@ async function main(
         data = cmdExplain(home, rest, undefined, json);
         break;
       case 'mirror':
-        cmdMirror(home, rest);
+        data = cmdMirror(home, rest, undefined, json);
         break;
       case 'bundle':
         data = cmdBundle(home, rest, json);
@@ -1129,7 +1473,8 @@ async function main(
           data = cmdShared(home, projectArgs, projectPath, json);
         else if (projectCommand === 'preset')
           data = cmdPreset(home, projectArgs, projectPath, json);
-        else if (projectCommand === 'mirror') cmdMirror(home, projectArgs, projectPath);
+        else if (projectCommand === 'mirror')
+          data = cmdMirror(home, projectArgs, projectPath, json);
         else if (projectCommand === 'harnesses')
           data = cmdHarnesses(home, projectArgs, projectPath, json);
         else throw new Error('usage: skillspub project <path> scan|doctor|explain|shared|preset|mirror|harnesses');
@@ -1142,7 +1487,7 @@ async function main(
         data = cmdHarnesses(home, rest, undefined, json);
         break;
       case 'migrate':
-        cmdMigrate(home, rest);
+        data = cmdMigrate(home, rest, json);
         break;
       default:
         if (json) throw new Error(`usage: ${cmd ? `unknown command ${cmd}` : 'skillspub <command>'}`);
@@ -1153,7 +1498,7 @@ async function main(
     if (json) writeJson({ schemaVersion: 1, ok: true, data });
   } catch (err) {
     if (json) {
-      const { code, exitCode, details } = errorInfo(err);
+      const { code, exitCode, details } = errorInfo(err, mutation);
       writeJson({
         schemaVersion: 1,
         ok: false,
@@ -1166,7 +1511,7 @@ async function main(
       process.exitCode = exitCode;
     } else {
       console.error(`skillspub: ${(err as Error).message}`);
-      process.exitCode = errorInfo(err).exitCode;
+      process.exitCode = errorInfo(err, mutation).exitCode;
     }
   }
 }
