@@ -279,10 +279,15 @@ test('unreadable compatibility roots make Grok visibility unknown', () => {
     root.targetKey === 'cursor' && root.consumption === 'unknown'));
 });
 
-test('Grok visible plans prefer its managed Mirror Target after isolation', () => {
-  const { roots, resource, run } = setup();
-  fs.mkdirSync(path.dirname(roots.grok), { recursive: true });
-  fs.writeFileSync(path.join(path.dirname(roots.grok), 'config.toml'), [
+test('an older registry drives Grok visibility, Mirror, and parking plans without writes', () => {
+  const { configDir, roots, resource, run } = setup();
+  const grokHome = path.dirname(roots.grok);
+  const targetFile = path.join(configDir, 'targets.json');
+  const registry = JSON.parse(fs.readFileSync(targetFile, 'utf8'));
+  registry.overrides = registry.overrides.filter(({ key }: { key: string }) => key !== 'grok');
+  fs.writeFileSync(targetFile, JSON.stringify(registry));
+  fs.mkdirSync(grokHome, { recursive: true });
+  fs.writeFileSync(path.join(grokHome, 'config.toml'), [
     '[skills]',
     `ignore = ["${roots.shared}"]`,
     '[compat.claude]',
@@ -291,15 +296,32 @@ test('Grok visible plans prefer its managed Mirror Target after isolation', () =
     'skills = false',
     '',
   ].join('\n'));
+  const parked = path.join(roots.grok, 'parked');
+  fs.mkdirSync(parked, { recursive: true });
+  fs.writeFileSync(path.join(parked, 'SKILL.md'), '# parked');
+  const env = { GROK_HOME: grokHome };
+  const before = fs.readdirSync(configDir, { recursive: true }).sort();
+  const targetBefore = fs.readFileSync(targetFile, 'utf8');
 
-  const result = run(['explain', `skill:${resource}`, '--harness', 'grok', '--want', 'visible', '--json']);
+  const result = run(
+    ['explain', `skill:${resource}`, '--harness', 'grok', '--want', 'visible', '--json'],
+    env,
+  );
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const grok = json(result).data.harnesses[0];
   assert.equal(grok.effectiveVisibility, 'not-visible');
   assert.equal(grok.plan.executable, true);
   assert.equal(grok.plan.steps[0].operation, 'create-mirror');
   assert.equal(grok.plan.steps[0].form, 'mirror');
-  assert.equal(fs.existsSync(path.join(roots.grok, 'demo')), false);
+
+  const off = run(['off', `skill:${fs.realpathSync(parked)}`, 'grok', '--json'], env);
+  assert.equal(off.status, 0, off.stderr || off.stdout);
+  assert.equal(
+    json(off).data.plan.targets[0].destination,
+    path.join(grokHome, '.skillspub-off', 'skills', 'parked'),
+  );
+  assert.equal(fs.readFileSync(targetFile, 'utf8'), targetBefore);
+  assert.deepEqual(fs.readdirSync(configDir, { recursive: true }).sort(), before);
 });
 
 test('Explain performs no network calls or local writes', () => {

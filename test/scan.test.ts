@@ -5,12 +5,15 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   applyTargetMigration,
+  defaultTargetDefinitions,
   loadTargets,
   normalizeSlotName,
   planTargetMigration,
   scanGlobalInventory,
   scanProjectInventory,
+  type GenericTarget,
   type SkillTarget,
+  type TargetDefinitionOverride,
 } from '../src/inventory.ts';
 import type { Home } from '../src/core.ts';
 
@@ -464,6 +467,128 @@ test('malformed installer lock is structural, not an external source replacement
     'structural',
   );
   assert.equal(invalidField.findings.some(({ code }) => code === 'source-changed'), false);
+});
+
+test('existing Target registries merge later built-ins without mutation', () => {
+  const home = tmpHome();
+  const file = path.join(home.configDir, 'targets.json');
+  const genericRoot = path.join(home.configDir, 'generic', 'skills');
+  const project = path.join(home.configDir, 'project');
+  fs.mkdirSync(project);
+  const previousGrokHome = process.env.GROK_HOME;
+  process.env.GROK_HOME = path.join(home.configDir, 'grok');
+  try {
+    const definitions = defaultTargetDefinitions();
+    const oldKeys = new Set(['claude', 'shared', 'pi']);
+    const overrides = definitions
+      .filter(({ key }) => oldKeys.has(key))
+      .map(({ key, projectPath }): TargetDefinitionOverride => {
+        if (key === 'claude') return { key, disabled: true };
+        return {
+          key,
+          discoveryRoot: path.join(home.configDir, key, 'skills'),
+          parkingRoot: path.join(home.configDir, key, '.skillspub-off', 'skills'),
+          projectPath,
+          ...(key === 'shared'
+            ? { lockFile: path.join(home.configDir, key, 'custom-lock.json') }
+            : {}),
+        };
+      });
+    const genericTarget: GenericTarget = {
+      key: 'custom',
+      kind: 'generic',
+      discoveryRoot: genericRoot,
+      parkingRoot: path.join(home.configDir, 'generic', '.skillspub-off', 'skills'),
+      projectPath: '.custom/skills',
+      lockFile: path.join(home.configDir, 'generic', 'custom-lock.json'),
+    };
+    fs.writeFileSync(file, JSON.stringify({
+      version: 1,
+      overrides,
+      genericTargets: [genericTarget],
+    }, null, 2) + '\n');
+    const before = fs.readFileSync(file, 'utf8');
+    const beforeEntries = fs.readdirSync(home.configDir, { recursive: true }).sort();
+
+    const targets = loadTargets(home);
+
+    assert.deepEqual(
+      targets.map(({ key }) => key),
+      [...definitions.filter(({ key }) => key !== 'claude').map(({ key }) => key), 'custom'],
+    );
+    for (const override of overrides) {
+      const target = targets.find(({ key }) => key === override.key);
+      if (override.disabled) {
+        assert.equal(target, undefined);
+        continue;
+      }
+      assert.deepEqual(target && {
+        key: target.key,
+        discoveryRoot: target.discoveryRoot,
+        parkingRoot: target.parkingRoot,
+        projectPath: target.projectPath,
+        ...(target.lockFile ? { lockFile: target.lockFile } : {}),
+      }, override);
+    }
+    const custom = targets.find(({ key }) => key === 'custom');
+    assert.deepEqual(custom && {
+      key: custom.key,
+      kind: custom.kind,
+      discoveryRoot: custom.discoveryRoot,
+      parkingRoot: custom.parkingRoot,
+      projectPath: custom.projectPath,
+      lockFile: custom.lockFile,
+    }, genericTarget);
+    const canonicalProject = fs.realpathSync(project);
+    const projectGrok = scanProjectInventory(home, project, undefined, { persist: false }).targets
+      .find(({ key, scope }) => key === 'grok' && scope === 'project');
+    assert.equal(projectGrok?.discoveryRoot, path.join(canonicalProject, '.grok', 'skills'));
+    assert.equal(projectGrok?.parkingRoot, path.join(canonicalProject, '.skillspub', 'off', 'grok'));
+    assert.equal(fs.readFileSync(file, 'utf8'), before);
+    assert.deepEqual(fs.readdirSync(home.configDir, { recursive: true }).sort(), beforeEntries);
+  } finally {
+    if (previousGrokHome === undefined) delete process.env.GROK_HOME;
+    else process.env.GROK_HOME = previousGrokHome;
+  }
+});
+
+test('new built-ins reject conflicting Generic Target identities', () => {
+  const previousGrokHome = process.env.GROK_HOME;
+  try {
+    for (const conflict of ['key', 'root'] as const) {
+      const home = tmpHome();
+      const grokRoot = path.join(home.configDir, 'grok', 'skills');
+      process.env.GROK_HOME = path.dirname(grokRoot);
+      let genericRoot = path.join(home.configDir, 'generic', 'skills');
+      if (conflict === 'root') {
+        fs.mkdirSync(grokRoot, { recursive: true });
+        genericRoot = path.join(home.configDir, 'grok-alias');
+        fs.symlinkSync(grokRoot, genericRoot, 'dir');
+      }
+      const file = path.join(home.configDir, 'targets.json');
+      fs.writeFileSync(file, JSON.stringify({
+        version: 1,
+        overrides: [],
+        genericTargets: [{
+          key: conflict === 'key' ? 'grok' : 'custom',
+          kind: 'generic',
+          discoveryRoot: genericRoot,
+          parkingRoot: path.join(home.configDir, 'generic', '.skillspub-off', 'skills'),
+          projectPath: '.custom/skills',
+        }],
+      }));
+      const before = fs.readFileSync(file, 'utf8');
+
+      assert.throws(
+        () => loadTargets(home),
+        conflict === 'key' ? /duplicate Skill Target key: grok/ : /ambiguous Skill Target discovery root/,
+      );
+      assert.equal(fs.readFileSync(file, 'utf8'), before);
+    }
+  } finally {
+    if (previousGrokHome === undefined) delete process.env.GROK_HOME;
+    else process.env.GROK_HOME = previousGrokHome;
+  }
 });
 
 test('Target migration previews legacy Runtime overrides and Generic Targets without side effects', () => {

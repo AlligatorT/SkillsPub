@@ -610,6 +610,54 @@ test('JSON migration and repair preview safely and apply the same plan with --ye
   assert.throws(() => fs.lstatSync(broken), /ENOENT/);
 });
 
+test('read-only CLI surfaces merge a detected built-in missing from an older Target registry', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-forward-targets-'));
+  const userHome = path.join(configDir, 'home');
+  const grokHome = path.join(userHome, '.grok');
+  const targetFile = path.join(configDir, 'targets.json');
+  fs.mkdirSync(grokHome, { recursive: true });
+  fs.writeFileSync(path.join(grokHome, 'config.toml'), '# detected\n');
+  fs.writeFileSync(targetFile, JSON.stringify({
+    version: 1,
+    overrides: ['claude', 'shared', 'pi'].map((key) => ({
+      key,
+      discoveryRoot: path.join(userHome, `.${key}`, 'skills'),
+      parkingRoot: path.join(userHome, `.${key}`, '.skillspub-off', 'skills'),
+      projectPath: `.${key}/skills`,
+    })),
+    genericTargets: [{
+      key: 'custom',
+      kind: 'generic',
+      discoveryRoot: path.join(userHome, '.custom', 'skills'),
+      parkingRoot: path.join(userHome, '.custom', '.skillspub-off', 'skills'),
+      projectPath: '.custom/skills',
+    }],
+  }, null, 2) + '\n');
+  const before = fs.readFileSync(targetFile, 'utf8');
+  const beforeEntries = fs.readdirSync(configDir, { recursive: true }).sort();
+  const run = (command: string) => {
+    const result = spawnSync('node', [CLI, command, '--json'], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        HOME: userHome,
+        GROK_HOME: grokHome,
+        SKILLSPUB_CONFIG_DIR: configDir,
+      },
+    });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    return JSON.parse(result.stdout).data;
+  };
+
+  assert.deepEqual(run('targets').map(({ key }: { key: string }) => key), [
+    'claude', 'shared', 'grok', 'pi', 'custom',
+  ]);
+  assert.ok(run('scan').inventory.targets.some(({ key }: { key: string }) => key === 'grok'));
+  assert.ok(run('harnesses').detected.some(({ key }: { key: string }) => key === 'grok'));
+  assert.equal(fs.readFileSync(targetFile, 'utf8'), before);
+  assert.deepEqual(fs.readdirSync(configDir, { recursive: true }).sort(), beforeEntries);
+});
+
 test('read-only Target commands do not migrate a legacy registry', () => {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-read-only-targets-'));
   const discoveryRoot = path.join(configDir, 'shared', 'skills');
