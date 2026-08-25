@@ -281,6 +281,38 @@ test('TUI startup reads legacy configuration without creating a Target registry 
   assert.equal(fs.existsSync(path.join(home.configDir, 'state.json')), false);
 });
 
+test('TUI shows a detected built-in missing from an older Target registry without writes', async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-tui-forward-targets-'));
+  const configDir = path.join(root, 'config');
+  const userHome = path.join(root, 'home');
+  const grokHome = path.join(userHome, '.grok');
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.mkdirSync(grokHome, { recursive: true });
+  fs.writeFileSync(path.join(grokHome, 'config.toml'), '# detected\n');
+  const targetFile = path.join(configDir, 'targets.json');
+  fs.writeFileSync(targetFile, JSON.stringify({
+    version: 1,
+    overrides: ['claude', 'shared', 'pi'].map((key) => ({
+      key,
+      discoveryRoot: path.join(userHome, `.${key}`, 'skills'),
+      parkingRoot: path.join(userHome, `.${key}`, '.skillspub-off', 'skills'),
+      projectPath: `.${key}/skills`,
+    })),
+    genericTargets: [],
+  }, null, 2) + '\n');
+  useFixtureEnv(context, { HOME: userHome, GROK_HOME: grokHome });
+  const before = fs.readFileSync(targetFile, 'utf8');
+  const beforeEntries = fs.readdirSync(root, { recursive: true }).sort();
+
+  const t = await renderApp({ configDir });
+  const frame = t.stdout.frame();
+  t.unmount();
+
+  assert.match(frame, /grok \[managed\]/);
+  assert.equal(fs.readFileSync(targetFile, 'utf8'), before);
+  assert.deepEqual(fs.readdirSync(root, { recursive: true }).sort(), beforeEntries);
+});
+
 test('initial projection: first agent selected, all relationship kinds shown, absent excluded', async () => {
   const { home } = setup();
   const t = await renderApp(home);
