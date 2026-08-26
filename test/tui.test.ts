@@ -340,15 +340,24 @@ test('TUI reports a detected built-in pending explicit legacy migration without 
   const wide = await renderApp({ configDir }, 100);
   const wideLines = wide.stdout.frame().split('\n');
   wide.unmount();
-  assert.ok(wideLines.some((line) => line.includes('Pending migration')));
-  assert.ok(wideLines.some((line) => line.includes('Grok Build [managed]')));
-  assert.ok(wideLines.some((line) => line.includes('claude [managed]')));
+  const widePending = wideLines.find((line) => line.includes('Pending migration'));
+  const wideHarness = wideLines.find((line) => line.includes('Grok Build [managed]'));
+  const wideTarget = wideLines.find((line) => line.includes('claude [managed]'));
+  assert.equal(widePending?.indexOf('Pending migration'), 2);
+  assert.equal(wideTarget?.indexOf('claude'), 3);
+  assert.equal(wideHarness?.indexOf('Grok Build'), 3);
 
   const narrow = await renderApp({ configDir }, 36);
   let narrowLines = narrow.stdout.frame().split('\n');
-  assert.ok(narrowLines.some((line) => line.includes('Pending') && line.includes('…')));
-  assert.ok(narrowLines.some((line) => line.includes('Grok Build') && line.includes('…')));
-  assert.ok(narrowLines.some((line) => line.includes('claude') && line.includes('[ ON ]')));
+  const narrowPending = narrowLines.find((line) => line.includes('Pending'));
+  const narrowHarness = narrowLines.find((line) => line.includes('Grok Build'));
+  const narrowTarget = narrowLines.find((line) => line.includes('claude'));
+  assert.equal(narrowPending?.indexOf('Pending'), 2);
+  assert.equal(narrowTarget?.indexOf('claude'), 3);
+  assert.equal(narrowHarness?.indexOf('Grok Build'), 3);
+  assert.ok(narrowPending?.includes('…'));
+  assert.ok(narrowHarness?.includes('…'));
+  assert.ok(narrowTarget?.includes('[ ON ]'));
   assert.match(narrow.stdout.frame(), /Relationships/);
   await narrow.send('j');
   assert.match(narrow.stdout.frame(), /› shared/);
@@ -1231,11 +1240,16 @@ test('TUI keeps undetected Harnesses in a compact Available section', async () =
     genericTargets: [],
   }));
 
-  const t = await renderApp({ configDir });
-  const frame = t.stdout.frame();
-  assert.match(frame, /Available[\s\S]*Pi \[managed\]/);
-  assert.doesNotMatch(frame, /Shared enabled|Isolation unmanaged/);
-  t.unmount();
+  for (const columns of [100, 36]) {
+    const t = await renderApp({ configDir }, columns);
+    const lines = t.stdout.frame().split('\n');
+    const heading = lines.find((line) => line.includes('Available'));
+    const harness = lines.find((line) => line.includes('Pi [managed]'));
+    assert.equal(heading?.indexOf('Available'), 2);
+    assert.equal(harness?.indexOf('Pi'), 3);
+    assert.doesNotMatch(t.stdout.frame(), /Shared enabled|Isolation unmanaged/);
+    t.unmount();
+  }
 });
 
 test('narrow TUI opens Harness details from a selected Target', async () => {

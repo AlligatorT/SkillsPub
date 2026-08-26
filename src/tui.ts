@@ -261,7 +261,7 @@ function TargetList({
     ...(pending.length === 0 ? [] : [' Pending migration']),
     ...(harnesses.available.length === 0 ? [] : [' Available']),
     ...[...pending, ...harnesses.available]
-      .map(({name, support}) => `   ${name} [${support}]`),
+      .map(({name, support}) => `  ${name} [${support}]`),
   ];
   const width = Math.min(maxWidth, 32, Math.max(18, ...rows.map((row) => row.length + 2)));
   return h(
@@ -283,7 +283,7 @@ function TargetList({
           ...pending.map((harness) => h(
             Text,
             {key: `pending:${harness.key}`, dimColor: true, wrap: 'truncate-end'},
-            `   ${harness.name} [${harness.support}]`,
+            `  ${harness.name} [${harness.support}]`,
           )),
         ]),
     ...(harnesses.available.length === 0
@@ -293,7 +293,7 @@ function TargetList({
           ...harnesses.available.map((harness) => h(
             Text,
             {key: `available:${harness.key}`, dimColor: true, wrap: 'truncate-end'},
-            `   ${harness.name} [${harness.support}]`,
+            `  ${harness.name} [${harness.support}]`,
           )),
         ]),
   );
