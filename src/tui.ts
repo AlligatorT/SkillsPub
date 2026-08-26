@@ -235,6 +235,7 @@ function RowLine({
 function TargetList({
   targets,
   harnesses,
+  pendingTargetKeys,
   selected,
   focused,
   width,
@@ -242,6 +243,7 @@ function TargetList({
 }: {
   targets: TuiSnapshot['targets'];
   harnesses: TuiSnapshot['harnesses'];
+  pendingTargetKeys: TuiSnapshot['pendingTargetKeys'];
   selected: number;
   focused: boolean;
   width: number;
@@ -249,6 +251,8 @@ function TargetList({
 }): ReactNode {
   const start = windowStart(targets.length, selected, height);
   const detected = new Map(harnesses.detected.map((harness) => [harness.key, harness]));
+  const pendingKeys = new Set(pendingTargetKeys);
+  const pending = harnesses.detected.filter(({ key }) => pendingKeys.has(key));
   return h(
     ListColumn,
     {title: 'Targets', focused, width},
@@ -261,6 +265,13 @@ function TargetList({
         harness ? h(Text, {dimColor: true}, ` [${harness.support}]`) : null,
       );
     }),
+    ...(pending.length === 0
+      ? []
+      : [
+          h(Text, {key: 'pending-migration', dimColor: true}, ' Pending migration'),
+          ...pending.map((harness) =>
+            h(Text, {key: `pending:${harness.key}`, dimColor: true}, `   ${harness.name} [${harness.support}]`)),
+        ]),
     ...(harnesses.available.length === 0
       ? []
       : [
@@ -1627,6 +1638,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
             h(TargetList, {
               targets,
               harnesses: snapshot.harnesses,
+              pendingTargetKeys: snapshot.pendingTargetKeys,
               selected: targetIndex,
               focused: focusColumn === 0,
               width: targetWidth,

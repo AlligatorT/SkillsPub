@@ -9,6 +9,7 @@ import {
 import {
   readStateFile,
   targetSlotId,
+  pendingTargetDefinitions,
   scanGlobalInventory,
   scanProjectInventory,
   type InventoryScanReport,
@@ -350,6 +351,7 @@ export interface SkillDetail {
 export interface TuiSnapshot {
   targets: Target[];
   harnesses: ReturnType<typeof inspectHarnesses>;
+  pendingTargetKeys: string[];
   rows: Row[];
   /** Project root when this is a project-scope snapshot (ADR-0010). */
   project?: string;
@@ -397,6 +399,7 @@ export function tuiSnapshot(home: Home): TuiSnapshot {
   return {
     targets: visibleTargets(report, harnesses),
     harnesses,
+    pendingTargetKeys: pendingTargetDefinitions(home).map(({ key }) => key),
     rows: attachUpdateAvailability(projectRows(report), home, report),
     catalog: readViewState(home),
   };
@@ -413,6 +416,7 @@ export function projectTuiSnapshot(home: Home, projectPath: string): TuiSnapshot
       harnesses,
     ),
     harnesses,
+    pendingTargetKeys: pendingTargetDefinitions(home).map(({ key }) => key),
     rows: attachUpdateAvailability(projectRows(report), home, report),
     catalog: readViewState(home),
     project: report.projectPath,
