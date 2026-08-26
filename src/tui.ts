@@ -238,7 +238,7 @@ function TargetList({
   pendingTargetKeys,
   selected,
   focused,
-  width,
+  maxWidth,
   height,
 }: {
   targets: TuiSnapshot['targets'];
@@ -246,13 +246,24 @@ function TargetList({
   pendingTargetKeys: TuiSnapshot['pendingTargetKeys'];
   selected: number;
   focused: boolean;
-  width: number;
+  maxWidth: number;
   height: number;
 }): ReactNode {
   const start = windowStart(targets.length, selected, height);
   const detected = new Map(harnesses.detected.map((harness) => [harness.key, harness]));
   const pendingKeys = new Set(pendingTargetKeys);
   const pending = harnesses.detected.filter(({ key }) => pendingKeys.has(key));
+  const rows = [
+    ...targets.map(({name}) => {
+      const support = detected.get(name)?.support;
+      return `  ${name}${support ? ` [${support}]` : ''}`;
+    }),
+    ...(pending.length === 0 ? [] : [' Pending migration']),
+    ...(harnesses.available.length === 0 ? [] : [' Available']),
+    ...[...pending, ...harnesses.available]
+      .map(({name, support}) => `   ${name} [${support}]`),
+  ];
+  const width = Math.min(maxWidth, 32, Math.max(18, ...rows.map((row) => row.length + 2)));
   return h(
     ListColumn,
     {title: 'Targets', focused, width},
@@ -268,16 +279,22 @@ function TargetList({
     ...(pending.length === 0
       ? []
       : [
-          h(Text, {key: 'pending-migration', dimColor: true}, ' Pending migration'),
-          ...pending.map((harness) =>
-            h(Text, {key: `pending:${harness.key}`, dimColor: true}, `   ${harness.name} [${harness.support}]`)),
+          h(Text, {key: 'pending-migration', dimColor: true, wrap: 'truncate-end'}, ' Pending migration'),
+          ...pending.map((harness) => h(
+            Text,
+            {key: `pending:${harness.key}`, dimColor: true, wrap: 'truncate-end'},
+            `   ${harness.name} [${harness.support}]`,
+          )),
         ]),
     ...(harnesses.available.length === 0
       ? []
       : [
-          h(Text, {key: 'available', dimColor: true}, ' Available'),
-          ...harnesses.available.map((harness) =>
-            h(Text, {key: `available:${harness.key}`, dimColor: true}, `   ${harness.name} [${harness.support}]`)),
+          h(Text, {key: 'available', dimColor: true, wrap: 'truncate-end'}, ' Available'),
+          ...harnesses.available.map((harness) => h(
+            Text,
+            {key: `available:${harness.key}`, dimColor: true, wrap: 'truncate-end'},
+            `   ${harness.name} [${harness.support}]`,
+          )),
         ]),
   );
 }
@@ -905,10 +922,6 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     : undefined;
   const bodyHeight = Math.max(3, height - 2);
   const listHeight = Math.max(1, bodyHeight - 3);
-  const targetWidth = Math.max(
-    18,
-    Math.min(32, Math.max(0, ...targets.map((a) => a.name.length)) + 6),
-  );
   const targetStatusWidth = Math.max(
     28,
     Math.min(40, Math.max(0, ...targets.map((target) => target.name.length)) + 24),
@@ -1641,7 +1654,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
               pendingTargetKeys: snapshot.pendingTargetKeys,
               selected: targetIndex,
               focused: focusColumn === 0,
-              width: targetWidth,
+              maxWidth: Math.max(10, Math.floor(width / 2)),
               height: listHeight,
             }),
             h(RelationshipList, {

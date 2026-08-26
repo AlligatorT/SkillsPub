@@ -320,6 +320,7 @@ test('TUI reports a detected built-in pending explicit legacy migration without 
   const grokHome = path.join(userHome, '.grok');
   const legacyFile = path.join(configDir, 'runtimes.json');
   fs.mkdirSync(configDir, { recursive: true });
+  mkSkill(path.join(userHome, '.claude', 'skills'), 'demo');
   fs.mkdirSync(grokHome, { recursive: true });
   fs.writeFileSync(path.join(grokHome, 'config.toml'), '# detected\n');
   fs.writeFileSync(legacyFile, JSON.stringify({
@@ -336,14 +337,27 @@ test('TUI reports a detected built-in pending explicit legacy migration without 
   const before = fs.readFileSync(legacyFile, 'utf8');
   const beforeEntries = fs.readdirSync(root, { recursive: true }).sort();
 
-  const t = await renderApp({ configDir });
-  const frame = t.stdout.frame();
-  t.unmount();
+  const wide = await renderApp({ configDir }, 100);
+  const wideLines = wide.stdout.frame().split('\n');
+  wide.unmount();
+  assert.ok(wideLines.some((line) => line.includes('Pending migration')));
+  assert.ok(wideLines.some((line) => line.includes('Grok Build [managed]')));
+  assert.ok(wideLines.some((line) => line.includes('claude [managed]')));
 
-  assert.match(frame, /Pending/);
-  assert.match(frame, /migration/);
-  assert.match(frame, /Grok Build/);
-  assert.match(frame, /\[managed\]/);
+  const narrow = await renderApp({ configDir }, 36);
+  let narrowLines = narrow.stdout.frame().split('\n');
+  assert.ok(narrowLines.some((line) => line.includes('Pending') && line.includes('…')));
+  assert.ok(narrowLines.some((line) => line.includes('Grok Build') && line.includes('…')));
+  assert.ok(narrowLines.some((line) => line.includes('claude') && line.includes('[ ON ]')));
+  assert.match(narrow.stdout.frame(), /Relationships/);
+  await narrow.send('j');
+  assert.match(narrow.stdout.frame(), /› shared/);
+  await narrow.send('k');
+  await narrow.send('l');
+  narrowLines = narrow.stdout.frame().split('\n');
+  assert.ok(narrowLines.some((line) => line.includes('claude') && line.includes('[ ON ]')));
+  narrow.unmount();
+
   assert.equal(fs.readFileSync(legacyFile, 'utf8'), before);
   assert.deepEqual(fs.readdirSync(root, { recursive: true }).sort(), beforeEntries);
 
