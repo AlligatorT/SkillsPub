@@ -65,7 +65,10 @@ export interface TargetMigrationPlan {
   legacyFile: string;
   backupFile?: string;
   writeTarget: boolean;
+  legacyHash?: string;
+  targetHash?: string;
   overrides: TargetDefinitionOverride[];
+  introducedDefinitions: TargetDefinition[];
   genericTargets: GenericTarget[];
 }
 
@@ -460,7 +463,12 @@ function targetFromLegacyRuntime(runtime: LegacyRuntime, file: string): SkillTar
   }, file);
 }
 
-function targetRegistryFromLegacy(runtimes: LegacyRuntime[], file: string): TargetRegistryFile {
+const RUNTIMES_V1_TARGET_KEYS = new Set(['claude', 'shared', 'pi']);
+
+function targetMigrationFromLegacy(runtimes: LegacyRuntime[], file: string): {
+  registry: TargetRegistryFile;
+  introducedDefinitions: TargetDefinition[];
+} {
   const definitions = new Map(defaultTargetDefinitions().map((definition) => [definition.key, definition]));
   const overrides: TargetDefinitionOverride[] = [];
   const genericTargets: GenericTarget[] = [];
@@ -479,10 +487,13 @@ function targetRegistryFromLegacy(runtimes: LegacyRuntime[], file: string): Targ
     }
     if (Object.keys(override).length > 1) overrides.push(override);
   }
-  overrides.push(...[...definitions.keys()].map((key) => ({ key, disabled: true as const })));
+  for (const key of definitions.keys())
+    if (RUNTIMES_V1_TARGET_KEYS.has(key)) overrides.push({ key, disabled: true });
+  const introducedDefinitions = [...definitions.values()]
+    .filter(({ key }) => !RUNTIMES_V1_TARGET_KEYS.has(key));
   const registry = { version: 1 as const, overrides, genericTargets };
   targetsFromRegistry(registry, file);
-  return registry;
+  return { registry, introducedDefinitions };
 }
 
 function canonicalTargetRegistry(registry: TargetRegistryFile): string {
@@ -511,6 +522,13 @@ function canonicalTargetRegistry(registry: TargetRegistryFile): string {
   });
 }
 
+export function pendingTargetDefinitions(home: Home): TargetDefinition[] {
+  if (readTargetRegistry(targetFile(home))) return [];
+  const file = runtimeFile(home);
+  const legacy = readRuntimeRegistry(file);
+  return legacy ? targetMigrationFromLegacy(legacy, file).introducedDefinitions : [];
+}
+
 export function loadTargets(home: Home): SkillTarget[] {
   const file = targetFile(home);
   const registry = readTargetRegistry(file);
@@ -522,6 +540,10 @@ export function loadTargets(home: Home): SkillTarget[] {
   const targets = legacy.map((runtime) => targetFromLegacyRuntime(runtime, runtimeFile(home)));
   assertUniqueTargets(targets, runtimeFile(home));
   return targets;
+}
+
+function fileHash(file: string): string {
+  return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
 
 export function planTargetMigration(home: Home): TargetMigrationPlan {
@@ -536,25 +558,31 @@ export function planTargetMigration(home: Home): TargetMigrationPlan {
         targetFile: targetPath,
         legacyFile,
         writeTarget: false,
+        targetHash: fileHash(targetPath),
         overrides: existing.overrides,
+        introducedDefinitions: [],
         genericTargets: existing.genericTargets,
       };
     }
     throw new Error(`no legacy Runtime registry: ${legacyFile}`);
   }
-  const registry = targetRegistryFromLegacy(legacy, legacyFile);
+  const { registry, introducedDefinitions } = targetMigrationFromLegacy(legacy, legacyFile);
   if (existing && canonicalTargetRegistry(existing) !== canonicalTargetRegistry(registry))
     throw new Error(`Target registry already exists and differs from legacy Runtime registry: ${targetPath}`);
   const backupFile = `${legacyFile}.v1.bak`;
   if (fs.existsSync(backupFile))
     throw new Error(`legacy Runtime backup already exists: ${backupFile}`);
+  fs.accessSync(path.dirname(legacyFile), fs.constants.W_OK | fs.constants.X_OK);
   return {
     status: 'ready',
     targetFile: targetPath,
     legacyFile,
     backupFile,
     writeTarget: !existing,
+    legacyHash: fileHash(legacyFile),
+    targetHash: existing ? fileHash(targetPath) : undefined,
     overrides: registry.overrides,
+    introducedDefinitions,
     genericTargets: registry.genericTargets,
   };
 }
@@ -573,6 +601,9 @@ function sameMigrationPlan(left: TargetMigrationPlan, right: TargetMigrationPlan
     left.legacyFile === right.legacyFile &&
     left.backupFile === right.backupFile &&
     left.writeTarget === right.writeTarget &&
+    left.legacyHash === right.legacyHash &&
+    left.targetHash === right.targetHash &&
+    JSON.stringify(left.introducedDefinitions) === JSON.stringify(right.introducedDefinitions) &&
     canonicalTargetRegistry(registryFromPlan(left)) === canonicalTargetRegistry(registryFromPlan(right));
 }
 
@@ -581,7 +612,7 @@ function writeTargetRegistry(file: string, registry: TargetRegistryFile): void {
   const temporary = `${file}.${process.pid}.tmp`;
   try {
     fs.writeFileSync(temporary, JSON.stringify(registry, null, 2) + '\n');
-    fs.renameSync(temporary, file);
+    fs.linkSync(temporary, file);
   } finally {
     if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
   }
@@ -591,7 +622,10 @@ export function applyTargetMigration(home: Home, plan: TargetMigrationPlan): voi
   if (plan.status === 'already-migrated') return;
   const fresh = planTargetMigration(home);
   if (!sameMigrationPlan(plan, fresh))
-    throw new Error('Target migration changed after preview; preview again');
+    throw Object.assign(
+      new Error('Target migration changed after preview; preview again'),
+      { code: 'concurrent_modification' },
+    );
   const registry = registryFromPlan(fresh);
   if (fresh.writeTarget) writeTargetRegistry(fresh.targetFile, registry);
   try {

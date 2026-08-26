@@ -559,6 +559,70 @@ test('target migration previews, confirms, and backs up the legacy Runtime regis
   assert.match(run(['migrate', 'targets', '--yes']).stdout, /already migrated/);
 });
 
+test('legacy migration previews and adds built-in Targets introduced after runtimes.json', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-legacy-built-ins-'));
+  const userHome = path.join(configDir, 'home');
+  const grokHome = path.join(userHome, '.grok');
+  const legacyFile = path.join(configDir, 'runtimes.json');
+  fs.mkdirSync(grokHome, { recursive: true });
+  fs.writeFileSync(path.join(grokHome, 'config.toml'), '# detected\n');
+  fs.writeFileSync(legacyFile, JSON.stringify({
+    version: 1,
+    runtimes: ['claude', 'shared', 'pi'].map((key) => ({
+      key,
+      kind: key === 'shared' ? 'shared' : 'agent',
+      discoveryRoot: path.join(userHome, `.${key}`, 'skills'),
+      parkingRoot: path.join(userHome, `.${key}`, '.skillspub-off', 'skills'),
+      projectPath: `.${key}/skills`,
+    })),
+  }, null, 2) + '\n');
+  const before = fs.readFileSync(legacyFile, 'utf8');
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args, '--json'], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      HOME: userHome,
+      GROK_HOME: grokHome,
+      SKILLSPUB_CONFIG_DIR: configDir,
+    },
+  });
+
+  const beforeTargets = run(['targets']);
+  assert.equal(beforeTargets.status, 0, beforeTargets.stderr || beforeTargets.stdout);
+  assert.deepEqual(JSON.parse(beforeTargets.stdout).data.map(({ key }: { key: string }) => key), [
+    'claude', 'shared', 'pi',
+  ]);
+
+  const preview = run(['migrate', 'targets']);
+  assert.equal(preview.status, 0, preview.stderr || preview.stdout);
+  const previewData = JSON.parse(preview.stdout).data;
+  assert.equal(previewData.applied, false);
+  assert.deepEqual(previewData.plan.introducedDefinitions, [{
+    key: 'grok',
+    kind: 'harness',
+    discoveryRoot: path.join(grokHome, 'skills'),
+    parkingRoot: path.join(grokHome, '.skillspub-off', 'skills'),
+    projectPath: '.grok/skills',
+    relationship: { support: 'managed', link: 'unsupported' },
+  }]);
+  assert.equal(previewData.plan.overrides.some(({ key, disabled }: { key: string; disabled?: true }) =>
+    key === 'grok' && disabled), false);
+  assert.equal(fs.existsSync(path.join(configDir, 'targets.json')), false);
+  assert.equal(fs.existsSync(`${legacyFile}.v1.bak`), false);
+  assert.equal(fs.readFileSync(legacyFile, 'utf8'), before);
+
+  const applied = run(['migrate', 'targets', '--yes']);
+  assert.equal(applied.status, 0, applied.stderr || applied.stdout);
+  const appliedData = JSON.parse(applied.stdout).data;
+  assert.deepEqual(appliedData.plan, previewData.plan);
+  assert.deepEqual(appliedData.result.targets.map(({ key }: { key: string }) => key), [
+    'claude', 'shared', 'grok', 'pi',
+  ]);
+  const registry = JSON.parse(fs.readFileSync(path.join(configDir, 'targets.json'), 'utf8'));
+  assert.equal(registry.overrides.some(({ key }: { key: string }) => key === 'grok'), false);
+  assert.equal(fs.readFileSync(`${legacyFile}.v1.bak`, 'utf8'), before);
+});
+
 test('JSON migration and repair preview safely and apply the same plan with --yes', () => {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-json-maintenance-'));
   const discoveryRoot = path.join(configDir, 'shared', 'skills');

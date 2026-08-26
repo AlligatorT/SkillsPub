@@ -313,6 +313,51 @@ test('TUI shows a detected built-in missing from an older Target registry withou
   assert.deepEqual(fs.readdirSync(root, { recursive: true }).sort(), beforeEntries);
 });
 
+test('TUI reports a detected built-in pending explicit legacy migration without writes', async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-tui-legacy-built-ins-'));
+  const configDir = path.join(root, 'config');
+  const userHome = path.join(root, 'home');
+  const grokHome = path.join(userHome, '.grok');
+  const legacyFile = path.join(configDir, 'runtimes.json');
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.mkdirSync(grokHome, { recursive: true });
+  fs.writeFileSync(path.join(grokHome, 'config.toml'), '# detected\n');
+  fs.writeFileSync(legacyFile, JSON.stringify({
+    version: 1,
+    runtimes: ['claude', 'shared', 'pi'].map((key) => ({
+      key,
+      kind: key === 'shared' ? 'shared' : 'agent',
+      discoveryRoot: path.join(userHome, `.${key}`, 'skills'),
+      parkingRoot: path.join(userHome, `.${key}`, '.skillspub-off', 'skills'),
+      projectPath: `.${key}/skills`,
+    })),
+  }, null, 2) + '\n');
+  useFixtureEnv(context, { HOME: userHome, GROK_HOME: grokHome });
+  const before = fs.readFileSync(legacyFile, 'utf8');
+  const beforeEntries = fs.readdirSync(root, { recursive: true }).sort();
+
+  const t = await renderApp({ configDir });
+  const frame = t.stdout.frame();
+  t.unmount();
+
+  assert.match(frame, /Pending/);
+  assert.match(frame, /migration/);
+  assert.match(frame, /Grok Build/);
+  assert.match(frame, /\[managed\]/);
+  assert.equal(fs.readFileSync(legacyFile, 'utf8'), before);
+  assert.deepEqual(fs.readdirSync(root, { recursive: true }).sort(), beforeEntries);
+
+  fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [{ key: 'grok', disabled: true }],
+    genericTargets: [],
+  }));
+  const canonical = await renderApp({ configDir });
+  const canonicalFrame = canonical.stdout.frame();
+  canonical.unmount();
+  assert.doesNotMatch(canonicalFrame, /Pending|migration/);
+});
+
 test('initial projection: first agent selected, all relationship kinds shown, absent excluded', async () => {
   const { home } = setup();
   const t = await renderApp(home);

@@ -723,9 +723,24 @@ function printTargetMigration(home: ReturnType<typeof defaultHome>): ReturnType<
     return plan;
   }
   console.log('Target migration plan:');
-  if (plan.overrides.length === 0) console.log('  no Target Definition overrides');
-  else for (const override of plan.overrides)
+  console.log(`  legacy\t${plan.legacyFile}`);
+  console.log('Legacy Target Definition overrides:');
+  if (plan.overrides.length === 0) console.log('  none');
+  else for (const override of plan.overrides) {
     console.log(`  ${override.disabled ? 'disabled' : 'override'}\t${override.key}`);
+    for (const field of ['discoveryRoot', 'parkingRoot', 'projectPath', 'lockFile'] as const)
+      if (override[field] !== undefined) console.log(`    ${field}\t${override[field]}`);
+  }
+  console.log('New built-in Target Definitions:');
+  if (plan.introducedDefinitions.length === 0) console.log('  none');
+  else for (const definition of plan.introducedDefinitions) {
+    console.log(`  introduced\t${definition.key}`);
+    console.log(`    global discovery\t${definition.discoveryRoot}`);
+    console.log(`    global parking\t${definition.parkingRoot}`);
+    console.log(`    project\t${definition.projectPath}`);
+    if (definition.relationship)
+      console.log(`    capabilities\t${definition.relationship.support}, link ${definition.relationship.link}`);
+  }
   if (plan.genericTargets.length === 0) console.log('  no Generic Targets');
   else for (const target of plan.genericTargets)
     console.log(`  generic\t${target.key}`);

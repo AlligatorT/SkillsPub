@@ -638,7 +638,9 @@ test('Target migration previews legacy Runtime overrides and Generic Targets wit
     },
     { key: 'claude', disabled: true },
     { key: 'shared', disabled: true },
-    { key: 'grok', disabled: true },
+  ]);
+  assert.deepEqual(plan.introducedDefinitions.map(({ key, kind }) => ({ key, kind })), [
+    { key: 'grok', kind: 'harness' },
   ]);
   assert.deepEqual(plan.genericTargets.map(({ key, kind, discoveryRoot }) => ({ key, kind, discoveryRoot })), [
     { key: 'other', kind: 'generic', discoveryRoot: genericRoot },
@@ -653,7 +655,14 @@ test('Target migration previews legacy Runtime overrides and Generic Targets wit
   assert.equal(fs.readFileSync(stateFile, 'utf8'), '{"baseIntent":{"kept":"off"}}\n');
   assert.deepEqual(
     loadTargets(home).map(({ key, kind, discoveryRoot }) => ({ key, kind, discoveryRoot })),
-    expectedTargets,
+    [
+      {
+        key: 'grok',
+        kind: 'harness',
+        discoveryRoot: defaultTargetDefinitions().find(({ key }) => key === 'grok')!.discoveryRoot,
+      },
+      ...expectedTargets,
+    ],
   );
   assert.equal(planTargetMigration(home).status, 'already-migrated');
 });
@@ -705,6 +714,59 @@ test('Target migration rolls back only a newly written registry when the legacy 
   failBackup(existingPlan);
   assert.equal(fs.readFileSync(existingPlan.targetFile, 'utf8'), before);
   assert.equal(fs.existsSync(existingPlan.backupFile!), false);
+});
+
+test('Target migration rejects concurrent legacy changes before mutation', () => {
+  const home = tmpHome();
+  const legacyFile = path.join(home.configDir, 'runtimes.json');
+  fs.writeFileSync(legacyFile, JSON.stringify({
+    version: 1,
+    runtimes: [{
+      key: 'pi',
+      kind: 'agent',
+      discoveryRoot: path.join(home.configDir, 'pi', 'skills'),
+      parkingRoot: path.join(home.configDir, 'pi', '.skillspub-off', 'skills'),
+      projectPath: '.pi/agent/skills',
+    }],
+  }));
+  const plan = planTargetMigration(home);
+  fs.appendFileSync(legacyFile, '\n');
+
+  assert.throws(
+    () => applyTargetMigration(home, plan),
+    (error: Error & { code?: string }) => error.code === 'concurrent_modification',
+  );
+  assert.equal(fs.existsSync(plan.targetFile), false);
+  assert.equal(fs.existsSync(plan.backupFile!), false);
+});
+
+test('Target migration preflights write permissions without partial writes', () => {
+  const home = tmpHome();
+  const legacyFile = path.join(home.configDir, 'runtimes.json');
+  fs.writeFileSync(legacyFile, JSON.stringify({
+    version: 1,
+    runtimes: [{
+      key: 'pi',
+      kind: 'agent',
+      discoveryRoot: path.join(home.configDir, 'pi', 'skills'),
+      parkingRoot: path.join(home.configDir, 'pi', '.skillspub-off', 'skills'),
+      projectPath: '.pi/agent/skills',
+    }],
+  }));
+  const access = fs.accessSync;
+  fs.accessSync = ((file, mode) => {
+    if (file === home.configDir) throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    return access(file, mode);
+  }) as typeof fs.accessSync;
+  try {
+    assert.throws(() => planTargetMigration(home), /permission denied/);
+  } finally {
+    fs.accessSync = access;
+  }
+
+  assert.equal(fs.existsSync(path.join(home.configDir, 'targets.json')), false);
+  assert.equal(fs.existsSync(`${legacyFile}.v1.bak`), false);
+  assert.ok(fs.existsSync(legacyFile));
 });
 
 test('Target migration refuses malformed or ambiguous legacy data without partial writes', () => {
