@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Home } from './core.ts';
 import { inspectHarnesses } from './harnesses/registry.ts';
+import type { HarnessInspection } from './harnesses/types.ts';
 import {
   sharedOutdatedFromInventory,
   type SharedUpdateAvailabilityEntry,
@@ -26,6 +27,18 @@ import {
 export interface Target {
   name: string;
   dir: string;
+}
+
+export function harnessStatusBadge(
+  harness: Pick<HarnessInspection, 'support' | 'isolation'>,
+): {text: string; tone: 'success' | 'muted' | 'warning' | 'danger'} {
+  if (harness.support !== 'managed') return {text: `[${harness.support}]`, tone: 'muted'};
+  if (harness.isolation.status === 'managed' || harness.isolation.status === 'not-required')
+    return {text: '[managed]', tone: 'success'};
+  if (harness.isolation.status === 'unmanaged') return {text: '[manageable]', tone: 'muted'};
+  return harness.isolation.status === 'drift'
+    ? {text: '[drift]', tone: 'danger'}
+    : {text: '[unknown]', tone: 'warning'};
 }
 
 export type Presence = 'on' | 'off' | 'deadlink';

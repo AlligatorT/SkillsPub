@@ -6,7 +6,7 @@ import os from 'node:os';
 import { PassThrough } from 'node:stream';
 import { createElement as h } from 'react';
 import { render } from 'ink';
-import { App } from '../src/tui.ts';
+import { App, HarnessBadge } from '../src/tui.ts';
 import { sharedRefresh } from '../src/shared.ts';
 
 const stripAnsi = (s: string): string =>
@@ -141,6 +141,18 @@ async function renderApp(
   };
   return { stdin, stdout, send, flush, unmount: () => app.unmount() };
 }
+
+test('Harness badge renderer keeps non-managed support explicit', async () => {
+  for (const support of ['discoverable', 'unsupported'] as const) {
+    const stdout = new FakeStdout(30, 3);
+    const app = render(h(HarnessBadge, {
+      harness: {support, isolation: {status: 'managed', detail: ''}},
+    }), {stdout: stdout as never, patchConsole: false});
+    await app.waitUntilRenderFlush();
+    assert.ok(stdout.frame().includes(`[${support}]`));
+    app.unmount();
+  }
+});
 
 interface ManagedTuiSkill {
   name: string;
@@ -308,7 +320,8 @@ test('TUI shows a detected built-in missing from an older Target registry withou
   const frame = t.stdout.frame();
   t.unmount();
 
-  assert.match(frame, /grok \[managed\]/);
+  assert.match(frame, /grok \[manageable\]/);
+  assert.doesNotMatch(frame, /grok \[managed\]/);
   assert.equal(fs.readFileSync(targetFile, 'utf8'), before);
   assert.deepEqual(fs.readdirSync(root, { recursive: true }).sort(), beforeEntries);
 });
@@ -341,7 +354,7 @@ test('TUI reports a detected built-in pending explicit legacy migration without 
   const wideLines = wide.stdout.frame().split('\n');
   wide.unmount();
   const widePending = wideLines.find((line) => line.includes('Pending migration'));
-  const wideHarness = wideLines.find((line) => line.includes('Grok Build [managed]'));
+  const wideHarness = wideLines.find((line) => line.includes('Grok Build [manageable]'));
   const wideTarget = wideLines.find((line) => line.includes('claude [managed]'));
   assert.equal(widePending?.indexOf('Pending migration'), 2);
   assert.equal(wideTarget?.indexOf('claude'), 3);
@@ -350,12 +363,12 @@ test('TUI reports a detected built-in pending explicit legacy migration without 
   const narrow = await renderApp({ configDir }, 36);
   let narrowLines = narrow.stdout.frame().split('\n');
   const narrowPending = narrowLines.find((line) => line.includes('Pending'));
-  const narrowHarness = narrowLines.find((line) => line.includes('Grok Build'));
+  const narrowHarness = narrowLines.find((line) => line.includes('[manageable]') && !line.includes('pi'));
   const narrowTarget = narrowLines.find((line) => line.includes('claude'));
   assert.equal(narrowPending?.indexOf('Pending'), 2);
   assert.equal(narrowTarget?.indexOf('claude'), 3);
-  assert.equal(narrowHarness?.indexOf('Grok Build'), 3);
-  assert.ok(narrowPending?.includes('…'));
+  assert.equal(narrowHarness?.indexOf('G'), 3);
+  assert.match(narrowPending ?? '', /Pending migration/);
   assert.ok(narrowHarness?.includes('…'));
   assert.ok(narrowTarget?.includes('[ ON ]'));
   assert.match(narrow.stdout.frame(), /Relationships/);
@@ -1140,7 +1153,7 @@ test('unlinking the sole relationship drops out-of-registry sources from the fre
   t.unmount();
 });
 
-test('TUI keeps Harness status out of the target list and shows it in Target info', async () => {
+test('TUI separates Harness capability from current state in the target list and info', async () => {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-tui-harnesses-'));
   const piHome = path.join(configDir, 'pi');
   fs.mkdirSync(path.join(piHome, 'agent'), { recursive: true });
@@ -1167,17 +1180,31 @@ test('TUI keeps Harness status out of the target list and shows it in Target inf
   const t = await renderApp({ configDir });
   let frame = t.stdout.frame();
   assert.doesNotMatch(frame, /Detected Harnesses|Skill Targets/);
-  assert.match(frame, /pi\s+\[managed\]/);
-  assert.doesNotMatch(frame, /Pi \[managed\] Shared/);
+  assert.match(frame, /pi\s+\[manageable\]/);
+  assert.doesNotMatch(frame, /pi\s+\[managed\]/);
 
   await t.send('j'); // pi
   frame = t.stdout.frame();
   assert.match(frame, /Harness:\s*Pi/);
   assert.match(frame, /Detected:\s*yes/);
-  assert.match(frame, /Support:\s*managed/);
-  assert.match(frame, /Shared:\s*enabled/);
+  assert.match(frame, /Adapter support:\s*managed/);
+  assert.match(frame, /Shared consumption:/);
+  assert.match(frame, /enabled/);
   assert.match(frame, /Isolation:\s*unmanaged/);
+  assert.match(frame, /Managed support: verified/);
+  assert.match(frame, /Adapter can control and/);
   assert.match(frame, /Link:\s*supported/);
+
+  const settingsFile = path.join(piHome, 'agent', 'settings.json');
+  fs.writeFileSync(settingsFile, JSON.stringify({skills: ['!skills/**']}));
+  fs.writeFileSync(path.join(configDir, 'state.json'), JSON.stringify({
+    piIsolation: {file: settingsFile, exclusion: '!skills/**'},
+  }));
+  await t.send('R');
+  frame = t.stdout.frame();
+  assert.match(frame, /pi\s+\[managed\]/);
+  assert.doesNotMatch(frame, /pi\s+\[manageable\]/);
+  assert.match(frame, /Isolation:\s*managed/);
   t.unmount();
 });
 
@@ -1210,7 +1237,7 @@ test('TUI reports Grok managed Mirror capability without writing Grok files', as
   await t.send('j');
   const frame = t.stdout.frame();
   assert.match(frame, /Harness:\s*Grok Build/);
-  assert.match(frame, /Support:\s*managed/);
+  assert.match(frame, /Adapter support:\s*managed/);
   assert.match(frame, /Link:\s*unsupported/);
   assert.match(frame, /Mirror:\s*supported/);
   assert.deepEqual(fs.readdirSync(configDir, { recursive: true }).sort(), before);
@@ -1244,9 +1271,11 @@ test('TUI keeps undetected Harnesses in a compact Available section', async () =
     const t = await renderApp({ configDir }, columns);
     const lines = t.stdout.frame().split('\n');
     const heading = lines.find((line) => line.includes('Available'));
-    const harness = lines.find((line) => line.includes('Pi [managed]'));
+    const harness = lines.find((line) => line.includes('[manageable]'));
     assert.equal(heading?.indexOf('Available'), 2);
     assert.equal(harness?.indexOf('Pi'), 3);
+    assert.match(harness, /Pi \[manageable\]/);
+    assert.doesNotMatch(t.stdout.frame(), /Pi \[managed\]/);
     assert.doesNotMatch(t.stdout.frame(), /Shared enabled|Isolation unmanaged/);
     t.unmount();
   }
@@ -1271,7 +1300,7 @@ test('narrow TUI opens Harness details from a selected Target', async () => {
   await t.send('\r');
   const frame = t.stdout.frame();
   assert.match(frame, /Harness:\s*Pi/);
-  assert.match(frame, /Shared:\s*enabled/);
+  assert.match(frame, /Shared consumption:\s*enabled/);
   assert.match(frame, /Isolation:\s*unmanaged/);
   assert.match(frame, /esc close/);
   t.unmount();
@@ -1324,7 +1353,8 @@ test('Explain modal projects evidence and read-only visible/hidden plans for eac
   let frame = t.stdout.frame();
   assert.match(frame, /Explain — demo — Claude Code \[1\/3\]/);
   assert.match(frame, /Result: not-visible/);
-  assert.match(frame, /Shared: not-consumed/);
+  assert.match(frame, /Adapter support: managed/);
+  assert.match(frame, /Shared consumption: not-consumed/);
   assert.match(frame, /Isolation: not-required/);
   assert.match(frame, /Evidence:/);
   assert.match(frame, /consumed global\/harness/);
@@ -1358,7 +1388,7 @@ test('Explain modal projects evidence and read-only visible/hidden plans for eac
   frame = t.stdout.frame();
   assert.match(frame, /Explain — demo — Pi \[3\/3\]/);
   assert.match(frame, /Result: visible/);
-  assert.match(frame, /Shared: excluded/);
+  assert.match(frame, /Shared consumption: excluded/);
   assert.match(frame, /on link selected/);
   assert.deepEqual(fs.readdirSync(home.configDir, {recursive: true}).sort(), before);
   t.unmount();
