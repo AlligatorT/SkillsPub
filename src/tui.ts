@@ -11,6 +11,7 @@ import {
   searchRows,
   skillDetail,
   sortRows,
+  harnessStatusBadge,
   projectTuiSnapshot,
   tuiSnapshot,
   type Target,
@@ -55,8 +56,10 @@ import {
 
 /** Below this width the passive summary column is hidden. */
 const WIDE_MIN = 80;
+const MANAGED_SUPPORT_EXPLANATION = 'Managed support: verified Adapter can control and explain this Harness; it does not mean optional setup/reconcile was applied.';
 
 type Tab = 'target' | 'skill';
+type HarnessSummary = TuiSnapshot['harnesses']['detected'][number];
 
 interface RelEntry {
   row: Row;
@@ -232,6 +235,27 @@ function RowLine({
   );
 }
 
+export function HarnessBadge({
+  harness,
+}: {
+  harness: Pick<HarnessSummary, 'support' | 'isolation'>;
+}): ReactNode {
+  const badge = harnessStatusBadge(harness);
+  return h(Text, {
+    color: badge.tone === 'success' ? 'green' : badge.tone === 'danger' ? 'red' : badge.tone === 'warning' ? 'yellow' : undefined,
+    dimColor: badge.tone === 'muted',
+  }, ` ${badge.text}`);
+}
+
+function HarnessRow({harness}: {harness: HarnessSummary}): ReactNode {
+  return h(
+    Box,
+    {width: '100%'},
+    h(Box, {flexGrow: 1, flexShrink: 1}, h(Text, {dimColor: true, wrap: 'truncate-end'}, `  ${harness.name}`)),
+    h(Box, {flexShrink: 0}, h(HarnessBadge, {harness})),
+  );
+}
+
 function TargetList({
   targets,
   harnesses,
@@ -253,15 +277,13 @@ function TargetList({
   const detected = new Map(harnesses.detected.map((harness) => [harness.key, harness]));
   const pendingKeys = new Set(pendingTargetKeys);
   const pending = harnesses.detected.filter(({ key }) => pendingKeys.has(key));
+  const rowText = (name: string, harness?: HarnessSummary) =>
+    `  ${name}${harness ? ` ${harnessStatusBadge(harness).text}` : ''}`;
   const rows = [
-    ...targets.map(({name}) => {
-      const support = detected.get(name)?.support;
-      return `  ${name}${support ? ` [${support}]` : ''}`;
-    }),
+    ...targets.map(({name}) => rowText(name, detected.get(name))),
     ...(pending.length === 0 ? [] : [' Pending migration']),
     ...(harnesses.available.length === 0 ? [] : [' Available']),
-    ...[...pending, ...harnesses.available]
-      .map(({name, support}) => `  ${name} [${support}]`),
+    ...[...pending, ...harnesses.available].map((harness) => rowText(harness.name, harness)),
   ];
   const width = Math.min(maxWidth, 32, Math.max(18, ...rows.map((row) => row.length + 2)));
   return h(
@@ -273,28 +295,20 @@ function TargetList({
         RowLine,
         {key: `target:${target.name}`, active: start + index === selected, focused},
         target.name,
-        harness ? h(Text, {dimColor: true}, ` [${harness.support}]`) : null,
+        harness ? h(HarnessBadge, {harness}) : null,
       );
     }),
     ...(pending.length === 0
       ? []
       : [
           h(Text, {key: 'pending-migration', dimColor: true, wrap: 'truncate-end'}, ' Pending migration'),
-          ...pending.map((harness) => h(
-            Text,
-            {key: `pending:${harness.key}`, dimColor: true, wrap: 'truncate-end'},
-            `  ${harness.name} [${harness.support}]`,
-          )),
+          ...pending.map((harness) => h(HarnessRow, {key: `pending:${harness.key}`, harness})),
         ]),
     ...(harnesses.available.length === 0
       ? []
       : [
           h(Text, {key: 'available', dimColor: true, wrap: 'truncate-end'}, ' Available'),
-          ...harnesses.available.map((harness) => h(
-            Text,
-            {key: `available:${harness.key}`, dimColor: true, wrap: 'truncate-end'},
-            `  ${harness.name} [${harness.support}]`,
-          )),
+          ...harnesses.available.map((harness) => h(HarnessRow, {key: `available:${harness.key}`, harness})),
         ]),
   );
 }
@@ -448,9 +462,12 @@ function TargetInfoPanel({
       h(Text, {key: 'harness-gap'}, ''),
       h(Text, {key: 'harness'}, ' ', h(Text, {bold: true, color: 'cyan'}, 'Harness:'), ` ${harness.name}`),
       h(Text, {key: 'detected'}, ' ', h(Text, {bold: true}, 'Detected:'), ` ${harness.detected ? 'yes' : 'no'}`),
-      h(Text, {key: 'support'}, ' ', h(Text, {bold: true}, 'Support:'), ` ${harness.support}`),
-      h(Text, {key: 'shared'}, ' ', h(Text, {bold: true}, 'Shared:'), ` ${harness.sharedConsumption.status}`),
+      h(Text, {key: 'support'}, ' ', h(Text, {bold: true}, 'Adapter support:'), ` ${harness.support}`),
+      h(Text, {key: 'shared'}, ' ', h(Text, {bold: true}, 'Shared consumption:'), ` ${harness.sharedConsumption.status}`),
       h(Text, {key: 'isolation'}, ' ', h(Text, {bold: true}, 'Isolation:'), ` ${harness.isolation.status}`),
+      ...(harness.support === 'managed'
+        ? [h(Text, {key: 'support-explanation', wrap: 'wrap'}, ` ${MANAGED_SUPPORT_EXPLANATION}`)]
+        : []),
       h(Text, {key: 'link'}, ' ', h(Text, {bold: true}, 'Link:'), ` ${harness.link.supported ? 'supported' : 'unsupported'}`),
       ...(harness.mirror
         ? [h(Text, {key: 'mirror'}, ' ', h(Text, {bold: true}, 'Mirror:'), ` ${harness.mirror.supported ? 'supported' : 'unsupported'}`)]
@@ -763,8 +780,8 @@ function explanationLines(explanation: VisibilityExplanation | undefined): strin
   const lines = [
     `Result: ${harness.effectiveVisibility}${harness.detected ? '' : ' · not-detected'}`,
     `Detected: ${harness.detected ? 'yes' : 'no'}`,
-    `Support: ${harness.support}`,
-    `Shared: ${harness.sharedConsumption.status} — ${harness.sharedConsumption.detail}`,
+    `Adapter support: ${harness.support}`,
+    `Shared consumption: ${harness.sharedConsumption.status} — ${harness.sharedConsumption.detail}`,
     `Isolation: ${harness.isolation.status} — ${harness.isolation.detail}`,
     '',
     'Evidence:',
@@ -1654,7 +1671,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
               pendingTargetKeys: snapshot.pendingTargetKeys,
               selected: targetIndex,
               focused: focusColumn === 0,
-              maxWidth: Math.max(10, Math.floor(width / 2)),
+              maxWidth: Math.max(10, Math.floor(width / 2) + 2),
               height: listHeight,
             }),
             h(RelationshipList, {

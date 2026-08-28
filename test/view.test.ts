@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   filterRows,
+  harnessStatusBadge,
   projectRows,
   searchRows,
   sortRows,
@@ -74,6 +75,21 @@ function report(pieces: {
     stateFile: '/nowhere/state.json',
   };
 }
+
+test('Harness badge separates Adapter capability from isolation state', () => {
+  const badge = (
+    support: 'managed' | 'discoverable' | 'unsupported',
+    isolation: 'not-required' | 'unmanaged' | 'managed' | 'drift' | 'unknown',
+  ) => harnessStatusBadge({support, isolation: {status: isolation, detail: ''}});
+
+  assert.deepEqual(badge('managed', 'unmanaged'), {text: '[manageable]', tone: 'muted'});
+  assert.deepEqual(badge('managed', 'managed'), {text: '[managed]', tone: 'success'});
+  assert.deepEqual(badge('managed', 'not-required'), {text: '[managed]', tone: 'success'});
+  assert.deepEqual(badge('managed', 'drift'), {text: '[drift]', tone: 'danger'});
+  assert.deepEqual(badge('managed', 'unknown'), {text: '[unknown]', tone: 'warning'});
+  assert.deepEqual(badge('discoverable', 'managed'), {text: '[discoverable]', tone: 'muted'});
+  assert.deepEqual(badge('unsupported', 'managed'), {text: '[unsupported]', tone: 'muted'});
+});
 
 test('projection maps Relationship activation and form to matrix presence', () => {
   const rows = projectRows(report({
