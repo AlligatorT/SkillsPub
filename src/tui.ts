@@ -33,6 +33,7 @@ import {
   type PresetScope,
 } from './reconcile.ts';
 import {
+  hashDirectory,
   scanGlobalInventory,
   scanProjectInventory,
 } from './inventory.ts';
@@ -49,10 +50,14 @@ import {
   type WantedVisibility,
 } from './explain.ts';
 import {
+  planSharedAdd,
+  sharedAdd,
   sharedFind,
   sharedOutdated,
   sharedRefresh,
   sharedUpdate,
+  type SharedCommandResult,
+  type SharedMutationPlan,
   type SharedUpdateAvailabilityEntry,
 } from './shared.ts';
 import {
@@ -118,6 +123,34 @@ interface UpdateModalState {
   kind: 'refresh' | 'confirm' | 'result';
   items: UpdateItem[];
   scroll: number;
+}
+
+type SourceOperationPhase = 'preview' | 'confirm' | 'run' | 'verify' | 'failed';
+type SourceStepStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'skipped';
+
+interface SourceVerifiedTruth {
+  resource: string;
+  provenance: string;
+  slot: string;
+  relationships: string[];
+  actual: string;
+  desired: string;
+  drift: string;
+  updateAvailability: string;
+  effectiveVisibility: string;
+}
+
+interface SourceOperationState {
+  phase: SourceOperationPhase;
+  plan: SharedMutationPlan;
+  candidate: NpxSkillsCandidate;
+  steps: Array<{name: string; status: SourceStepStatus}>;
+  scroll: number;
+  retry?: boolean;
+  result?: SharedCommandResult;
+  truth?: SourceVerifiedTruth;
+  error?: string;
+  log?: string;
 }
 
 /** Existing relationships of one target, in inventory order (absent skills excluded). */
@@ -532,9 +565,8 @@ function InfoPanel({
   return h(
     ListColumn,
     {title: 'Info', focused: false, width},
-    !row
-      ? h(Text, {dimColor: true}, '  nothing selected')
-      : [
+    row
+      ? [
           h(Text, {key: 'name', bold: true, wrap: 'wrap'}, ` ${row.displayName}`),
           h(Text, {key: 'gap-top'}, ''),
           ...labeled('Description', row.description),
@@ -568,7 +600,8 @@ function InfoPanel({
               {key: `visibility-${harness.key}`, wrap: 'wrap'},
               ` ${harness.name}: ${harness.effectiveVisibility}${harness.detected ? '' : ' · not-detected'}`,
             )) ?? []),
-        ],
+        ]
+      : h(Text, {dimColor: true}, '  nothing selected'),
   );
 }
 
@@ -825,6 +858,83 @@ function sourceInventoryRows(snapshot: TuiSnapshot): Row[] {
   return snapshot.rows.filter((row) => sourceRelationships(row).length > 0);
 }
 
+function verifiedSourceTruth(
+  home: Home,
+  snapshot: TuiSnapshot,
+  plan: SharedMutationPlan,
+  scope: SourceScope,
+  projectPath: string,
+): SourceVerifiedTruth {
+  const slot = plan.candidate?.normalizedSlot ?? plan.slots[0] ?? 'unknown';
+  const row = sourceInventoryRows(snapshot).find((candidate) =>
+    sourceRelationships(candidate).some((relationship) =>
+      relationship.targetId === plan.targetId && relationship.slot === slot));
+  const relationships = row?.observedRelationships ?? row?.relationships ?? [];
+  const desiredTruth = sourceDesiredTruth(home, row, scope, projectPath);
+  const visibility = resolveVisibility(
+    home,
+    row,
+    scope === 'project' ? projectPath : undefined,
+  );
+  const actual = relationships.map(({targetId, slot: relationshipSlot, info}) =>
+    `${targetId}/${relationshipSlot}=${info.presence === 'deadlink' ? 'broken' : info.underOff ? 'off' : 'on'}/${info.form}`);
+  const effectiveVisibility = [...new Set(
+    visibility?.harnesses.map(({effectiveVisibility: state}) => state) ?? ['unknown'],
+  )].join('/');
+  const driftEvidence = relationships.flatMap(({targetId, slot: relationshipSlot, info}) => {
+    if (info.presence === 'deadlink') return [`${targetId}/${relationshipSlot}: broken`];
+    if (info.diverged) return [`${targetId}/${relationshipSlot}: diverged mirror`];
+    if (info.mirrored && row?.realPath) {
+      try {
+        if (hashDirectory(info.path) !== hashDirectory(row.realPath))
+          return [`${targetId}/${relationshipSlot}: mirror-sync required`];
+      } catch {
+        return [`${targetId}/${relationshipSlot}: mirror truth unreadable`];
+      }
+    }
+    return [];
+  });
+  if (desiredTruth.drift === 'observed') driftEvidence.push('Actual differs from Desired');
+  const mirrorDrift = driftEvidence.filter((item) => item.includes('mirror')).length;
+  const drift = mirrorDrift > 0
+    ? `mirror-sync required (${mirrorDrift}); ${driftEvidence.join(', ')}`
+    : driftEvidence.join(', ') || 'none observed';
+  return {
+    resource: row?.realPath ?? 'missing',
+    provenance: row?.sourceLabel ?? 'Source unknown',
+    slot,
+    relationships: relationships.map(({targetId, slot: relationshipSlot, info}) =>
+      `${targetId}/${relationshipSlot} ${info.form}/${info.underOff ? 'off' : 'on'} ${info.path}`),
+    actual: actual.join(', ') || `${plan.targetId}/${slot}=missing`,
+    desired: desiredTruth.desired,
+    drift,
+    updateAvailability: row?.updateAvailability?.status ?? 'unknown',
+    effectiveVisibility,
+  };
+}
+
+function sameSourceIntent(original: SharedMutationPlan, fresh: SharedMutationPlan): boolean {
+  const originalEffects = (original.relationshipEffects ?? []).map((effect) => ({
+    ...effect,
+    plannedAction: 'preserve-intent',
+  }));
+  const freshEffects = (fresh.relationshipEffects ?? []).map((effect) => ({
+    ...effect,
+    plannedAction: 'preserve-intent',
+  }));
+  const sourceStillExpected = fresh.replacement
+    ? fresh.replacement.from === original.replacement?.from
+    : fresh.currentSource === original.source || (!fresh.currentSource && !original.currentSource);
+  return fresh.targetId === original.targetId &&
+    fresh.candidate?.identity === original.candidate?.identity &&
+    JSON.stringify(fresh.slots) === JSON.stringify(original.slots) &&
+    JSON.stringify(fresh.scope) === JSON.stringify(original.scope) &&
+    JSON.stringify(fresh.intentPreservation) === JSON.stringify(original.intentPreservation) &&
+    JSON.stringify(freshEffects) === JSON.stringify(originalEffects) &&
+    (fresh.blockers?.length ?? 0) === 0 &&
+    sourceStillExpected;
+}
+
 function candidateId(candidate: NpxSkillsCandidate): string {
   return `${candidate.source}\0${candidate.name}`;
 }
@@ -875,6 +985,130 @@ function SourceDetail({
   );
 }
 
+function relationshipEffectLines(effects: NonNullable<SharedMutationPlan['relationshipEffects']>): string[] {
+  const lines: string[] = [];
+  let group = '';
+  for (const effect of effects) {
+    const nextGroup = `${effect.scope}\0${effect.targetId}`;
+    if (nextGroup !== group) {
+      lines.push(`Scope ${effect.scope} · Skill Target ${effect.targetKey} (${effect.targetId})`);
+      group = nextGroup;
+    }
+    lines.push(
+      `${effect.plannedAction}: ${effect.form}/${effect.activation} ` +
+      `source=${effect.sourcePath} target=${effect.targetPath}`,
+    );
+  }
+  return lines;
+}
+
+function sourceOperationHint(operation: SourceOperationState): string {
+  switch (operation.phase) {
+    case 'preview':
+      return (operation.plan.blockers?.length ?? 0) > 0
+        ? ' ↑↓/j/k scroll  blocked — esc cancel '
+        : ' ↑↓/j/k scroll  enter continue  esc cancel ';
+    case 'confirm':
+      return ' ↑↓/j/k scroll  enter confirm  esc cancel ';
+    case 'run':
+      return ' running — unrelated actions disabled ';
+    case 'verify':
+      return ' ↑↓/j/k scroll  enter acknowledge Verify truth ';
+    case 'failed':
+      return ' ↑↓/j/k scroll  t retry  esc acknowledge remaining Drift ';
+  }
+}
+
+function sourceOperationLines(operation: SourceOperationState): {title: string; lines: string[]} {
+  const plan = operation.plan;
+  const scope = plan.scope?.kind === 'project' ? 'exact Project' : 'Global';
+  const timeline = `Timeline: ${operation.steps.map(({name, status}) => `${name} ${status}`).join(' → ')}`;
+  let states = 'States: queued · running · failed · skipped';
+  if (operation.phase === 'preview' || operation.phase === 'confirm') states = 'States: queued';
+  else if (operation.phase === 'run') states = 'States: queued · running';
+  else if (operation.phase === 'verify') states = 'States: queued · running · succeeded';
+  const effects = plan.relationshipEffects ?? [];
+  if (operation.phase === 'preview') return {
+    title: `Source ${plan.replacement ? 'Replace' : 'Add'} plan`,
+    lines: [
+      `Scope: ${scope} — ${plan.scope?.path}`,
+      `Candidate: ${operation.candidate.source}@${operation.candidate.name}`,
+      `Provenance: ${operation.candidate.source}`,
+      `Shared Slot: ${plan.candidate?.normalizedSlot}`,
+      `Source Adapter: ${plan.sourceAdapter?.package}`,
+      `Ownership: SkillsPub scope/identity/Slot/Relationships; Vercel skills security audit + Proceed`,
+      ...(plan.replacement ? [`Replace: ${plan.replacement.from} → ${plan.replacement.to}`] : []),
+      `Current Actual: ${plan.currentTruth?.actual}; Desired=${plan.currentTruth?.desired}; Drift=${plan.currentTruth?.drift}`,
+      `Relationship effects: ${effects.map(({plannedAction}) => plannedAction).join(', ')}`,
+      ...relationshipEffectLines(effects),
+      `Hashes: source=${plan.preconditions?.sourceEntry.hash} lock=${plan.preconditions?.lock.hash} policy=${plan.preconditions?.policy.hash}`,
+      `Permissions: target=${plan.preconditions?.permissions.target} lock=${plan.preconditions?.permissions.lock}`,
+      `Lock ownership: ${plan.preconditions?.lock.owner}`,
+      `Blockers: ${plan.blockers?.join('; ') || 'none'}`,
+      `Preserve Slot intent: ${plan.intentPreservation?.baseIntent}`,
+      `Tags: ${plan.intentPreservation?.tags.join(', ') || 'none'}`,
+      `Bundles: ${plan.intentPreservation?.bundles.join(', ') || 'none'}`,
+      `Preset claims: ${plan.intentPreservation?.presetClaims.join(', ') || 'none'}`,
+      `Preset selectors: ${plan.intentPreservation?.presetSelectors.join(', ') || 'none'}`,
+      `Recovery: ${plan.recovery?.evidence.join(', ')}`,
+      `Expected final truth: ${plan.expectedFinalTruth?.actual}; Desired=${plan.expectedFinalTruth?.desired}; Drift=${plan.expectedFinalTruth?.drift}`,
+      states,
+      timeline,
+    ],
+  };
+  if (operation.phase === 'confirm') return {
+    title: 'Source operation — confirmation',
+    lines: [
+      'Confirm SkillsPub intent.',
+      'Scope · identity · Slot · Relationships',
+      `Candidate: ${operation.candidate.source}@${operation.candidate.name}`,
+      `Scope: ${scope} — ${plan.scope?.path}`,
+      `Slot: ${plan.candidate?.normalizedSlot}`,
+      `Relationships: ${effects.length}; no Harness-specific Link or Mirror will be created`,
+      'Vercel skills owns security audit and final Proceed.',
+      states,
+      timeline,
+      'Enter confirm · Esc cancel',
+    ],
+  };
+  if (operation.phase === 'run') return {
+    title: 'Source operation — running',
+    lines: [
+      states,
+      timeline,
+      'Upstream ownership handoff: Vercel skills security audit and Proceed',
+      `Artifact: ${plan.target?.lockFile}`,
+      'Final filesystem rescan queued',
+    ],
+  };
+  const succeeded = operation.phase === 'verify';
+  const truth = operation.truth;
+  return {
+    title: succeeded ? 'Source operation — Verify truth' : 'Source operation — failed',
+    lines: [
+      states,
+      timeline,
+      ...(succeeded ? [] : [
+        ...(/new preview required/i.test(operation.error ?? '') ? ['New preview required.'] : []),
+        `Error: ${operation.error}`,
+        `Raw log: ${operation.log ?? operation.error}`,
+      ]),
+      `Resource: ${truth?.resource ?? 'missing'}`,
+      `Provenance: ${truth?.provenance ?? 'Source unknown'}`,
+      `Slot: ${truth?.slot ?? plan.candidate?.normalizedSlot}`,
+      `Relationships: ${truth?.relationships.length ?? 0}`,
+      ...(truth?.relationships ?? []).map((relationship) => `Relationship truth: ${relationship}`),
+      `Actual: ${truth?.actual ?? operation.result?.actual ?? 'rescan unavailable'}`,
+      `Desired: ${truth?.desired ?? 'unknown'}`,
+      `Drift: ${truth?.drift ?? (operation.result?.drift.join(', ') || (succeeded ? 'none' : 'see error'))}`,
+      `Update availability: ${truth?.updateAvailability ?? 'unknown'}`,
+      `next-load Effective Visibility: ${truth?.effectiveVisibility ?? 'unknown'}; running Harness not reloaded`,
+      `Artifacts: lock=${plan.target?.lockFile}; recovery=${plan.recovery?.evidence.join(', ')}`,
+      succeeded ? 'Enter acknowledge Verify truth' : 't retry · Esc acknowledge remaining Drift · a new preview required if intent changed',
+    ],
+  };
+}
+
 function SourceWorkspace({
   scope,
   scopePath,
@@ -887,6 +1121,7 @@ function SourceWorkspace({
   visibility,
   desired,
   drift,
+  operation,
   width,
   height,
 }: {
@@ -901,20 +1136,36 @@ function SourceWorkspace({
   visibility?: VisibilityExplanation;
   desired: string;
   drift: string;
+  operation?: SourceOperationState;
   width: number;
   height: number;
 }): ReactNode {
   const candidate = surface === 'catalog' ? candidates[candidateIndex] : undefined;
   const row = surface === 'inventory' ? inventory[inventoryIndex] : undefined;
   const relationships = sourceRelationships(row);
-  const detail = sourceDetailLines(surface === 'catalog' ? candidate : undefined, surface === 'inventory' ? row : undefined);
-  const actual = row
+  const idleDetail = sourceDetailLines(surface === 'catalog' ? candidate : undefined, surface === 'inventory' ? row : undefined);
+  const activeDetail = operation ? sourceOperationLines(operation) : undefined;
+  const operationPage = Math.max(3, height - 8);
+  const operationScroll = operation?.scroll ?? 0;
+  const detail = activeDetail
+    ? activeDetail.lines.slice(operationScroll, operationScroll + operationPage)
+    : idleDetail;
+  const detailTitle = activeDetail
+    ? `${activeDetail.title} [${Math.min(operationScroll + 1, activeDetail.lines.length)}/${activeDetail.lines.length}]`
+    : surface === 'catalog' ? 'Selected candidate' : 'Selected resource';
+  const idleActual = row
     ? relationships.map(({info}) =>
         `${info.presence === 'deadlink' ? 'BROKEN' : info.underOff ? 'OFF' : 'ON'} ${info.form}`).join(', ')
     : candidate ? 'not installed' : 'none selected';
-  const effective = row
+  const idleEffective = row
     ? [...new Set(visibility?.harnesses.map(({effectiveVisibility}) => effectiveVisibility) ?? ['unknown'])].join('/')
     : 'not applicable';
+  const actual = operation?.truth?.actual ?? operation?.plan.currentTruth?.actual ?? idleActual;
+  const displayedDesired = operation?.truth?.desired ?? operation?.plan.currentTruth?.desired ?? desired;
+  const displayedDrift = operation?.truth?.drift ?? operation?.plan.currentTruth?.drift ?? drift;
+  const displayedUpdate = operation?.truth?.updateAvailability ?? row?.updateAvailability?.status ?? 'unknown';
+  const effective = operation?.truth?.effectiveVisibility ?? idleEffective;
+  const displayedRelationships = operation?.truth?.relationships.length ?? relationships.length;
   const selectedIndex = surface === 'catalog' ? candidateIndex : inventoryIndex;
   const list = surface === 'catalog'
     ? candidates.map((item, index) => h(RowLine, {
@@ -950,17 +1201,17 @@ function SourceWorkspace({
       ),
       width >= WIDE_MIN
         ? h(Box, {width: Math.max(34, Math.floor(width * 0.42)), paddingX: 1},
-            h(SourceDetail, {title: surface === 'catalog' ? 'Selected candidate' : 'Selected resource', lines: detail}))
+            h(SourceDetail, {title: detailTitle, lines: detail}))
         : null,
     ),
     width < WIDE_MIN
       ? h(SourceDetail, {
-          title: surface === 'catalog' ? 'Selected candidate' : 'Selected resource',
-          lines: detail.slice(0, 3),
+          title: detailTitle,
+          lines: detail,
         })
       : null,
-    h(Text, {wrap: 'wrap'}, `Selected: ${detail[0] ?? 'none'}  Actual: ${actual}  Desired: ${desired}`),
-    h(Text, {wrap: 'wrap'}, `Drift: ${drift}  Update: ${row?.updateAvailability?.status ?? 'unknown'}  Relationship: ${relationships.length}  Effective Visibility: ${effective}`),
+    h(Text, {wrap: 'wrap'}, `Selected: ${idleDetail[0] ?? 'none'}  Actual: ${actual}  Desired: ${displayedDesired}`),
+    h(Text, {wrap: 'wrap'}, `Drift: ${displayedDrift}  Update: ${displayedUpdate}  Relationship: ${displayedRelationships}  Effective Visibility: ${effective}`),
   );
 }
 
@@ -1092,6 +1343,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   const [sourceResourceId, setSourceResourceId] = useState<string>();
   const [sourceMarks, setSourceMarks] = useState<Set<string>>(new Set());
   const [sourceDetailOpen, setSourceDetailOpen] = useState(false);
+  const [sourceOperation, setSourceOperation] = useState<SourceOperationState>();
   const planScope: PresetScope = projectPath ? { projectPath } : {};
   const prepareMutation = () => {
     if (projectPath) scanProjectInventory(home, projectPath);
@@ -1263,19 +1515,19 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     const next = takeSnapshot();
     setSnapshot(next);
     if (!keep) return;
-    const row = keep.targetId !== undefined
-      ? next.rows.find((candidate) => candidate.relationships.some((rel) =>
-          rel.targetId === keep.targetId && rel.slot === keep.slot))
-      : keep.rowId !== undefined
-        ? next.rows.find((candidate) => candidate.id === keep.rowId)
-        : undefined;
+    const row = keep.targetId === undefined
+      ? keep.rowId === undefined
+        ? undefined
+        : next.rows.find((candidate) => candidate.id === keep.rowId)
+      : next.rows.find((candidate) => candidate.relationships.some((rel) =>
+          rel.targetId === keep.targetId && rel.slot === keep.slot));
     if (row) setInstanceId(row.id);
-    const rel = keep.targetId !== undefined
-      ? row?.relationships.find((candidate) =>
-          candidate.targetId === keep.targetId && candidate.slot === keep.slot)
-      : keep.target
+    const rel = keep.targetId === undefined
+      ? keep.target
         ? row?.relationships.find((candidate) => candidate.target === keep.target)
-        : undefined;
+        : undefined
+      : row?.relationships.find((candidate) =>
+          candidate.targetId === keep.targetId && candidate.slot === keep.slot);
     if (rel) setRelationshipKey(rel.info.path);
     return next;
   };
@@ -1293,6 +1545,111 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       setFeedback((error as Error).message);
     }
   };
+
+  const sourceSteps = (status: SourceStepStatus = 'queued'): SourceOperationState['steps'] => [
+    {name: 'plan recheck', status},
+    {name: 'upstream ownership handoff', status},
+    {name: 'Vercel skills add', status},
+    {name: 'Desired state preservation', status},
+    {name: 'provenance verification', status},
+    {name: 'final rescan', status},
+  ];
+
+  const applySourceOperation = (operation: SourceOperationState): void => {
+    const project = sourceScope === 'project' ? exactProjectPath : undefined;
+    let plan = operation.plan;
+    try {
+      if (operation.retry) {
+        const fresh = planSharedAdd(
+          home,
+          operation.candidate.source,
+          operation.candidate.name,
+          Boolean(operation.plan.replacement),
+          project,
+        );
+        if (!sameSourceIntent(operation.plan, fresh))
+          throw new Error('Source intent changed; new preview required.');
+        plan = fresh;
+      }
+      const result = sharedAdd(
+        home,
+        operation.candidate.source,
+        operation.candidate.name,
+        Boolean(plan.replace),
+        project,
+        plan,
+      );
+      const finalSnapshot = sourceTakeSnapshot(sourceScope);
+      const truth = verifiedSourceTruth(home, finalSnapshot, plan, sourceScope, exactProjectPath);
+      setSourceSnapshot(finalSnapshot);
+      setSourceOperation({
+        ...operation,
+        phase: 'verify',
+        plan,
+        result,
+        truth,
+        retry: false,
+        scroll: 0,
+        steps: sourceSteps('succeeded'),
+        log: 'Pinned Vercel skills handoff completed; final filesystem rescan succeeded.',
+      });
+    } catch (error) {
+      const failure = error as Error & {
+        code?: string;
+        details?: {stage?: 'upstream' | 'verify'};
+      };
+      const message = failure.message;
+      const preflightFailure = failure.code === 'concurrent_modification' ||
+        /changed after preview|new preview required|operation already in progress/i.test(message);
+      const failureStage = preflightFailure ? 'preflight' : failure.details?.stage ?? 'preflight';
+      let truth: SourceVerifiedTruth | undefined;
+      let rescanSucceeded = false;
+      try {
+        const finalSnapshot = sourceTakeSnapshot(sourceScope);
+        truth = verifiedSourceTruth(home, finalSnapshot, plan, sourceScope, exactProjectPath);
+        setSourceSnapshot(finalSnapshot);
+        rescanSucceeded = true;
+      } catch {
+        // The operation error remains primary; failure truth reports the unavailable rescan.
+      }
+      const steps = sourceSteps();
+      if (failureStage === 'preflight') {
+        steps[0]!.status = 'failed';
+        for (const step of steps.slice(1)) step.status = 'skipped';
+      } else if (failureStage === 'upstream') {
+        steps[0]!.status = 'succeeded';
+        steps[1]!.status = 'succeeded';
+        steps[2]!.status = 'failed';
+        steps[3]!.status = 'succeeded';
+        steps[4]!.status = 'skipped';
+        steps[5]!.status = rescanSucceeded ? 'succeeded' : 'failed';
+      } else {
+        for (const step of steps.slice(0, 4)) step.status = 'succeeded';
+        steps[4]!.status = 'failed';
+        steps[5]!.status = rescanSucceeded ? 'succeeded' : 'failed';
+      }
+      setSourceOperation({
+        ...operation,
+        phase: 'failed',
+        plan,
+        truth,
+        retry: false,
+        scroll: 0,
+        error: preflightFailure ? `${message} New preview required.` : message,
+        log: message,
+        steps,
+      });
+    }
+  };
+
+  useEffect(() => {
+    if (sourceOperation?.phase !== 'run') return;
+    const pending = sourceOperation;
+    const timer = setTimeout(() => applySourceOperation(pending), 0);
+    return () => clearTimeout(timer);
+    // The run phase owns one immutable operation; later state transitions must not restart it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceOperation?.phase]);
 
   const beginUpdate = (): void => {
     const marked = Boolean(batch && batch.marks.size > 0);
@@ -1327,6 +1684,57 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   };
 
   useInput((input, key) => {
+    if (sourceOperation) {
+      const operationLines = sourceOperationLines(sourceOperation).lines;
+      if (sourceOperation.phase !== 'run' && (key.downArrow || input === 'j')) {
+        setSourceOperation({
+          ...sourceOperation,
+          scroll: Math.min(Math.max(0, operationLines.length - 1), sourceOperation.scroll + 1),
+        });
+        return;
+      }
+      if (sourceOperation.phase !== 'run' && (key.upArrow || input === 'k')) {
+        setSourceOperation({...sourceOperation, scroll: Math.max(0, sourceOperation.scroll - 1)});
+        return;
+      }
+      if (sourceOperation.phase === 'preview') {
+        if (key.escape) setSourceOperation(undefined);
+        else if (key.return && (sourceOperation.plan.blockers?.length ?? 0) === 0)
+          setSourceOperation({...sourceOperation, phase: 'confirm', scroll: 0});
+        return;
+      }
+      if (sourceOperation.phase === 'confirm') {
+        if (key.escape) setSourceOperation(undefined);
+        else if (key.return) setSourceOperation({
+          ...sourceOperation,
+          phase: 'run',
+          retry: false,
+          scroll: 0,
+          steps: sourceSteps().map((step, index) => ({
+            ...step,
+            status: index === 0 ? 'running' : 'queued',
+          })),
+        });
+        return;
+      }
+      if (sourceOperation.phase === 'verify') {
+        if (key.return || key.escape) setSourceOperation(undefined);
+        return;
+      }
+      if (sourceOperation.phase === 'failed' && input === 't') {
+        setSourceOperation({
+          ...sourceOperation,
+          phase: 'run',
+          retry: true,
+          scroll: 0,
+          steps: sourceSteps().map((step, index) => ({
+            ...step,
+            status: index === 0 ? 'running' : 'queued',
+          })),
+        });
+      } else if (sourceOperation.phase === 'failed' && key.escape) setSourceOperation(undefined);
+      return;
+    }
     if (sourceDetailOpen) {
       if (key.escape) setSourceDetailOpen(false);
       return;
@@ -1660,6 +2068,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
           setSourceCandidateId(undefined);
           setSourceResourceId(undefined);
           setSourceMarks(new Set());
+          setSourceOperation(undefined);
           setQuery('');
           setFeedback('');
         } catch (error) {
@@ -1675,6 +2084,31 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         setSourceSurface('catalog');
         setQuery('');
         setSearching(true);
+        return;
+      }
+      if (input === 'a' && sourceSurface === 'catalog' && sourceCandidate) {
+        try {
+          const project = sourceScope === 'project' ? exactProjectPath : undefined;
+          const initial = planSharedAdd(
+            home,
+            sourceCandidate.source,
+            sourceCandidate.name,
+            false,
+            project,
+          );
+          const plan = initial.replacement
+            ? planSharedAdd(home, sourceCandidate.source, sourceCandidate.name, true, project)
+            : initial;
+          setSourceOperation({
+            phase: 'preview',
+            plan,
+            candidate: sourceCandidate,
+            steps: sourceSteps(),
+            scroll: 0,
+          });
+        } catch (error) {
+          setFeedback((error as Error).message);
+        }
         return;
       }
       if (input === 'r') {
@@ -2052,6 +2486,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
             visibility: sourceVisibility,
             desired: sourceTruth.desired,
             drift: sourceTruth.drift,
+            operation: sourceOperation,
             width,
             height: bodyHeight,
           })
@@ -2149,7 +2584,9 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         : searching
           ? ` search: ${query || '…'}  enter ${tab === 'source' ? 'search Source' : 'apply'}  esc clear `
           : tab === 'source'
-            ? ` ${feedback}${feedback ? '  ' : ''}source:${columnName}  g Global  p exact Project  tab Catalog/Inventory  / search  ↑↓/jk  enter detail  r refresh${sourceSurface === 'inventory' ? `  space mark (${sourceMarks.size})` : ''}  1/2 matrices  q `
+            ? sourceOperation
+              ? sourceOperationHint(sourceOperation)
+              : ` ${feedback}${feedback ? '  ' : ''}source:${columnName}  g Global  p exact Project  tab Catalog/Inventory  / search  ↑↓/jk  enter detail${sourceSurface === 'catalog' && sourceCandidate ? '  a add/replace' : ''}  r refresh${sourceSurface === 'inventory' ? `  space mark (${sourceMarks.size})` : ''}  1/2 matrices  q `
             : ` ${feedback}${feedback ? '  ' : ''}${tab}:${columnName}  ←→/hl  ↑↓/jk${actionHint}${updateHint}  enter ${tab === 'target' && focusColumn === 0 ? 'details' : 'SKILL.md'}${selectedRow?.realPath ? '  e explain' : ''}  m manage  / search  s sort:${sortLabel(sort)}  r updates  R refresh  tab  1/2/3 workspace  q `,
     ),
   );

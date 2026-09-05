@@ -10,6 +10,7 @@ import {
   readNpxSkillsLock,
 } from '../src/npx-skills.ts';
 import { hashDirectory } from '../src/inventory.ts';
+import { planSharedAdd, sharedAdd } from '../src/shared.ts';
 
 const CLI = path.join(import.meta.dirname, '../src/cli.ts');
 const ACTUAL_SKILLS_CLI = path.join(import.meta.dirname, '../node_modules/skills/bin/cli.mjs');
@@ -133,7 +134,21 @@ process.exit(2);
   const gitCalls = () => fs.existsSync(gitLog)
     ? fs.readFileSync(gitLog, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))
     : [];
-  return { root, home, config, log, gitLog, run, calls, gitCalls };
+  return { root, home, config, log, gitLog, env, run, calls, gitCalls };
+}
+
+function useFixtureEnv(
+  context: {after(callback: () => void): void},
+  env: Record<string, string>,
+): void {
+  const previous = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, env);
+  context.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
 }
 
 function writeSkill(root: string, name: string, body = '# skill') {
@@ -403,6 +418,18 @@ test('shared add accepts direct sources that upstream does not lock', () => {
   assert.equal(state.baseIntent['global:shared\0direct'], 'on');
 });
 
+test('shared add does not enter Verify success when repository provenance is missing', () => {
+  const {home, run} = setup();
+  const result = run(
+    ['shared', 'add', 'owner/repo', '--skill', 'missing-lock'],
+    {NPX_NO_LOCK: '1'},
+  );
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /installer lock source changed or missing/);
+  assert.match(result.stderr, /unverified provenance/);
+  assert.ok(fs.existsSync(path.join(home, '.agents', 'skills', 'missing-lock', 'SKILL.md')));
+});
+
 test('shared add accepts matching root-level lock provenance without replacement', () => {
   const { home, run } = setup();
   const root = path.join(home, '.agents', 'skills');
@@ -433,6 +460,133 @@ test('shared add previews a source replacement and requires --replace', () => {
   assert.equal(replaced.status, 0, replaced.stderr);
   assert.doesNotMatch(JSON.stringify(calls()[0].args), /--replace/);
   assert.equal(calls()[0].args.slice(3).includes('--yes'), false);
+});
+
+test('Shared Replace plan captures scope, ownership, intent, Relationships, recovery, and final truth', (context) => {
+  const fixture = setup();
+  useFixtureEnv(context, fixture.env);
+  const sharedRoot = path.join(fixture.home, '.agents', 'skills');
+  const source = path.join(sharedRoot, 'same');
+  const consumerRoot = path.join(fixture.home, '.pi', 'agent', 'skills');
+  const consumer = path.join(consumerRoot, 'same');
+  const lock = path.join(fixture.home, '.agents', '.skill-lock.json');
+  writeSkill(sharedRoot, 'same', '# old');
+  writeLock(lock, {
+    same: {
+      source: 'old/repo',
+      sourceUrl: 'https://github.com/old/repo.git',
+      skillPath: 'skills/same',
+      skillFolderHash: 'old-hash',
+    },
+  });
+  fs.mkdirSync(consumerRoot, {recursive: true});
+  fs.symlinkSync(source, consumer, 'dir');
+  fs.mkdirSync(fixture.config, {recursive: true});
+  const resourceId = fs.realpathSync(source);
+  const slotId = 'global:shared\0same';
+  const stateFile = path.join(fixture.config, 'state.json');
+  const state = {
+    baseIntent: {[slotId]: 'off'},
+    claims: {[slotId]: ['preset:work']},
+    tags: {[resourceId]: ['reviewed']},
+    bundles: {tools: [resourceId]},
+    presets: {work: {selectors: [`skill:${resourceId}`]}},
+  };
+  fs.writeFileSync(stateFile, JSON.stringify(state));
+
+  const home = {configDir: fixture.config};
+  const plan = planSharedAdd(home, 'new/repo', 'same', true);
+  assert.equal(plan.scope!.kind, 'global');
+  assert.equal(plan.scope!.path, fixture.home);
+  assert.equal(plan.target!.discoveryRoot, sharedRoot);
+  assert.equal(plan.target!.lockFile, lock);
+  assert.equal(plan.candidate!.identity, 'new/repo\0same');
+  assert.equal(plan.candidate!.normalizedSlot, 'same');
+  assert.deepEqual(plan.sourceAdapter, {
+    package: 'skills@1.5.21',
+    securityAuditOwner: 'vercel-skills',
+    proceedOwner: 'vercel-skills',
+  });
+  assert.equal(plan.preconditions!.sourceEntry.hash, hashDirectory(source));
+  assert.equal(plan.preconditions!.lock.owner, 'vercel-skills');
+  assert.equal(plan.preconditions!.permissions.target, 'writable');
+  assert.deepEqual(plan.blockers, []);
+  assert.deepEqual(plan.replacement, {from: 'old/repo', to: 'new/repo'});
+  assert.deepEqual(plan.intentPreservation, {
+    baseIntent: 'off',
+    tags: ['reviewed'],
+    bundles: ['tools'],
+    presetClaims: ['preset:work'],
+    presetSelectors: ['work'],
+  });
+  assert.ok(plan.relationshipEffects!.some((effect) =>
+    effect.targetPath === consumer && effect.plannedAction === 'consume-replacement'));
+  assert.equal(plan.relationshipEffects!.every((effect) => effect.sourcePreserved), true);
+  assert.equal(plan.recovery!.operationLock, `${lock}.skillspub-operation-lock`);
+  assert.equal(plan.recovery!.completedWork, 'preserved');
+  assert.deepEqual(plan.expectedFinalTruth, {
+    actual: 'same=on/local',
+    desired: 'on',
+    drift: 'none',
+    source: 'new/repo',
+    relationships: plan.relationshipEffects!.length,
+    effectiveVisibility: 'recompute-after-rescan',
+  });
+
+  const result = sharedAdd(home, 'new/repo', 'same', true, undefined, plan);
+  assert.deepEqual(result.drift, []);
+  const finalState = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  for (const key of ['baseIntent', 'claims', 'tags', 'presets'])
+    assert.deepEqual(finalState[key], state[key as keyof typeof state]);
+  assert.deepEqual(finalState.bundles.tools, state.bundles.tools);
+  assert.equal(fs.readFileSync(path.join(source, 'SKILL.md'), 'utf8'), '# new/repo\n');
+  assert.equal(fs.realpathSync(consumer), fs.realpathSync(source));
+});
+
+test('Shared Add invalidates an immutable plan after a concurrent precondition change', (context) => {
+  const fixture = setup();
+  useFixtureEnv(context, fixture.env);
+  const home = {configDir: fixture.config};
+  const plan = planSharedAdd(home, 'owner/repo', 'Example', false);
+  fs.mkdirSync(fixture.config, {recursive: true});
+  fs.writeFileSync(path.join(fixture.config, 'state.json'), JSON.stringify({baseIntent: {}, claims: {}}));
+
+  assert.throws(
+    () => sharedAdd(home, 'owner/repo', 'Example', false, undefined, plan),
+    /Source add plan changed after preview/,
+  );
+  assert.equal(fixture.calls().length, 0);
+  assert.equal(fs.existsSync(path.join(fixture.home, '.agents')), false);
+});
+
+test('Shared Add plan blocks unscanned discovery and parking path conflicts without mutation', () => {
+  for (const rootName of ['discovery', 'parking'] as const) {
+    const fixture = setup();
+    const previous = Object.fromEntries(Object.keys(fixture.env).map((key) => [key, process.env[key]]));
+    Object.assign(process.env, fixture.env);
+    try {
+      const discovery = path.join(fixture.home, '.agents', 'skills');
+      const parking = path.join(fixture.home, '.agents', '.skillspub-off', 'skills');
+      const conflict = path.join(rootName === 'discovery' ? discovery : parking, 'example');
+      fs.mkdirSync(path.dirname(conflict), {recursive: true});
+      fs.writeFileSync(conflict, 'not a Skill directory');
+      const home = {configDir: fixture.config};
+
+      const plan = planSharedAdd(home, 'owner/repo', 'Example', false);
+      assert.ok(plan.blockers?.some((blocker) => blocker.includes(`path conflict: ${conflict}`)));
+      assert.throws(
+        () => sharedAdd(home, 'owner/repo', 'Example', false, undefined, plan),
+        /Shared Slot path conflict/,
+      );
+      assert.equal(fs.readFileSync(conflict, 'utf8'), 'not a Skill directory');
+      assert.equal(fixture.calls().length, 0);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  }
 });
 
 test('failed shared update restores desired OFF entries and releases the operation lock', () => {
@@ -631,6 +785,22 @@ test('shared remove previews and confirms dependent Link and Mirror cascades', (
       'global:consumer\0mirror': { sourceId: fs.realpathSync(source), hash: hashDirectory(source) },
     },
   }));
+
+  const refreshPreview = run(['shared', 'add', 'owner/repo', '--skill', 'managed', '--json']);
+  assert.equal(refreshPreview.status, 0, refreshPreview.stderr || refreshPreview.stdout);
+  const refreshPlan = JSON.parse(refreshPreview.stdout).data.plan;
+  assert.ok(refreshPlan.relationshipEffects.some((effect: {targetPath: string; plannedAction: string}) =>
+    effect.targetPath === mirror && effect.plannedAction === 'mirror-sync'));
+  assert.equal(refreshPlan.expectedFinalTruth.drift, 'mirror-sync');
+
+  const replacePreview = run([
+    'shared', 'add', 'new/repo', '--skill', 'managed', '--replace', '--json',
+  ]);
+  assert.equal(replacePreview.status, 0, replacePreview.stderr || replacePreview.stdout);
+  const replacePlan = JSON.parse(replacePreview.stdout).data.plan;
+  assert.ok(replacePlan.relationshipEffects.some((effect: {targetPath: string; plannedAction: string}) =>
+    effect.targetPath === mirror && effect.plannedAction === 'mirror-sync'));
+  assert.equal(replacePlan.expectedFinalTruth.drift, 'mirror-sync');
 
   const jsonPreview = run(['shared', 'remove', 'managed', '--json']);
   assert.equal(jsonPreview.status, 0, jsonPreview.stderr || jsonPreview.stdout);
