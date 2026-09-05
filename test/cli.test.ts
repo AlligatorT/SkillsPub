@@ -883,6 +883,49 @@ test('Pi setup previews, confirms, and explicitly reconciles its managed Shared 
   assert.ok(fs.existsSync(piLink));
 });
 
+test('Pi exact-Project Target migration is separately previewed and applied through the CLI', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-pi-project-migration-'));
+  const piHome = path.join(configDir, 'pi');
+  const project = path.join(configDir, 'project');
+  const source = path.join(project, '.pi', 'agent', 'skills');
+  fs.mkdirSync(path.join(source, 'example'), { recursive: true });
+  fs.writeFileSync(path.join(source, 'example', 'SKILL.md'), '# example');
+  fs.mkdirSync(path.join(project, '.skillspub'), { recursive: true });
+  fs.writeFileSync(path.join(project, '.skillspub', 'state.json'), '{"intent":"preserved"}');
+  fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [{
+      key: 'pi',
+      discoveryRoot: path.join(piHome, 'agent', 'skills'),
+      parkingRoot: path.join(piHome, 'agent', '.skillspub-off', 'skills'),
+      projectPath: '.pi/agent/skills',
+    }],
+    genericTargets: [],
+  }));
+  const run = (args: string[]) => spawnSync('node', [CLI, ...args, '--json'], {
+    encoding: 'utf8',
+    env: { ...process.env, SKILLSPUB_CONFIG_DIR: configDir },
+  });
+
+  const preview = run(['project', project, 'harnesses', 'pi', 'migrate']);
+  assert.equal(preview.status, 0, preview.stderr || preview.stdout);
+  const previewDocument = JSON.parse(preview.stdout);
+  assert.equal(previewDocument.data.applied, false);
+  assert.equal(previewDocument.data.plan.operation, 'harness.migrate');
+  assert.match(previewDocument.data.plan.steps.join('\n'), /destination.*\.pi\/skills/);
+  assert.ok(fs.existsSync(source));
+
+  const applied = run(['project', project, 'harnesses', 'pi', 'migrate', '--yes']);
+  assert.equal(applied.status, 0, applied.stderr || applied.stdout);
+  const document = JSON.parse(applied.stdout);
+  assert.equal(document.data.applied, true);
+  assert.equal(document.data.result.actual.retainedRelationships, 1);
+  assert.equal(fs.existsSync(source), false);
+  assert.ok(fs.existsSync(path.join(project, '.pi', 'skills', 'example', 'SKILL.md')));
+  assert.equal(fs.readFileSync(path.join(project, '.skillspub', 'state.json'), 'utf8'), '{"intent":"preserved"}');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(configDir, 'targets.json'), 'utf8')).overrides[0].projectPath, undefined);
+});
+
 test('Claude Code inspect is read-only and setup reports its unsupported optional capability', () => {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-claude-'));
   const claudeHome = path.join(configDir, 'claude');
