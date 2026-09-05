@@ -10,7 +10,13 @@ import {
   readNpxSkillsLock,
 } from '../src/npx-skills.ts';
 import { hashDirectory } from '../src/inventory.ts';
-import { planSharedAdd, sharedAdd } from '../src/shared.ts';
+import {
+  planSharedAdd,
+  planSharedRemove,
+  sharedAdd,
+  sharedRemove,
+  sharedRemoveCascade,
+} from '../src/shared.ts';
 
 const CLI = path.join(import.meta.dirname, '../src/cli.ts');
 const ACTUAL_SKILLS_CLI = path.join(import.meta.dirname, '../node_modules/skills/bin/cli.mjs');
@@ -253,7 +259,7 @@ test('shared read-only commands return structured JSON without stream leakage', 
     assert.equal(document.schemaVersion, 1);
     assert.equal(document.ok, true);
     assert.deepEqual(document.data.warnings, ['upstream warning']);
-    assert.doesNotMatch(result.stdout, /\x1b/);
+    assert.equal(result.stdout.includes('\x1b'), false);
     if (args.includes('find')) assert.equal(document.data.candidates.length, 2);
     else assert.equal(document.data.output, 'Available Skills\n');
   }
@@ -266,7 +272,7 @@ test('shared read-only commands return structured JSON without stream leakage', 
   const fallbackData = JSON.parse(fallback.stdout).data;
   assert.deepEqual(fallbackData.candidates, []);
   assert.equal(fallbackData.raw, 'changed upstream output');
-  assert.doesNotMatch(fallback.stdout, /\x1b/);
+  assert.equal(fallback.stdout.includes('\x1b'), false);
 });
 
 test('shared add writes only the Global or exact Project Shared Target', () => {
@@ -351,27 +357,28 @@ test('JSON Shared add previews without invoking npx and applies the same plan wi
   assert.ok(fs.existsSync(path.join(project, '.agents', 'skills', 'example', 'SKILL.md')));
 });
 
-test('JSON Shared update and remove are plan-only until --yes', () => {
-  const { home, run, calls } = setup();
+test('JSON Shared update and removal phases are plan-only until confirmed', () => {
+  const {home, run, calls} = setup();
   assert.equal(run(['shared', 'add', 'owner/repo', '--skill', 'Example']).status, 0);
   const baselineCalls = calls().length;
 
-  for (const args of [
-    ['shared', 'update', 'example'],
-    ['shared', 'remove', 'example'],
-  ]) {
-    const preview = run([...args, '--json']);
-    assert.equal(preview.status, 0, preview.stderr || preview.stdout);
-    const previewDocument = JSON.parse(preview.stdout);
-    assert.equal(previewDocument.data.applied, false);
-    assert.equal(calls().length, baselineCalls + (args[1] === 'remove' ? 1 : 0));
+  const updatePreview = run(['shared', 'update', 'example', '--json']);
+  assert.equal(updatePreview.status, 0, updatePreview.stderr || updatePreview.stdout);
+  assert.equal(JSON.parse(updatePreview.stdout).data.applied, false);
+  const update = run(['shared', 'update', 'example', '--yes', '--json']);
+  assert.equal(update.status, 0, update.stderr || update.stdout);
 
-    const applied = run([...args, '--yes', '--json']);
-    assert.equal(applied.status, 0, applied.stderr || applied.stdout);
-    const appliedDocument = JSON.parse(applied.stdout);
-    assert.equal(appliedDocument.data.applied, true);
-    assert.deepEqual(appliedDocument.data.plan, previewDocument.data.plan);
-  }
+  const removePreview = run(['shared', 'remove', 'example', '--json']);
+  assert.equal(removePreview.status, 0, removePreview.stderr || removePreview.stdout);
+  assert.equal(JSON.parse(removePreview.stdout).data.phase, 'preview');
+  assert.equal(calls().length, baselineCalls + 1);
+  const cascade = run(['shared', 'remove', 'example', '--cascade', '--yes', '--json']);
+  assert.equal(cascade.status, 0, cascade.stderr || cascade.stdout);
+  assert.equal(JSON.parse(cascade.stdout).data.nextConfirmation, 'source-deletion');
+  assert.equal(calls().length, baselineCalls + 1);
+  const removed = run(['shared', 'remove', 'example', '--yes', '--json']);
+  assert.equal(removed.status, 0, removed.stderr || removed.stdout);
+  assert.equal(JSON.parse(removed.stdout).data.phase, 'source');
   assert.equal(fs.existsSync(path.join(home, '.agents', 'skills', 'example')), false);
   assert.equal(calls().length, baselineCalls + 2);
 });
@@ -389,7 +396,9 @@ test('managed lock names use upstream normalization and reject Slot collisions',
   writeLock(path.join(one.home, '.agents', '.skill-lock.json'), {
     'Foo@Bar': { source: 'owner/repo' },
   });
-  const removed = one.run(['shared', 'remove', 'Foo@Bar']);
+  const cascaded = one.run(['shared', 'remove', 'Foo@Bar', '--cascade', '--yes']);
+  assert.equal(cascaded.status, 0, cascaded.stderr);
+  const removed = one.run(['shared', 'remove', 'Foo@Bar', '--yes']);
   assert.equal(removed.status, 0, removed.stderr);
   assert.equal(fs.existsSync(path.join(one.home, '.agents', 'skills', 'foo-bar')), false);
 
@@ -757,6 +766,170 @@ test('orphaned Preset lastClaims also keep updated skills ON and block remove', 
   assert.match(removed.stderr, /cannot remove claimed Target Slot/);
 });
 
+test('shared removal requires a confirmed cascade before separately deleting the source', (context) => {
+  const { home, config, run, calls, env } = setup();
+  useFixtureEnv(context, env);
+  const discovery = path.join(home, '.agents', 'skills');
+  const source = path.join(discovery, 'managed');
+  const consumer = path.join(config, 'consumer');
+  const linked = path.join(consumer, 'linked');
+  const sharedAlias = path.join(discovery, 'managed-alias');
+  writeSkill(discovery, 'managed');
+  writeLock(path.join(home, '.agents', '.skill-lock.json'), {
+    managed: { source: 'owner/repo', skillPath: 'skills/managed/SKILL.md' },
+  });
+  fs.mkdirSync(consumer, { recursive: true });
+  fs.symlinkSync(source, linked, 'dir');
+  fs.symlinkSync(source, sharedAlias, 'dir');
+  fs.writeFileSync(path.join(config, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [],
+    genericTargets: [{
+      key: 'consumer',
+      kind: 'generic',
+      discoveryRoot: consumer,
+      parkingRoot: path.join(config, 'consumer-off'),
+      projectPath: '.consumer',
+    }],
+  }));
+
+  const preview = planSharedRemove({ configDir: config }, ['managed']);
+  assert.equal(preview.source.name, 'managed');
+  assert.equal(preview.source.provenance, 'owner/repo');
+  assert.equal(preview.dependencies.length, 2);
+  assert.ok(preview.dependencies.some(({targetKey, path: dependencyPath}) =>
+    targetKey === 'consumer' && dependencyPath === linked));
+  assert.ok(preview.dependencies.some(({targetKey, path: dependencyPath}) =>
+    targetKey === 'shared' && dependencyPath === sharedAlias));
+  assert.ok(preview.dependencies.every(({activation, source: dependencySource, plannedAction}) =>
+    activation === 'on' && dependencySource === source && plannedAction === 'delete'));
+  assert.deepEqual(preview.blockers, []);
+
+  const unconfirmed = run(['shared', 'remove', 'managed', '--yes']);
+  assert.equal(unconfirmed.status, 1);
+  assert.match(unconfirmed.stderr, /confirm the Relationship cascade first/i);
+  assert.ok(fs.existsSync(source));
+  assert.ok(fs.lstatSync(linked).isSymbolicLink());
+  assert.equal(calls().length, 0);
+
+  const cascaded = run(['shared', 'remove', 'managed', '--cascade', '--yes']);
+  assert.equal(cascaded.status, 0, cascaded.stderr);
+  assert.ok(fs.existsSync(source));
+  assert.equal(fs.existsSync(linked), false);
+  assert.match(cascaded.stdout, /cascade complete/i);
+  assert.match(cascaded.stdout, /confirm source deletion/i);
+  assert.equal(calls().length, 0);
+
+  const removed = run(['shared', 'remove', 'managed', '--yes']);
+  assert.equal(removed.status, 0, removed.stderr);
+  assert.equal(fs.existsSync(source), false);
+  assert.equal(calls().length, 1);
+});
+
+test('changed dependency fingerprints block a confirmed cascade before mutation', (context) => {
+  const { home, config, env } = setup();
+  useFixtureEnv(context, env);
+  const discovery = path.join(home, '.agents', 'skills');
+  const source = path.join(discovery, 'managed');
+  const consumer = path.join(config, 'consumer');
+  const linked = path.join(consumer, 'managed');
+  writeSkill(discovery, 'managed');
+  writeLock(path.join(home, '.agents', '.skill-lock.json'), { managed: { source: 'owner/repo' } });
+  fs.mkdirSync(consumer, { recursive: true });
+  fs.symlinkSync(source, linked, 'dir');
+  fs.writeFileSync(path.join(config, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [],
+    genericTargets: [{
+      key: 'consumer', kind: 'generic', discoveryRoot: consumer,
+      parkingRoot: path.join(config, 'consumer-off'), projectPath: '.consumer',
+    }],
+  }));
+  const appHome = { configDir: config };
+  const plan = planSharedRemove(appHome, ['managed']);
+  fs.rmSync(linked);
+  fs.symlinkSync(path.join(discovery, 'elsewhere'), linked, 'dir');
+
+  assert.throws(() => sharedRemoveCascade(appHome, ['managed'], plan), /changed after preview/i);
+  assert.ok(fs.existsSync(source));
+  assert.ok(fs.lstatSync(linked).isSymbolicLink());
+});
+
+test('partial dependency failure restores safely staged Relationships and retries the cascade', (context) => {
+  const {home, config, env} = setup();
+  useFixtureEnv(context, env);
+  const discovery = path.join(home, '.agents', 'skills');
+  const source = path.join(discovery, 'managed');
+  const consumer = path.join(config, 'consumer');
+  writeSkill(discovery, 'managed');
+  writeLock(path.join(home, '.agents', '.skill-lock.json'), {managed: {source: 'owner/repo'}});
+  fs.mkdirSync(consumer, {recursive: true});
+  const dependencies = ['one', 'two'].map((name) => {
+    const dependency = path.join(consumer, name);
+    fs.symlinkSync(source, dependency, 'dir');
+    return dependency;
+  });
+  fs.writeFileSync(path.join(config, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [],
+    genericTargets: [{
+      key: 'consumer', kind: 'generic', discoveryRoot: consumer,
+      parkingRoot: path.join(config, 'consumer-off'), projectPath: '.consumer',
+    }],
+  }));
+  const appHome = {configDir: config};
+  const plan = planSharedRemove(appHome, ['managed']);
+  const rename = fs.renameSync;
+  let moves = 0;
+  fs.renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
+    if (++moves === 2) throw Object.assign(new Error('simulated dependency I/O failure'), {code: 'EIO'});
+    rename(from, to);
+  }) as typeof fs.renameSync;
+  try {
+    assert.throws(
+      () => sharedRemoveCascade(appHome, ['managed'], plan),
+      /simulated dependency I\/O failure/,
+    );
+  } finally {
+    fs.renameSync = rename;
+  }
+  assert.ok(fs.existsSync(source));
+  assert.ok(dependencies.every((dependency) => fs.lstatSync(dependency).isSymbolicLink()));
+  assert.equal(fs.existsSync(plan.recovery.manifest), false);
+
+  const retried = sharedRemoveCascade(appHome, ['managed'], plan);
+  assert.ok(dependencies.every((dependency) => !fs.existsSync(dependency)));
+  assert.ok(fs.existsSync(retried.recoveryManifest!));
+});
+
+test('failed source deletion leaves the completed cascade and recovery manifest for retry', (context) => {
+  const { home, config, env } = setup();
+  useFixtureEnv(context, {...env, NPX_FAIL: '7'});
+  const discovery = path.join(home, '.agents', 'skills');
+  writeSkill(discovery, 'managed');
+  writeLock(path.join(home, '.agents', '.skill-lock.json'), { managed: { source: 'owner/repo' } });
+  const appHome = { configDir: config };
+  const plan = planSharedRemove(appHome, ['managed']);
+  const cascade = sharedRemoveCascade(appHome, ['managed'], plan);
+  assert.ok(fs.existsSync(cascade.recoveryManifest!));
+
+  let failure: Error & {details?: Record<string, unknown>} | undefined;
+  try {
+    sharedRemove(appHome, ['managed'], {sourceConfirmed: true, expected: plan});
+  } catch (error) {
+    failure = error as typeof failure;
+  }
+  assert.match(failure?.message ?? '', /skills remove failed/);
+  assert.deepEqual(failure?.details?.completedWork, ['Relationship cascade']);
+  assert.deepEqual(failure?.details?.source, plan.source);
+  assert.deepEqual(failure?.details?.recovery, plan.recovery);
+  assert.ok(fs.existsSync(cascade.recoveryManifest!));
+  delete process.env.NPX_FAIL;
+  const retried = sharedRemove(appHome, ['managed'], {sourceConfirmed: true, expected: plan});
+  assert.match(retried.actual, /missing/);
+  assert.equal(fs.existsSync(cascade.recoveryManifest!), false);
+});
+
 test('shared remove previews and confirms dependent Link and Mirror cascades', () => {
   const { home, config, run, calls } = setup();
   const discovery = path.join(home, '.agents', 'skills');
@@ -816,17 +989,20 @@ test('shared remove previews and confirms dependent Link and Mirror cascades', (
   assert.match(preview.stdout, /global:consumer.*linked/);
   assert.match(preview.stdout, /global:consumer.*mirror/);
   assert.match(preview.stdout, /projects outside this scan may retain broken Links/);
-  assert.match(preview.stderr, /dependent Relationships will also be deleted.*--yes/);
+  assert.match(preview.stderr, /confirm the complete Relationship cascade with --cascade/);
   assert.ok(fs.existsSync(source));
   assert.ok(fs.lstatSync(linked).isSymbolicLink());
   assert.ok(fs.existsSync(mirror));
   assert.equal(calls().length, 0);
 
+  const cascaded = run(['shared', 'remove', 'managed', '--cascade', '--yes']);
+  assert.equal(cascaded.status, 0, cascaded.stderr);
+  assert.ok(fs.existsSync(source));
+  assert.equal(fs.existsSync(linked), false);
+  assert.equal(fs.existsSync(mirror), false);
   const removed = run(['shared', 'remove', 'managed', '--yes']);
   assert.equal(removed.status, 0, removed.stderr);
   assert.equal(fs.existsSync(source), false);
-  assert.equal(fs.existsSync(linked), false);
-  assert.equal(fs.existsSync(mirror), false);
   const state = JSON.parse(fs.readFileSync(path.join(config, 'state.json'), 'utf8'));
   assert.equal(state.mirrors, undefined);
 });
@@ -856,10 +1032,13 @@ test('shared remove cascades dependencies while the Shared source is OFF', () =>
     baseIntent: { 'global:shared\0managed': 'off' },
   }));
 
+  const cascaded = run(['shared', 'remove', 'managed', '--cascade', '--yes']);
+  assert.equal(cascaded.status, 0, cascaded.stderr);
+  assert.ok(fs.existsSync(source));
+  assert.equal(fs.existsSync(linked), false);
   const removed = run(['shared', 'remove', 'managed', '--yes']);
   assert.equal(removed.status, 0, removed.stderr);
   assert.equal(fs.existsSync(source), false);
-  assert.equal(fs.existsSync(linked), false);
 });
 
 test('shared remove preflights dependent claims before changing disk', () => {
@@ -887,7 +1066,7 @@ test('shared remove preflights dependent claims before changing disk', () => {
     claims: { 'global:consumer\0linked': ['preset:keep'] },
   }));
 
-  const refused = run(['shared', 'remove', 'managed', '--yes']);
+  const refused = run(['shared', 'remove', 'managed', '--cascade', '--yes']);
   assert.equal(refused.status, 1);
   assert.match(refused.stderr, /cannot remove claimed Target Slot global:consumer\/linked/);
   assert.ok(fs.existsSync(source));
@@ -917,7 +1096,7 @@ test('project Shared removal refuses read-only dependent Relationships', () => {
     }],
   }));
 
-  const refused = run(['project', project, 'shared', 'remove', 'managed', '--yes']);
+  const refused = run(['project', project, 'shared', 'remove', 'managed', '--cascade', '--yes']);
   assert.equal(refused.status, 1);
   assert.match(refused.stderr, /read-only dependent Relationship/);
   assert.ok(fs.existsSync(source));
@@ -947,11 +1126,13 @@ test('failed shared remove restores staged dependent Relationships', () => {
     }],
   }));
 
-  const failed = run(['shared', 'remove', 'managed', '--yes'], { NPX_FAIL: '7' });
+  const cascaded = run(['shared', 'remove', 'managed', '--cascade', '--yes']);
+  assert.equal(cascaded.status, 0, cascaded.stderr);
+  const failed = run(['shared', 'remove', 'managed', '--yes'], {NPX_FAIL: '7'});
   assert.equal(failed.status, 1);
   assert.match(failed.stderr, /skills remove failed/);
   assert.ok(fs.existsSync(source));
-  assert.ok(fs.lstatSync(linked).isSymbolicLink());
+  assert.equal(fs.existsSync(linked), false);
   assert.equal(calls().length, 1);
 });
 
@@ -968,7 +1149,9 @@ test('shared remove passes only managed names and leaves external entries untouc
   assert.match(unknown.stderr, /not managed by skills@1\.5\.21/);
   assert.equal(calls().length, 0);
 
-  const removed = run(['shared', 'remove', 'managed']);
+  const cascaded = run(['shared', 'remove', 'managed', '--cascade', '--yes']);
+  assert.equal(cascaded.status, 0, cascaded.stderr);
+  const removed = run(['shared', 'remove', 'managed', '--yes']);
   assert.equal(removed.status, 0, removed.stderr);
   assert.equal(fs.existsSync(path.join(discovery, 'managed')), false);
   assert.ok(fs.existsSync(path.join(discovery, 'external', 'SKILL.md')));

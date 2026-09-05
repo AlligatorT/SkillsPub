@@ -51,17 +51,22 @@ import {
 } from './explain.ts';
 import {
   planSharedAdd,
+  planSharedRemove,
   sharedAdd,
   sharedFind,
+  sharedRemove,
+  sharedRemoveCascade,
   sharedOutdated,
   sharedRefresh,
   sharedUpdate,
   type SharedCommandResult,
   type SharedMutationPlan,
+  type SharedRemovalPlan,
   type SharedUpdateAvailabilityEntry,
 } from './shared.ts';
 import {
   normalizeNpxSkillsName,
+  readNpxSkillsLock,
   type NpxSkillsCandidate,
 } from './npx-skills.ts';
 
@@ -125,7 +130,7 @@ interface UpdateModalState {
   scroll: number;
 }
 
-type SourceOperationPhase = 'preview' | 'confirm' | 'run' | 'verify' | 'failed';
+type SourceOperationPhase = 'preview' | 'confirm' | 'source-confirm' | 'run' | 'verify' | 'failed';
 type SourceStepStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'skipped';
 
 interface SourceVerifiedTruth {
@@ -142,8 +147,9 @@ interface SourceVerifiedTruth {
 
 interface SourceOperationState {
   phase: SourceOperationPhase;
-  plan: SharedMutationPlan;
-  candidate: NpxSkillsCandidate;
+  plan: SharedMutationPlan | SharedRemovalPlan;
+  candidate?: NpxSkillsCandidate;
+  runStep?: 'cascade' | 'source';
   steps: Array<{name: string; status: SourceStepStatus}>;
   scroll: number;
   retry?: boolean;
@@ -861,16 +867,31 @@ function sourceInventoryRows(snapshot: TuiSnapshot): Row[] {
 function verifiedSourceTruth(
   home: Home,
   snapshot: TuiSnapshot,
-  plan: SharedMutationPlan,
+  plan: SharedMutationPlan | SharedRemovalPlan,
   scope: SourceScope,
   projectPath: string,
 ): SourceVerifiedTruth {
-  const slot = plan.candidate?.normalizedSlot ?? plan.slots[0] ?? 'unknown';
+  const slot = plan.operation === 'shared.remove'
+    ? plan.source.slot
+    : plan.candidate?.normalizedSlot ?? plan.slots[0] ?? 'unknown';
   const row = sourceInventoryRows(snapshot).find((candidate) =>
     sourceRelationships(candidate).some((relationship) =>
       relationship.targetId === plan.targetId && relationship.slot === slot));
   const relationships = row?.observedRelationships ?? row?.relationships ?? [];
-  const desiredTruth = sourceDesiredTruth(home, row, scope, projectPath);
+  const removalLockRemains = plan.operation === 'shared.remove' &&
+    readNpxSkillsLock(plan.target.lockFile).some(({slot: lockSlot}) => lockSlot === slot);
+  const removalDependenciesRemain = plan.operation === 'shared.remove'
+    ? plan.dependencies.filter(({path: dependencyPath}) => fs.lstatSync(dependencyPath, {throwIfNoEntry: false}))
+    : [];
+  const removalSourceRemains = plan.operation === 'shared.remove' && Boolean(row);
+  const desiredTruth = plan.operation === 'shared.remove'
+    ? {
+        desired: 'removed',
+        drift: removalSourceRemains || removalLockRemains || removalDependenciesRemain.length > 0
+          ? 'observed'
+          : 'none',
+      }
+    : sourceDesiredTruth(home, row, scope, projectPath);
   const visibility = resolveVisibility(
     home,
     row,
@@ -894,14 +915,21 @@ function verifiedSourceTruth(
     }
     return [];
   });
-  if (desiredTruth.drift === 'observed') driftEvidence.push('Actual differs from Desired');
+  if (plan.operation === 'shared.remove') {
+    if (removalSourceRemains) driftEvidence.push('Shared source remains');
+    if (removalLockRemains) driftEvidence.push('Vercel skills lock entry remains');
+    for (const dependency of removalDependenciesRemain)
+      driftEvidence.push(`dependent Relationship remains: ${dependency.targetId}/${dependency.slot}`);
+  } else if (desiredTruth.drift === 'observed') driftEvidence.push('Actual differs from Desired');
   const mirrorDrift = driftEvidence.filter((item) => item.includes('mirror')).length;
   const drift = mirrorDrift > 0
     ? `mirror-sync required (${mirrorDrift}); ${driftEvidence.join(', ')}`
     : driftEvidence.join(', ') || 'none observed';
   return {
     resource: row?.realPath ?? 'missing',
-    provenance: row?.sourceLabel ?? 'Source unknown',
+    provenance: row?.sourceLabel ?? (plan.operation === 'shared.remove'
+      ? plan.source.provenance
+      : 'Source unknown'),
     slot,
     relationships: relationships.map(({targetId, slot: relationshipSlot, info}) =>
       `${targetId}/${relationshipSlot} ${info.form}/${info.underOff ? 'off' : 'on'} ${info.path}`),
@@ -968,10 +996,12 @@ function SourceDetail({
   title,
   lines,
   bordered = false,
+  wrap = 'truncate-end',
 }: {
   title: string;
   lines: string[];
   bordered?: boolean;
+  wrap?: 'wrap' | 'truncate-end';
 }): ReactNode {
   return h(
     Box,
@@ -981,7 +1011,7 @@ function SourceDetail({
       ...(bordered ? {borderStyle: 'round' as const, borderColor: 'cyan', paddingX: 1} : {}),
     },
     h(Text, {bold: true}, title),
-    ...lines.map((line, index) => h(Text, {key: index, wrap: 'truncate-end'}, line)),
+    ...lines.map((line, index) => h(Text, {key: index, wrap}, line)),
   );
 }
 
@@ -1006,16 +1036,18 @@ function sourceOperationHint(operation: SourceOperationState): string {
   switch (operation.phase) {
     case 'preview':
       return (operation.plan.blockers?.length ?? 0) > 0
-        ? ' ↑↓/j/k scroll  blocked — esc cancel '
-        : ' ↑↓/j/k scroll  enter continue  esc cancel ';
+        ? ' ↑↓/j/k scroll  l log/evidence  blocked — esc cancel '
+        : ' ↑↓/j/k scroll  l log/evidence  enter continue  esc cancel ';
     case 'confirm':
-      return ' ↑↓/j/k scroll  enter confirm  esc cancel ';
+      return ' ↑↓/j/k scroll  enter confirm cascade  esc cancel ';
+    case 'source-confirm':
+      return ' ↑↓/j/k scroll  l log/evidence  enter confirm source deletion  esc keep source ';
     case 'run':
       return ' running — unrelated actions disabled ';
     case 'verify':
-      return ' ↑↓/j/k scroll  enter acknowledge Verify truth ';
+      return ' ↑↓/j/k scroll  l log/evidence  enter acknowledge Verify truth ';
     case 'failed':
-      return ' ↑↓/j/k scroll  t retry  esc acknowledge remaining Drift ';
+      return ' ↑↓/j/k scroll  l log/evidence  t retry  esc acknowledge remaining Drift ';
   }
 }
 
@@ -1027,13 +1059,95 @@ function sourceOperationLines(operation: SourceOperationState): {title: string; 
   if (operation.phase === 'preview' || operation.phase === 'confirm') states = 'States: queued';
   else if (operation.phase === 'run') states = 'States: queued · running';
   else if (operation.phase === 'verify') states = 'States: queued · running · succeeded';
+  if (plan.operation === 'shared.remove') {
+    const dependencies = plan.dependencies;
+    if (operation.phase === 'preview') return {
+      title: 'Source Remove plan',
+      lines: [
+        `Scope: ${scope} — ${plan.scope.path}`,
+        `Source: ${plan.source.provenance} name=${plan.source.name}`,
+        `Shared Slot: ${plan.source.slot}`,
+        `Source path: ${plan.source.path}`,
+        `Source fingerprint: ${plan.source.fingerprint}`,
+        `Source Adapter: ${plan.sourceAdapter.package}`,
+        `Permissions: source=${plan.preconditions.permissions.source} state=${plan.preconditions.permissions.state} lock=${plan.preconditions.permissions.lock}`,
+        ...plan.preconditions.permissions.dependencies.map(({path: dependencyPath, status}) =>
+          `Dependency permission: ${status} ${dependencyPath}`),
+        ...plan.selection.included.map(({identity, reason}) => `Included: ${identity} — ${reason}`),
+        ...plan.selection.excluded.map(({identity, reason}) => `Excluded: ${identity} — ${reason}`),
+        `Relationship effects: ${dependencies.length}`,
+        ...dependencies.map((dependency) =>
+          `${dependency.targetKey} (${dependency.targetId}) ${dependency.form}/${dependency.activation} ` +
+          `source=${dependency.source} target=${dependency.path} action=${dependency.plannedAction} ` +
+          `fingerprint=${dependency.fingerprint}`),
+        `Blockers: ${plan.blockers.join('; ') || 'none'}`,
+        ...plan.warnings.map((warning) => `Warning: ${warning}`),
+        `Recovery: manifest=${plan.recovery.manifest}; ${plan.recovery.evidence.join(', ')}`,
+        `Current Actual: ${plan.currentTruth.actual}; Desired=${plan.currentTruth.desired}; Drift=${plan.currentTruth.drift}`,
+        `Expected final truth: ${plan.expectedFinalTruth.actual}; Desired=${plan.expectedFinalTruth.desired}; Drift=${plan.expectedFinalTruth.drift}`,
+        states,
+        timeline,
+      ],
+    };
+    if (operation.phase === 'confirm') return {
+      title: 'Source removal — cascade confirmation',
+      lines: [
+        'Confirm complete Relationship cascade.',
+        `Source remains: ${plan.source.path}`,
+        `Dependencies to delete: ${dependencies.length}`,
+        ...dependencies.map(({targetId, slot, form, activation, path: dependencyPath}) =>
+          `${targetId}/${slot} ${form}/${activation} ${dependencyPath}`),
+        'Vercel skills source deletion will require a separate confirmation.',
+        states,
+        timeline,
+      ],
+    };
+    if (operation.phase === 'source-confirm') return {
+      title: 'Source removal — source confirmation',
+      lines: [
+        'Relationship cascade succeeded.',
+        `Completed work: ${operation.result?.completedWork?.join(', ') || 'no dependent Relationships'}`,
+        `Recovery manifest: ${operation.result?.recoveryManifest ?? plan.recovery.manifest}`,
+        `Confirm Vercel skills source deletion: ${plan.source.name}`,
+        `Only this proven managed name will be passed; remove --all is forbidden.`,
+        states,
+        timeline,
+      ],
+    };
+    if (operation.phase === 'run') return {
+      title: 'Source removal — running',
+      lines: [states, timeline, `Stage: ${operation.runStep}`, `Recovery manifest: ${plan.recovery.manifest}`],
+    };
+    const succeeded = operation.phase === 'verify';
+    const truth = operation.truth;
+    return {
+      title: succeeded ? 'Source operation — Verify truth' : 'Source operation — failed',
+      lines: [
+        states,
+        timeline,
+        ...operation.steps.map(({name, status}) => `Step: ${name} ${status}`),
+        ...(succeeded ? [] : [`Error: ${operation.error}`, `Raw log: ${operation.log ?? operation.error}`]),
+        `Resource: ${truth?.resource ?? 'missing'}`,
+        `Provenance: ${truth?.provenance ?? plan.source.provenance}`,
+        `Actual: ${truth?.actual ?? operation.result?.actual ?? 'rescan unavailable'}`,
+        `Desired: ${truth?.desired ?? 'removed'}`,
+        `Drift: ${truth?.drift ?? (operation.result?.drift.join(', ') || 'see error')}`,
+        `Relationship effects: ${dependencies.length} planned; completed=${operation.result?.completedWork?.join(', ') || 'unknown'}`,
+        `Update availability: ${truth?.updateAvailability ?? 'unknown'}`,
+        `next-load Effective Visibility: ${truth?.effectiveVisibility ?? 'unknown'}; running Harness not reloaded`,
+        `Artifacts: lock=${plan.target.lockFile}; manifest=${plan.recovery.manifest}`,
+        succeeded ? 'Enter acknowledge Verify truth' : 't retry · Esc acknowledge remaining Drift',
+      ],
+    };
+  }
+  const candidate = operation.candidate!;
   const effects = plan.relationshipEffects ?? [];
   if (operation.phase === 'preview') return {
     title: `Source ${plan.replacement ? 'Replace' : 'Add'} plan`,
     lines: [
       `Scope: ${scope} — ${plan.scope?.path}`,
-      `Candidate: ${operation.candidate.source}@${operation.candidate.name}`,
-      `Provenance: ${operation.candidate.source}`,
+      `Candidate: ${candidate.source}@${candidate.name}`,
+      `Provenance: ${candidate.source}`,
       `Shared Slot: ${plan.candidate?.normalizedSlot}`,
       `Source Adapter: ${plan.sourceAdapter?.package}`,
       `Ownership: SkillsPub scope/identity/Slot/Relationships; Vercel skills security audit + Proceed`,
@@ -1061,7 +1175,7 @@ function sourceOperationLines(operation: SourceOperationState): {title: string; 
     lines: [
       'Confirm SkillsPub intent.',
       'Scope · identity · Slot · Relationships',
-      `Candidate: ${operation.candidate.source}@${operation.candidate.name}`,
+      `Candidate: ${candidate.source}@${candidate.name}`,
       `Scope: ${scope} — ${plan.scope?.path}`,
       `Slot: ${plan.candidate?.normalizedSlot}`,
       `Relationships: ${effects.length}; no Harness-specific Link or Mirror will be created`,
@@ -1343,6 +1457,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   const [sourceResourceId, setSourceResourceId] = useState<string>();
   const [sourceMarks, setSourceMarks] = useState<Set<string>>(new Set());
   const [sourceDetailOpen, setSourceDetailOpen] = useState(false);
+  const [sourceLogOpen, setSourceLogOpen] = useState(false);
   const [sourceOperation, setSourceOperation] = useState<SourceOperationState>();
   const planScope: PresetScope = projectPath ? { projectPath } : {};
   const prepareMutation = () => {
@@ -1437,6 +1552,17 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     sourceSurface === 'catalog' ? sourceCandidate : undefined,
     sourceSurface === 'inventory' ? sourceResource : undefined,
   );
+  const sourceLogContent = sourceOperation
+    ? [
+        `Raw log: ${sourceOperation.log ?? 'No subprocess output captured.'}`,
+        ...(sourceOperation.plan.recovery?.evidence ?? []).map((evidence) => `Evidence: ${evidence}`),
+        ...(sourceOperation.plan.operation === 'shared.remove'
+          ? sourceOperation.plan.dependencies.map((dependency) =>
+              `Dependency: ${dependency.targetId}/${dependency.slot} ${dependency.form}/${dependency.activation} ` +
+              `${dependency.path} fingerprint=${dependency.fingerprint} action=${dependency.plannedAction}`)
+          : []),
+      ]
+    : [];
 
   const selectedRow = tab === 'target' ? entry?.row : instance;
   const selectedTarget = tab === 'target' ? target : targets[instTarget];
@@ -1465,8 +1591,13 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     () => sourceDesiredTruth(home, activeSourceResource, sourceScope, exactProjectPath),
     [home, activeSourceResource, sourceScope, exactProjectPath, sourceSnapshot],
   );
-  const sourcePath = sourceSnapshot.targets.find(({name}) => name === 'shared')?.dir
-    ?? (sourceSnapshot.project ?? home.configDir);
+  const sourceTarget = sourceSnapshot.targets.find(({name}) => name === 'shared');
+  const sourceRelationship = sourceRelationships(activeSourceResource).find((relationship) =>
+    !relationship.readOnly && relationship.info.form === 'local');
+  const sourceRemovable = Boolean(
+    activeSourceResource && sourceRelationship && activeSourceResource.sourceLabel !== 'Source unknown',
+  );
+  const sourcePath = sourceTarget?.dir ?? (sourceSnapshot.project ?? home.configDir);
   const explained = useMemo(
     () => resolveVisibility(
       home,
@@ -1546,35 +1677,86 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     }
   };
 
-  const sourceSteps = (status: SourceStepStatus = 'queued'): SourceOperationState['steps'] => [
-    {name: 'plan recheck', status},
-    {name: 'upstream ownership handoff', status},
-    {name: 'Vercel skills add', status},
-    {name: 'Desired state preservation', status},
-    {name: 'provenance verification', status},
-    {name: 'final rescan', status},
-  ];
+  const sourceSteps = (
+    operation: SharedMutationPlan['operation'] | SharedRemovalPlan['operation'],
+    status: SourceStepStatus = 'queued',
+  ): SourceOperationState['steps'] => operation === 'shared.remove'
+    ? [
+        {name: 'plan recheck', status},
+        {name: 'Relationship cascade', status},
+        {name: 'recovery manifest', status},
+        {name: 'Vercel skills remove', status},
+        {name: 'provenance verification', status},
+        {name: 'final rescan', status},
+      ]
+    : [
+        {name: 'plan recheck', status},
+        {name: 'upstream ownership handoff', status},
+        {name: 'Vercel skills add', status},
+        {name: 'Desired state preservation', status},
+        {name: 'provenance verification', status},
+        {name: 'final rescan', status},
+      ];
 
   const applySourceOperation = (operation: SourceOperationState): void => {
     const project = sourceScope === 'project' ? exactProjectPath : undefined;
     let plan = operation.plan;
     try {
+      if (plan.operation === 'shared.remove') {
+        const result = operation.runStep === 'source'
+          ? sharedRemove(home, [plan.source.name], {
+              sourceConfirmed: true,
+              projectPath: project,
+              expected: plan,
+            })
+          : sharedRemoveCascade(home, [plan.source.name], plan, project);
+        const finalSnapshot = sourceTakeSnapshot(sourceScope);
+        const truth = verifiedSourceTruth(home, finalSnapshot, plan, sourceScope, exactProjectPath);
+        setSourceSnapshot(finalSnapshot);
+        if (operation.runStep !== 'source') {
+          const steps = sourceSteps(plan.operation);
+          for (const step of steps.slice(0, 3)) step.status = 'succeeded';
+          setSourceOperation({
+            ...operation,
+            phase: 'source-confirm',
+            result,
+            truth,
+            retry: false,
+            scroll: 0,
+            steps,
+            log: 'Known Relationship cascade completed; source preserved pending confirmation.',
+          });
+          return;
+        }
+        setSourceOperation({
+          ...operation,
+          phase: 'verify',
+          result,
+          truth,
+          retry: false,
+          scroll: 0,
+          steps: sourceSteps(plan.operation, 'succeeded'),
+          log: 'Pinned Vercel skills remove completed; final filesystem rescan succeeded.',
+        });
+        return;
+      }
+      const candidate = operation.candidate!;
       if (operation.retry) {
         const fresh = planSharedAdd(
           home,
-          operation.candidate.source,
-          operation.candidate.name,
-          Boolean(operation.plan.replacement),
+          candidate.source,
+          candidate.name,
+          Boolean(plan.replacement),
           project,
         );
-        if (!sameSourceIntent(operation.plan, fresh))
+        if (!sameSourceIntent(plan, fresh))
           throw new Error('Source intent changed; new preview required.');
         plan = fresh;
       }
       const result = sharedAdd(
         home,
-        operation.candidate.source,
-        operation.candidate.name,
+        candidate.source,
+        candidate.name,
         Boolean(plan.replace),
         project,
         plan,
@@ -1590,7 +1772,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         truth,
         retry: false,
         scroll: 0,
-        steps: sourceSteps('succeeded'),
+        steps: sourceSteps(plan.operation, 'succeeded'),
         log: 'Pinned Vercel skills handoff completed; final filesystem rescan succeeded.',
       });
     } catch (error) {
@@ -1612,21 +1794,37 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       } catch {
         // The operation error remains primary; failure truth reports the unavailable rescan.
       }
-      const steps = sourceSteps();
-      if (failureStage === 'preflight') {
-        steps[0]!.status = 'failed';
+      const steps = sourceSteps(plan.operation);
+      if (plan.operation === 'shared.remove') {
+        if (operation.runStep === 'source') {
+          for (const step of steps.slice(0, 3)) step.status = 'succeeded';
+          if (steps[3]) steps[3].status = 'failed';
+          if (steps[4]) steps[4].status = 'skipped';
+          if (steps[5]) steps[5].status = rescanSucceeded ? 'succeeded' : 'failed';
+        } else if (failureStage === 'preflight') {
+          if (steps[0]) steps[0].status = 'failed';
+          for (const step of steps.slice(1, 5)) step.status = 'skipped';
+          if (steps[5]) steps[5].status = rescanSucceeded ? 'succeeded' : 'failed';
+        } else {
+          if (steps[0]) steps[0].status = 'succeeded';
+          if (steps[1]) steps[1].status = 'failed';
+          for (const step of steps.slice(2, 5)) step.status = 'skipped';
+          if (steps[5]) steps[5].status = rescanSucceeded ? 'succeeded' : 'failed';
+        }
+      } else if (failureStage === 'preflight') {
+        if (steps[0]) steps[0].status = 'failed';
         for (const step of steps.slice(1)) step.status = 'skipped';
       } else if (failureStage === 'upstream') {
-        steps[0]!.status = 'succeeded';
-        steps[1]!.status = 'succeeded';
-        steps[2]!.status = 'failed';
-        steps[3]!.status = 'succeeded';
-        steps[4]!.status = 'skipped';
-        steps[5]!.status = rescanSucceeded ? 'succeeded' : 'failed';
+        if (steps[0]) steps[0].status = 'succeeded';
+        if (steps[1]) steps[1].status = 'succeeded';
+        if (steps[2]) steps[2].status = 'failed';
+        if (steps[3]) steps[3].status = 'succeeded';
+        if (steps[4]) steps[4].status = 'skipped';
+        if (steps[5]) steps[5].status = rescanSucceeded ? 'succeeded' : 'failed';
       } else {
         for (const step of steps.slice(0, 4)) step.status = 'succeeded';
-        steps[4]!.status = 'failed';
-        steps[5]!.status = rescanSucceeded ? 'succeeded' : 'failed';
+        if (steps[4]) steps[4].status = 'failed';
+        if (steps[5]) steps[5].status = rescanSucceeded ? 'succeeded' : 'failed';
       }
       setSourceOperation({
         ...operation,
@@ -1685,6 +1883,14 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
 
   useInput((input, key) => {
     if (sourceOperation) {
+      if (sourceLogOpen) {
+        if (key.escape) setSourceLogOpen(false);
+        return;
+      }
+      if (input === 'l') {
+        setSourceLogOpen(true);
+        return;
+      }
       const operationLines = sourceOperationLines(sourceOperation).lines;
       if (sourceOperation.phase !== 'run' && (key.downArrow || input === 'j')) {
         setSourceOperation({
@@ -1708,11 +1914,30 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         else if (key.return) setSourceOperation({
           ...sourceOperation,
           phase: 'run',
+          runStep: sourceOperation.plan.operation === 'shared.remove' ? 'cascade' : undefined,
           retry: false,
           scroll: 0,
-          steps: sourceSteps().map((step, index) => ({
+          steps: sourceSteps(sourceOperation.plan.operation).map((step, index) => ({
             ...step,
             status: index === 0 ? 'running' : 'queued',
+          })),
+        });
+        return;
+      }
+      if (sourceOperation.phase === 'source-confirm') {
+        if (key.escape) {
+          setSourceSnapshot(sourceTakeSnapshot(sourceScope));
+          setFeedback('Source preserved; Relationship cascade remains complete.');
+          setSourceOperation(undefined);
+        } else if (key.return) setSourceOperation({
+          ...sourceOperation,
+          phase: 'run',
+          runStep: 'source',
+          retry: false,
+          scroll: 0,
+          steps: sourceOperation.steps.map((step, index) => ({
+            ...step,
+            status: index === 3 ? 'running' : step.status,
           })),
         });
         return;
@@ -1727,7 +1952,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
           phase: 'run',
           retry: true,
           scroll: 0,
-          steps: sourceSteps().map((step, index) => ({
+          steps: sourceSteps(sourceOperation.plan.operation).map((step, index) => ({
             ...step,
             status: index === 0 ? 'running' : 'queued',
           })),
@@ -2103,7 +2328,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
             phase: 'preview',
             plan,
             candidate: sourceCandidate,
-            steps: sourceSteps(),
+            steps: sourceSteps(plan.operation),
             scroll: 0,
           });
         } catch (error) {
@@ -2146,6 +2371,23 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         } else {
           const next = sourceInventory[Math.max(0, sourceResourceIndex - 1)];
           if (next) setSourceResourceId(next.id);
+        }
+        return;
+      }
+      if (input === 'd' && sourceSurface === 'inventory' && sourceResource) {
+        if (!sourceRemovable)
+          return setFeedback('Remove unavailable: select a proven Vercel-managed local Shared source');
+        try {
+          const project = sourceScope === 'project' ? exactProjectPath : undefined;
+          const plan = planSharedRemove(home, [sourceResource.name], project);
+          setSourceOperation({
+            phase: 'preview',
+            plan,
+            steps: sourceSteps(plan.operation),
+            scroll: 0,
+          });
+        } catch (error) {
+          setFeedback((error as Error).message);
         }
         return;
       }
@@ -2404,7 +2646,18 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         ? `  ${sourceSurface === 'catalog' ? 'Catalog' : 'Inventory'}`
         : `  Sort: ${sortLabel(sort)}${query ? `  Search: ${query}` : ''}`,
     ),
-    sourceDetailOpen
+    sourceLogOpen && sourceOperation
+      ? h(
+          Box,
+          {height: bodyHeight, paddingLeft: 2, paddingRight: 2, paddingTop: 1},
+          h(SourceDetail, {
+            title: 'Source operation log & evidence',
+            lines: sourceLogContent,
+            bordered: true,
+            wrap: 'wrap',
+          }),
+        )
+      : sourceDetailOpen
       ? h(
           Box,
           {height: bodyHeight, paddingLeft: 2, paddingRight: 2, paddingTop: 1},
@@ -2559,7 +2812,9 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     h(
       Text,
       {inverse: true, wrap: 'truncate-end'},
-      sourceDetailOpen
+      sourceLogOpen
+        ? ' esc close log/evidence '
+        : sourceDetailOpen
         ? ' esc close '
         : targetInfoOpen
         ? ' esc close '
@@ -2586,7 +2841,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
           : tab === 'source'
             ? sourceOperation
               ? sourceOperationHint(sourceOperation)
-              : ` ${feedback}${feedback ? '  ' : ''}source:${columnName}  g Global  p exact Project  tab Catalog/Inventory  / search  ↑↓/jk  enter detail${sourceSurface === 'catalog' && sourceCandidate ? '  a add/replace' : ''}  r refresh${sourceSurface === 'inventory' ? `  space mark (${sourceMarks.size})` : ''}  1/2 matrices  q `
+              : ` ${feedback}${feedback ? '  ' : ''}source:${columnName}  g Global  p exact Project  tab Catalog/Inventory  / search  ↑↓/jk  enter detail${sourceSurface === 'catalog' && sourceCandidate ? '  a add/replace' : ''}  r refresh${sourceSurface === 'inventory' ? `  space mark (${sourceMarks.size})${sourceRemovable ? '  d remove' : ''}` : ''}  1/2 matrices  q `
             : ` ${feedback}${feedback ? '  ' : ''}${tab}:${columnName}  ←→/hl  ↑↓/jk${actionHint}${updateHint}  enter ${tab === 'target' && focusColumn === 0 ? 'details' : 'SKILL.md'}${selectedRow?.realPath ? '  e explain' : ''}  m manage  / search  s sort:${sortLabel(sort)}  r updates  R refresh  tab  1/2/3 workspace  q `,
     ),
   );
