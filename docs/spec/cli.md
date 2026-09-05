@@ -218,9 +218,69 @@ skillspub shared outdated
 
 ## TUI
 
-TUI 是 matrix-first 的单项 Relationship manager，不追求完整 CLI parity。
+TUI 把已安装资源的 Relationship 管理与远程 Source lifecycle 分开：Target/Skill matrix 仍只管理 Relationships；独立 Source workspace 负责 Global 与 exact Project 的 Catalog/Inventory lifecycle。两者共享同一 Inventory、Desired state、Drift、Effective Visibility 和 plan/apply 核心，不各建真相。
 
-### Tabs and projection
+### Source workspace: approved A + C contract
+
+Source workspace 采用 #111 批准的 A+C 组合。Variant A 是持久结构：始终显示 `Global` 或 `exact Project` 及 resolved path、`Discover → Inspect & plan → Confirm ownership → Run & maintain → Verify truth` rail、Catalog/Inventory、一个 selected candidate/resource detail 和 scope truth。只有 operation 执行、失败、retry、log/evidence 与最终验证时，active detail area 临时替换为 Variant C；scope、selection、rail 和 truth 始终保留。prototype code 只作证据，不合并。
+
+状态机固定为 `browse → preview → confirm → run → verify`，以及 `run → failed → retry/re-preview`、`preview → cancelled → browse`：
+
+- search 与 refresh 是 explicit read-only network operations，不要求 mutation confirmation；
+- add、explicit replace、single update、marked batch update 与 dependency-aware remove 都先生成 immutable scrollable preview，再确认；
+- confirm 或 run 期间不能切 scope，也不能执行无关 mutation；
+- apply 前按 preview 的 hashes、lock/provenance、permissions、Slot、policy/config 与 dependencies 重检；任一 precondition 改变就废弃旧 plan，回到 preview；
+- success 停在 Verify truth，直到用户 acknowledge；failure 保持 C state，直到 retry、fresh preview，或 acknowledge remaining Drift 后离开；
+- 每个 success、failure、partial result 都必须重新扫描 filesystem，再显示 final truth。
+
+Global 只操作 Global Shared Target、Global Vercel lock 和 scope-local update cache。exact Project 是 TUI startup `cwd` 的 canonical `realpath`，只操作该目录的 Project Shared Target、`<project>/skills-lock.json`、Project state 与 Project update cache；不用 Git 或 `package.json` 改写 root，也不建立中央 Project registry。Project Inventory 可显示 Global/ancestor inheritance 解释 effective state，但 inherited entries read-only，必须标明 source directory。selection、batch marks、plan 与 cache 按 candidate/resource identity 和 scope 隔离；sort/refresh 只在 identity 仍有效时保留，scope change 全部清除。
+
+Catalog candidate 以 `source + skill path/name` 识别，不按 name 去重。detail 显示 exact source、skill path/name、description、可用的 installs/detail URL 与 normalized destination Slot。installed resource 以 canonical `realPath` 识别，可靠 provenance 只来自当前 scope 的 Vercel `skills` lock；无法证明时显示 `Source unknown` 与 `realPath`，不得提供伪装成 Vercel-owned 的 update/remove。
+
+若 normalized Shared Slot 已被不同 source 占用，add 变成 explicit Replace。preview 列出 old/new provenance，以及继续指向该 Slot、因此会消费新内容的所有已知 Relationships；Slot intent、Tags、Bundles 与有效 Preset claims 保留，不静默覆盖。
+
+每个 mutation preview 至少包含：
+
+- exact scope/path、candidate/resource identity、provenance、destination Slot、固定 Source Adapter version；
+- permissions、lock ownership、path/name conflicts、current hashes、Actual/Desired state、Preset claims 与 concurrent-change checks；
+- included/excluded items 及原因；
+- 按 scope/Target 分组的完整 Relationship effects：form、Activation、source path、target path 与 planned action；
+- update 临时可见性、Mirror Drift/reconcile、next-load Effective Visibility、unopened-Project risk 与 recovery artifacts；
+- expected final Actual、Desired、Drift、Source 与 Relationship counts。
+
+大集合可以先 summary，但必须可展开完整 list，不能只显示 count。同一 Relationship-impact projection 供 Source replace/remove 与 Harness setup/reconcile 使用。Grok 已验收操作的 preview 必须明确显示：90 个 Shared-backed Grok Link Relationships 将被 unlink、90 个 source resources 不删除、一个 non-Shared `ego-browser` Relationship 保留，并在确认前显示 config backup、affected-Link manifest 与 recovery path。
+
+confirmation ownership 固定为：
+
+- add/replace 先确认 SkillsPub scope/identity/Slot/Relationship plan，再保留 Vercel `skills` 自己的 security audit 与最终 `Proceed`；
+- single/batch update 确认 exact named set 及 Desired/Relationship/Mirror effects；任何 upstream prompt 仍由 Vercel `skills` 拥有；
+- remove 先确认完整 known Relationship cascade；cascade 成功后再独立确认通过 Vercel `skills` 删除一个 named Shared source。cascade 不完整则 source 不删除，禁止 `remove --all`。
+
+operation semantics：
+
+- Refresh 只在 explicit `r` 对当前 scope 的全部 proven Vercel-managed resources 运行，返回 `current`、`available`、`upstream-missing` 或 `check-failed` 与 `checkedAt`；无 cache 为 unknown，且 update availability 始终与 Actual、Desired、Drift、Effective Visibility 分开。
+- Add/replace 只写 selected Shared Target，不创建 Harness Relationships；完成后验证 resource、lock provenance、Slot 与现有 Relationships。
+- Single/batch update 只接受 identity-matching `available` resources。batch 只复用 marked set，v0.1 不做 batch add/remove；一个 confirmed set 在一个 scope operation lock 下执行，逐项报告 `updated`/`skipped`/`failed`，不承诺 all-or-nothing。
+- update 可临时暴露 Desired-OFF entry，但 success/failure 后都恢复并验证 Desired Activation。Links 立即消费新 source；Mirrors 形成 `mirror-sync` Drift，diverged Mirrors 不静默覆盖。
+- remove 只用于当前 scope 中 proven Vercel-managed local Shared source。它列出所有 known Link/Mirror dependencies；active Preset claims、unknown ownership、same-name conflicts 或 unsafe/read-only dependency 都阻塞。Global remove 同时警告 unopened Projects 可能遗留 broken Links，但不能省略当前 scan 可见的依赖。
+
+Variant C 把 approved plan 投影为 `queued`、`running`、`succeeded`、`failed`、`skipped` timeline，包括 Vercel ownership handoff、local orchestration、verification evidence 以及 lock/backup/manifest/recovery paths。unexpected I/O failure 保留 Desired state 与已完成 work，不尝试 fragile rollback；C 显示 error、partial effects、remaining work/Drift、raw log 与 recovery evidence。`t` 先 fresh rescan/recheck；原 intent 仍有效时 idempotent retry，只重做 remaining work，否则拒绝并要求新 preview。最近一次 transcript 只在当前 TUI session 可见；durable evidence 继续使用 upstream lock、backup 与 manifest，不新增 lifecycle DB 或 background history service。
+
+Verify truth 分栏显示 filesystem Actual Relationships/Activation/forms、preserved Desired、remaining Drift、per-item Source outcome/provenance、Mirrors、broken/unknown dependencies、Relationship effects、recovery paths、update availability 与证据支持的 next-load Effective Visibility；不得声称 running Harness 已 reload。
+
+Source workspace keyboard contract：
+
+- `g` / `p`：idle 时选择 Global / exact Project；`Tab`：Catalog / Inventory；
+- `/`：按 name、description、provenance 搜索，并保留 manual source input；`j` / `k`：移动 selection；
+- `Enter`：browse 时打开 detail、preview 时推进 displayed confirmation、success 后 acknowledge final truth；
+- `a`：preview add/replace；`r`：refresh；`u`：preview selected update；
+- `Space`：mark/unmark Inventory resource；`b`：preview marked batch update；`d`：preview dependency-aware remove；
+- `t`：只在 failed C state retry；`l`：打开 full log/evidence；
+- `Esc`：关闭 search/detail/log、取消未 apply preview，或在 acknowledge 后离开 result 并保留 underlying selection。
+
+footer 只显示 context-valid actions。search/detail/log modal 必须 trap focus；passive summary 不是 focus stop。confirmation/execution 期间禁用的 action 要解释原因。narrow layout 只减少 passive presentation，不能移除 actionable workflow、impact review 或 final truth；wide layout 不能让长 status/identity 产生歧义。prototype-only fail-next 控件不进入 production。
+
+### Relationship tabs and projection
 
 1. **Target**（默认）
    - Shared Target 只显示一次；检测到的 Harness Targets 按 Harness 分组
@@ -244,7 +304,7 @@ TUI 是 matrix-first 的单项 Relationship manager，不追求完整 CLI parity
 - Update availability：显示 `current` / `available` / `upstream-missing` / `check-failed` 与 `checkedAt`；无缓存时显示 unknown
 - Inherited Project entry：只读并显示 source directory
 
-`r` 显式刷新当前 scope 的全部受管 Skills，不在 TUI 启动时后台联网。`u` 更新选中的 available Skill；batch marks 存在时只更新已标记且 available 的 Skills。更新继续使用 Shared update 的操作锁、Desired state 停放和验证语义。
+Source refresh/update/remove 只在 dedicated Source workspace 触发；Target/Skill matrix 仅投影 update availability，不新增旁路 mutation。
 
 Global view 中 `Space` 只切换 existing Relationship；Missing 通过 Link/Mirror plan 建立。Project view 每个 Skill × Target 只投影一个有效条目：inherited ON 只读；inherited OFF 或 missing 可用普通 `Space` 创建 Project Relationship；Project ON/OFF 始终停留在同一条目。
 

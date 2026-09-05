@@ -135,6 +135,36 @@ Source Adapter 拥有固定上游版本、命令、输出解析、provenance、l
 - 用户之后通过 SkillsPub 为其他 Skill Targets 建立 Relationships；
 - 升级上游版本时同步更新证据、fixtures 和兼容测试，不使用动态 `latest`。
 
+## Pi v0.1 managed repair slice
+
+Pi 在旧验收前曾被标为 `managed`，但 real-machine #109 证明 `!skills/**` 同时匹配 Pi 与 Shared 的 `skills/**`，会把 Pi-specific Target 一起压掉。当前 release support 必须降为 `discoverable`；只有本节修复与新 real-machine acceptance 全部通过后，candidate commit 才能把 Pi 提升为 `managed/excluded`。
+
+### Targets, settings, and matcher semantics
+
+- Global Pi Target 保持 `~/.pi/agent/skills`；canonical Project Pi Target 是 selected exact Project 的 `.pi/skills`。
+- Project 若仍有 `.pi/agent/skills` Target override，Adapter 必须显示独立 migration plan：来源/目标、冲突、Relationships、ownership、backup 与 expected final truth；确认后才原子迁移并验证。scan、inspect 与打开 TUI 不迁移。
+- Global settings 与 exact-Project settings 是两个独立 operations。Global 只写 Global Pi settings；Project 只写 selected canonical Project 的 `.pi/settings.json`，不靠 Global result 推断 Project 已隔离，也不建立中央 Project registry。
+- 每个 applicable Shared root 使用 expanded absolute exclusion，例如 `!/absolute/path/.agents/skills/**`。禁止恢复模糊的 `!skills/**`。
+- Project plan 必须覆盖 selected Project 以及 Pi 实际会消费的 trusted ancestor `.agents/skills` roots，并尊重 trust gating 与 Git/filesystem boundary；不能只检查当前目录。
+- Pi matcher 在 canonical dedupe 前做 lexical matching。inspect/reconcile 必须实现与 loader 相同的 exclusion/force-include precedence、absolute/relative matching、ancestor bypass、trust、collision 与 dedupe 判断。Shared alias 被 exclusion 时，指向同一 resource 的 Pi-root symlink Relationship 仍可保持 enabled。
+- 等价但非 SkillsPub-owned 的安全 exclusion 可以满足隔离，不被接管或删除。未知 schema、类型、matcher semantics、untrusted Project、冲突 path 或 concurrent change 使写入降为 read-only/blocked。
+
+### Plan, apply, recovery, and promotion
+
+Pi setup/reconcile 复用 Harness `inspect → immutable plan → confirm → recheck → atomic apply → semantic verify → filesystem rescan` seam。preview 分开显示 Global/Project scope、resolved Pi/Shared roots、exact exclusions、Target migration、Relationship effects、settings/state hashes、backup/manifest/recovery paths 与 expected Actual/Desired/Drift/Effective Visibility。
+
+确认后，apply 必须保存 fresh settings 与 SkillsPub ownership-state backups、SHA-256、affected-path/migration manifest 和 hash-checked recovery instructions。I/O 或 verification failure 不伪装成 managed；保留 completed work、remaining Drift 与 recovery evidence。reconcile/retry 必须幂等并在 fresh inspect 后拒绝 stale plan。
+
+Pi promotion 是 release acceptance gate，不是代码完成后的默认 label。对 acceptance 时安装的 Pi version，必须在 real machine 上：
+
+1. 从 fresh backup 分别 preview/approve/apply Global 与 exact Project；
+2. 以 tools-enabled fresh Pi processes 证明 Pi Relationships 仍加载，且每个 applicable Shared root 都被排除；
+3. 证明 Adapter inspection、filesystem truth 与 loader canaries 一致；
+4. 验证 `.pi/agent/skills` → `.pi/skills` migration 或无迁移条件；
+5. 实际执行 recovery，并对 settings/state/content/manifest 做 hash 检查。
+
+任一项未通过，Pi 在 v0.1 仍为 `discoverable`，Shared consumption/Effective Visibility 按证据返回 `enabled`、`excluded` 或 `unknown`，不得保留 release-quality Managed claim。
+
 ## Grok Build v0.1 managed slice
 
 Grok Build 是 Pi、Claude Code 之后的第三个 `managed` Harness。Adapter key 是 `grok`，已验证契约固定到 `xai-org/grok-build` revision `19d42e35c07a9c9244f03f6df0c4c353f970d4f9`。该切片只管理 Grok 原生 Global/Project Skill Targets，不接管 Plugin、bundled、server-managed 或命令目录。
@@ -165,20 +195,34 @@ Global 操作使用 `skillspub harnesses grok setup|reconcile [--yes]`。Project
 
 官方证据：[settings reference](https://docs.x.ai/build/settings/reference)、[Skills/Plugins/Marketplaces](https://docs.x.ai/build/features/skills-plugins-marketplaces)、[pinned discovery source](https://github.com/xai-org/grok-build/blob/19d42e35c07a9c9244f03f6df0c4c353f970d4f9/crates/codegen/xai-grok-agent/src/prompt/skills.rs)。
 
+## v0.1 no-launcher boundary and empty additional shortlist
+
+SkillsPub 不拥有 Harness startup。v0.1 不增加 wrapper command、OS persistent environment provisioning、per-entry-point environment/argument profiles、IDE/GUI/daemon/service/remote/container launch integration，也不建立 Launch Profile identity、Desired state、Drift、backup 或 recovery model。already-running process 永远不被当作 reload；依赖 process environment、arguments 或特定 launcher 的 consumption 在未受控 entry point 下为 `unknown`。
+
+Harness 只有在自己的 persistent filesystem/configuration seam 允许 SkillsPub 完整 inspect、reconcile、verify 与 recover claimed consumption boundary 时才可为 `managed`。因此 v0.1 additional Managed Harness shortlist 为零：
+
+- OpenCode、Codex、Kimi Code、TraeCode 保持 evidence-backed `discoverable` compatibility-roadmap candidates，不实现 runtime Adapter；
+- WorkBuddy 保持 `unsupported`，不根据未合并 patch 猜 `.workbuddy/skills`；
+- adoption、path table、partial discovery 与 launch-scoped control 都不能替代 Managed evidence bar。
+
+以后 promotion 必须重新取得 current official evidence、real installation/detection、consumed roots/config/precedence、real setup/reconcile、fresh next-load canary、backup 与 exercised recovery；它不是本 v0.1 map 中延后的实现。
+
 ## Evidence baseline and delivery order
 
-以下是 2026-08-20 的官方证据与 Adapter 状态：
+以下是 2026-09-04 owner-approved boundary 的证据与 release 状态：
 
-| Harness | 已确认的官方行为 | Adapter 状态/计划 | 官方证据 |
+| Harness | 已确认的官方/本机行为 | v0.1 状态/计划 | 证据 |
 | --- | --- | --- | --- |
-| Pi | 同时发现 Pi 专属 roots 与 `.agents/skills`；`skills` 配置支持 glob exclusion | 已实现 `managed`；setup/apply 显式隔离 Shared | [skills docs](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/skills.md), [v0.54.0](https://github.com/earendil-works/pi/releases/tag/v0.54.0), [discovery commit](https://github.com/earendil-works/pi/commit/39cbf47e42433ce301dabcec398cac6fe5f0fa22) |
-| Claude Code | Personal/Project 使用 `.claude/skills`，支持 symlink；Plugin Skills 位于 plugin 内并 namespaced | 已实现 `managed`；Shared 为 `not-consumed`，无需配置写入 | [Skills](https://docs.anthropic.com/en/docs/claude-code/skills), [Settings](https://docs.anthropic.com/en/docs/claude-code/settings) |
-| Grok Build | `$GROK_HOME/skills`、Project/ancestor `.grok/skills`、Shared `.agents/skills` 与默认启用的 Claude/Cursor roots；canonical `[skills].ignore` 可隔离 Shared | 已实现 `managed`；setup/reconcile 管理 isolation，missing Relationship 默认 Mirror | [settings](https://docs.x.ai/build/settings/reference), [skills](https://docs.x.ai/build/features/skills-plugins-marketplaces), [pinned source](https://github.com/xai-org/grok-build/blob/19d42e35c07a9c9244f03f6df0c4c353f970d4f9/crates/codegen/xai-grok-agent/src/prompt/skills.rs) |
-| Codex | Global/Repo Skills 使用 `.agents/skills`；`[[skills.config]]` 提供按路径启停 | 保留证据；另行设计逐 Skill override 后再决定 support level | [Agent Skills](https://developers.openai.com/codex/skills), [config sample](https://developers.openai.com/codex/config-sample) |
-| Kimi Code CLI | 同时发现品牌目录与 `.agents/skills`；`--skills-dir` 可替换自动发现但属于每次启动参数 | 可研究 `discoverable`；SkillsPub 不负责启动 Harness，因此不能据此承诺 `managed` | [Agent Skills](https://www.kimi.com/code/docs/en/kimi-code-cli/customization/skills.html), [Kimi CLI source docs](https://github.com/MoonshotAI/kimi-cli/blob/main/docs/en/customization/skills.md) |
-| OpenCode | 原生 `.opencode/skills`，并自动发现 `.agents/skills` 与 `.claude/skills`；可靠总开关是进程环境变量 | 可研究 `discoverable`；不增加 launcher/wrapper 时不承诺 `managed` | [Agent Skills](https://opencode.ai/docs/skills/), [runtime flags](https://github.com/anomalyco/opencode/blob/v1.18.8/packages/opencode/src/effect/runtime-flags.ts) |
-| DeepSeek Harness | Skill registry/provider 为 Profile plugin；默认 roots 包含 `.dsh/skills` 与 `.agents/skills`，可用 `includeDefaultRoots: false` 重组 | 等 Consumer/Profile 与 Plugin composition 模型明确后实现；developer preview 不进入当前切片 | [Developer preview](https://deepseek.com/harness/en/), [Skills subsystem](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/skills.md) |
-| Hermes | 每个 Profile 有独立 `HERMES_HOME` 与 `skills/`；可配置 `skills.external_dirs` | 等多 Profile 需求明确后实现，不提前引入 Consumer 模型 | [Profiles](https://hermes-agent.nousresearch.com/docs/user-guide/profiles), [Skills](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills) |
-| OpenClaw | 支持多种 Target roots 与 per-Agent final skill allowlists | 等多 Agent 身份模型设计后实现 | [Skills](https://docs.openclaw.ai/tools/skills), [Skills config](https://docs.openclaw.ai/tools/skills-config) |
+| Pi | Pi roots 与 `.agents/skills` 共用 matcher；root-specific absolute exclusions 可在 canonical dedupe 前只排除 Shared alias | 当前降为 `discoverable`；完成 Adapter/Target/recovery repair 与新 tools-enabled real-machine acceptance 后才能 promotion 为 `managed/excluded` | [#109 failed machine chain](https://github.com/AlligatorT/SkillsPub/issues/109#issuecomment-5532175662), [#115 decision](https://github.com/AlligatorT/SkillsPub/issues/115#issuecomment-5543708195), [pinned research](https://github.com/AlligatorT/SkillsPub/blob/4f6ae8d62bf1c4182ec70682b4ff755435dcfab5/docs/research/pi-shared-skill-root-isolation-0.84.4.md), [Pi skills docs](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/skills.md) |
+| Claude Code | Personal/Project `.claude/skills` 支持 symlink；accepted Adapter contract 不消费 Shared | `managed`；Shared `not-consumed`、isolation `not-required`，不增加配置写入；只解释 next load | [Skills](https://docs.anthropic.com/en/docs/claude-code/skills), [Settings](https://docs.anthropic.com/en/docs/claude-code/settings), [#112 contract](https://github.com/AlligatorT/SkillsPub/issues/112#issuecomment-5547687525) |
+| Grok Build | `$GROK_HOME/skills`、Project/ancestor `.grok/skills`、Shared 与 Claude/Cursor compatible roots；canonical ignore 可隔离 Shared | 保持 `managed/excluded`；Global/Project setup/reconcile 必须完整显示 Relationship impact 与 recovery | [settings](https://docs.x.ai/build/settings/reference), [skills](https://docs.x.ai/build/features/skills-plugins-marketplaces), [pinned source](https://github.com/xai-org/grok-build/blob/19d42e35c07a9c9244f03f6df0c4c353f970d4f9/crates/codegen/xai-grok-agent/src/prompt/skills.rs), [#109 machine evidence](https://github.com/AlligatorT/SkillsPub/issues/109#issuecomment-5532175662) |
+| OpenCode | Native/Shared/vendor roots 强；完整 isolation 依赖 actual process 的 environment flag | `discoverable` roadmap candidate；v0.1 无 Adapter，no-launcher boundary 下不 promotion | [research resolution](https://github.com/AlligatorT/SkillsPub/issues/104#issuecomment-5470909113), [launch evidence](https://github.com/AlligatorT/SkillsPub/issues/113#issuecomment-5531242966) |
+| Codex | deterministic roots、symlink、coexistence 与 path controls 有证据，但 required/system/plugin/session/external roots 与 recovery 不完整 | `discoverable` roadmap candidate；v0.1 无 Adapter | [research resolution](https://github.com/AlligatorT/SkillsPub/issues/103#issuecomment-5470908872) |
+| Kimi Code | roots、precedence、schema、symlink 与 next-session 有证据；替换自动 Shared discovery 依赖每次启动的 `--skills-dir` | `discoverable` roadmap candidate；v0.1 无 Adapter，no-launcher boundary 下不 promotion | [research resolution](https://github.com/AlligatorT/SkillsPub/issues/105#issuecomment-5470909355), [launch evidence](https://github.com/AlligatorT/SkillsPub/issues/113#issuecomment-5531242966) |
+| TraeCode | International product 有 native Global/Project roots 与 opt-in Project Shared evidence | `discoverable` roadmap candidate；toggle/schema/precedence/recovery/regional parity/real-machine evidence 不足，v0.1 无 Adapter | [research resolution](https://github.com/AlligatorT/SkillsPub/issues/107#issuecomment-5470909721) |
+| WorkBuddy | official evidence 未证明 directory-based Agent Skills Target 或 machine-readable visibility control | `unsupported`；v0.1 无 Adapter | [research resolution](https://github.com/AlligatorT/SkillsPub/issues/106#issuecomment-5470909548) |
+| DeepSeek Harness | Skill registry/provider 为 Profile plugin；default roots 可重组 | Consumer/Profile 与 Plugin composition 明确前延后 | [Developer preview](https://deepseek.com/harness/en/), [Skills subsystem](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/skills.md) |
+| Hermes | 每个 Profile 有独立 `HERMES_HOME` 与 `skills/`；可配置 external dirs | 多 Profile 需求明确前延后 | [Profiles](https://hermes-agent.nousresearch.com/docs/user-guide/profiles), [Skills](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills) |
+| OpenClaw | 多 Target roots 与 per-Agent final allowlists | 多 Agent identity model 明确前延后 | [Skills](https://docs.openclaw.ai/tools/skills), [Skills config](https://docs.openclaw.ai/tools/skills-config) |
 
-已完成 Project TUI、Skill Target 迁移、Pi、Claude Code 与 Grok Build Managed Adapters，以及 `npx skills` Source Adapter。v0.1 按 #67 增加共用 Effective Visibility resolver、CLI/JSON Explain 与 TUI evidence detail，并继续 Source update、JSON CLI 与 pre-release hardening。后续 Harness Adapter 必须提供 consumed-root evidence，才能让 Explain 返回非 `unknown` 结论；DeepSeek Harness、OpenClaw 与 Hermes 在 Consumer/Profile 模型明确前保持延后。
+现有 implementation 已有 Source Adapter、Relationship/Desired-state、Effective Visibility、Claude 与 Grok 基线，但 v0.1 release 仍受 complete A+C Source workspace、Pi repair、新 Pi real-machine acceptance、Grok/Claude regression、exact-commit CI/package/human acceptance 阻塞。固定 Vercel `skills` 仍是唯一 remote Source lifecycle/lock owner。后续 Harness 只有满足 complete consumed-root/control/recovery evidence 才能让 resolver 给出 release-quality non-`unknown` claim。
