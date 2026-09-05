@@ -94,13 +94,16 @@ export function parseNpxSkillsFindOutput(raw: string): {
 export function runNpxSkills(
   args: string[],
   cwd: string,
-  capture = false,
+  capture: boolean | 'output' = false,
 ): NpxSkillsRunResult {
+  let stdio: 'pipe' | 'inherit' | ['inherit', 'pipe', 'pipe'] = 'inherit';
+  if (capture === 'output') stdio = ['inherit', 'pipe', 'pipe'];
+  else if (capture) stdio = 'pipe';
   const result = spawnSync('npx', ['--yes', NPX_SKILLS_PACKAGE, ...args], {
     cwd,
     encoding: 'utf8',
     env: { ...process.env, XDG_STATE_HOME: undefined },
-    stdio: capture ? 'pipe' : 'inherit',
+    stdio,
   });
   if (result.error) throw result.error;
   return {

@@ -13,9 +13,11 @@ import { hashDirectory } from '../src/inventory.ts';
 import {
   planSharedAdd,
   planSharedRemove,
+  planSharedUpdate,
   sharedAdd,
   sharedRemove,
   sharedRemoveCascade,
+  sharedUpdate,
 } from '../src/shared.ts';
 
 const CLI = path.join(import.meta.dirname, '../src/cli.ts');
@@ -78,7 +80,21 @@ if (command === 'add') {
   for (const name of names) {
     if (!fs.existsSync(path.join(skillsRoot, sanitize(name), 'SKILL.md'))) process.exit(91);
   }
+  if (process.env.NPX_LOCK_OBS) {
+    const operationLock = lockFile + '.skillspub-operation-lock';
+    const observed = fs.readFileSync(operationLock, 'utf8');
+    fs.appendFileSync(process.env.NPX_LOCK_OBS, JSON.stringify(observed) + '\\n');
+    fs.appendFileSync(operationLock, 'held-across-items\\n');
+  }
+  const failedNames = new Set(JSON.parse(process.env.NPX_FAIL_NAMES || '[]'));
+  const partialFailedNames = new Set(JSON.parse(process.env.NPX_PARTIAL_FAIL_NAMES || '[]'));
+  for (const name of names)
+    if (partialFailedNames.has(name))
+      fs.appendFileSync(path.join(skillsRoot, sanitize(name), 'SKILL.md'), '\\n# partially updated');
+  if (names.some((name) => failedNames.has(name) || partialFailedNames.has(name))) process.exit(7);
   if (process.env.NPX_FAIL) process.exit(Number(process.env.NPX_FAIL));
+  for (const name of names)
+    fs.appendFileSync(path.join(skillsRoot, sanitize(name), 'SKILL.md'), '\\n# updated');
 } else if (command === 'remove') {
   const names = args.slice(3, args.indexOf('--agent')).filter((arg) => !arg.startsWith('-'));
   if (process.env.NPX_FAIL) process.exit(Number(process.env.NPX_FAIL));
@@ -360,6 +376,14 @@ test('JSON Shared add previews without invoking npx and applies the same plan wi
 test('JSON Shared update and removal phases are plan-only until confirmed', () => {
   const {home, run, calls} = setup();
   assert.equal(run(['shared', 'add', 'owner/repo', '--skill', 'Example']).status, 0);
+  const sourceUrl = 'https://github.com/owner/repo.git';
+  writeLock(path.join(home, '.agents', '.skill-lock.json'), {example: {
+    source: 'owner/repo', sourceType: 'github', sourceUrl,
+    skillPath: 'skills/example/SKILL.md', skillFolderHash: 'old-hash',
+  }});
+  assert.equal(run(['shared', 'refresh'], {
+    GIT_TREES: JSON.stringify({[sourceUrl]: {'skills/example': 'new-hash'}}),
+  }).status, 0);
   const baselineCalls = calls().length;
 
   const updatePreview = run(['shared', 'update', 'example', '--json']);
@@ -604,15 +628,23 @@ test('failed shared update restores desired OFF entries and releases the operati
   const parking = path.join(home, '.agents', '.skillspub-off', 'skills');
   const lock = path.join(home, '.agents', '.skill-lock.json');
   writeSkill(parking, 'off-skill');
-  writeLock(lock, { 'off-skill': { source: 'owner/repo' } });
+  const sourceUrl = 'https://github.com/owner/repo.git';
+  writeLock(lock, { 'off-skill': {
+    source: 'owner/repo', sourceType: 'github', sourceUrl,
+    skillPath: 'skills/off-skill/SKILL.md', skillFolderHash: 'old-hash',
+  } });
   fs.mkdirSync(config, { recursive: true });
   const slot = 'global:shared\0off-skill';
   const stateFile = path.join(config, 'state.json');
   fs.writeFileSync(stateFile, JSON.stringify({ baseIntent: { [slot]: 'off' }, claims: {} }));
   const before = fs.readFileSync(stateFile, 'utf8');
+  assert.equal(run(['shared', 'refresh'], {
+    GIT_TREES: JSON.stringify({[sourceUrl]: {'skills/off-skill': 'new-hash'}}),
+  }).status, 0);
 
   const result = run(['shared', 'update', 'off-skill'], { NPX_FAIL: '7' });
   assert.equal(result.status, 1);
+  assert.match(result.stdout, /off-skill: failed \(exit 7\)/);
   assert.match(result.stderr, /skills update failed/);
   assert.match(result.stderr, /Remaining drift:/);
   assert.ok(fs.existsSync(path.join(parking, 'off-skill', 'SKILL.md')));
@@ -636,12 +668,19 @@ test('spawn errors still restore desired OFF entries and report Actual state', (
   const parking = path.join(home, '.agents', '.skillspub-off', 'skills');
   const lock = path.join(home, '.agents', '.skill-lock.json');
   writeSkill(parking, 'off-skill');
-  writeLock(lock, { 'off-skill': { source: 'owner/repo' } });
+  const sourceUrl = 'https://github.com/owner/repo.git';
+  writeLock(lock, { 'off-skill': {
+    source: 'owner/repo', sourceType: 'github', sourceUrl,
+    skillPath: 'skills/off-skill/SKILL.md', skillFolderHash: 'old-hash',
+  } });
   fs.mkdirSync(config, { recursive: true });
   fs.writeFileSync(path.join(config, 'state.json'), JSON.stringify({
     baseIntent: { ['global:shared\0off-skill']: 'off' },
     claims: {},
   }));
+  assert.equal(run(['shared', 'refresh'], {
+    GIT_TREES: JSON.stringify({[sourceUrl]: {'skills/off-skill': 'new-hash'}}),
+  }).status, 0);
   const bin = path.join(root, 'bin');
   fs.chmodSync(path.join(bin, 'npx'), 0o644);
   fs.symlinkSync(process.execPath, path.join(bin, 'node'));
@@ -661,12 +700,19 @@ test('Project shared update uses the exact directory and reparks OFF entries', (
   const discovery = path.join(project, '.agents', 'skills');
   const parking = path.join(project, '.skillspub', 'off', 'shared');
   writeSkill(parking, 'off-skill');
-  writeLock(path.join(project, 'skills-lock.json'), { 'off-skill': { source: 'owner/repo' } });
+  const sourceUrl = 'https://github.com/owner/repo.git';
+  writeLock(path.join(project, 'skills-lock.json'), { 'off-skill': {
+    source: 'owner/repo', sourceType: 'github', sourceUrl,
+    skillPath: 'skills/off-skill/SKILL.md', skillFolderHash: 'old-hash',
+  } });
   fs.mkdirSync(path.join(project, '.skillspub'), { recursive: true });
   fs.writeFileSync(path.join(project, '.skillspub', 'state.json'), JSON.stringify({
     baseIntent: { [`project:${fs.realpathSync(project)}:shared\0off-skill`]: 'off' },
     claims: {},
   }));
+  assert.equal(run(['project', project, 'shared', 'refresh'], {
+    GIT_TREES: JSON.stringify({[sourceUrl]: {'skills/off-skill': 'new-hash'}}),
+  }).status, 0);
 
   const result = run(['project', project, 'shared', 'update']);
   assert.equal(result.status, 0, result.stderr);
@@ -723,13 +769,20 @@ test('active Preset claims keep updated skills ON and block remove', () => {
   const discovery = path.join(home, '.agents', 'skills');
   const parking = path.join(home, '.agents', '.skillspub-off', 'skills');
   writeSkill(parking, 'claimed');
-  writeLock(path.join(home, '.agents', '.skill-lock.json'), { claimed: { source: 'owner/repo' } });
+  const sourceUrl = 'https://github.com/owner/repo.git';
+  writeLock(path.join(home, '.agents', '.skill-lock.json'), { claimed: {
+    source: 'owner/repo', sourceType: 'github', sourceUrl,
+    skillPath: 'skills/claimed/SKILL.md', skillFolderHash: 'old-hash',
+  } });
   fs.mkdirSync(config, { recursive: true });
   const slot = 'global:shared\0claimed';
   fs.writeFileSync(path.join(config, 'state.json'), JSON.stringify({
     baseIntent: { [slot]: 'off' },
     claims: { [slot]: ['preset:tools'] },
   }));
+  assert.equal(run(['shared', 'refresh'], {
+    GIT_TREES: JSON.stringify({[sourceUrl]: {'skills/claimed': 'new-hash'}}),
+  }).status, 0);
 
   const updated = run(['shared', 'update', 'claimed']);
   assert.equal(updated.status, 0, updated.stderr);
@@ -747,7 +800,11 @@ test('orphaned Preset lastClaims also keep updated skills ON and block remove', 
   const discovery = path.join(home, '.agents', 'skills');
   const parking = path.join(home, '.agents', '.skillspub-off', 'skills');
   writeSkill(parking, 'orphaned');
-  writeLock(path.join(home, '.agents', '.skill-lock.json'), { orphaned: { source: 'owner/repo' } });
+  const sourceUrl = 'https://github.com/owner/repo.git';
+  writeLock(path.join(home, '.agents', '.skill-lock.json'), { orphaned: {
+    source: 'owner/repo', sourceType: 'github', sourceUrl,
+    skillPath: 'skills/orphaned/SKILL.md', skillFolderHash: 'old-hash',
+  } });
   fs.mkdirSync(config, { recursive: true });
   const slot = 'global:shared\0orphaned';
   fs.writeFileSync(path.join(config, 'state.json'), JSON.stringify({
@@ -755,6 +812,9 @@ test('orphaned Preset lastClaims also keep updated skills ON and block remove', 
     claims: {},
     lastClaims: { deleted: [slot] },
   }));
+  assert.equal(run(['shared', 'refresh'], {
+    GIT_TREES: JSON.stringify({[sourceUrl]: {'skills/orphaned': 'new-hash'}}),
+  }).status, 0);
 
   const updated = run(['shared', 'update', 'orphaned']);
   assert.equal(updated.status, 0, updated.stderr);
@@ -1328,6 +1388,188 @@ test('Project refresh isolates its cache and source failures from successful sou
   assert.deepEqual(JSON.parse(siblingResult.stdout).data.entries, []);
   assert.equal(fs.existsSync(path.join(sibling, '.skillspub')), false);
   assert.equal(fs.existsSync(path.join(config, 'state.json')), false);
+});
+
+test('shared update plans only identity-matching available items and reports a partial batch under one lock', (context) => {
+  const fixture = setup();
+  useFixtureEnv(context, fixture.env);
+  const discovery = path.join(fixture.home, '.agents', 'skills');
+  const parking = path.join(fixture.home, '.agents', '.skillspub-off', 'skills');
+  const lock = path.join(fixture.home, '.agents', '.skill-lock.json');
+  const sourceUrl = 'https://github.com/owner/repo.git';
+  writeSkill(discovery, 'a-success', '# a');
+  writeSkill(parking, 'b-fail', '# b');
+  writeSkill(discovery, 'c-current', '# c');
+  writeLock(lock, {
+    'a-success': {source: 'owner/repo', sourceType: 'github', sourceUrl, skillPath: 'skills/a-success/SKILL.md', skillFolderHash: 'a-old'},
+    'b-fail': {source: 'owner/repo', sourceType: 'github', sourceUrl, skillPath: 'skills/b-fail/SKILL.md', skillFolderHash: 'b-old'},
+    'c-current': {source: 'owner/repo', sourceType: 'github', sourceUrl, skillPath: 'skills/c-current/SKILL.md', skillFolderHash: 'c-same'},
+  });
+  fs.mkdirSync(fixture.config, {recursive: true});
+  fs.writeFileSync(path.join(fixture.config, 'state.json'), JSON.stringify({
+    baseIntent: {['global:shared\0b-fail']: 'off'},
+    claims: {},
+  }));
+  const refreshed = fixture.run(['shared', 'refresh'], {
+    GIT_TREES: JSON.stringify({[sourceUrl]: {
+      'skills/a-success': 'a-new',
+      'skills/b-fail': 'b-new',
+      'skills/c-current': 'c-same',
+    }}),
+  });
+  assert.equal(refreshed.status, 0, refreshed.stderr);
+
+  const plan = planSharedUpdate(
+    {configDir: fixture.config},
+    ['a-success', 'b-fail', 'c-current'],
+  );
+  assert.deepEqual(plan.items.map(({name, included, reason}) => [name, included, reason]), [
+    ['a-success', true, undefined],
+    ['b-fail', true, undefined],
+    ['c-current', false, 'current'],
+  ]);
+  assert.equal(plan.scope.kind, 'global');
+  assert.equal(plan.scope.path, fixture.home);
+  assert.equal(plan.preconditions.lock.owner, 'vercel-skills');
+  assert.equal(plan.preconditions.permissions.target, 'writable');
+  assert.deepEqual(plan.blockers, []);
+  assert.equal(plan.items[1]?.desired, 'off');
+  assert.equal(plan.items[1]?.currentTruth.actual, 'off/local');
+  assert.ok(plan.items[1]?.currentTruth.hash);
+  assert.deepEqual(plan.items[1]?.intentPreservation.presetClaims, []);
+  assert.equal(plan.items[1]?.expectedFinalTruth.actual, 'b-fail=off/local');
+  assert.equal(plan.items[1]?.expectedFinalTruth.relationships, 1);
+  assert.ok(plan.items.every(({identity}) => identity.length > 0));
+
+  const lockObservations = path.join(fixture.root, 'operation-lock.jsonl');
+  process.env.NPX_FAIL_NAMES = JSON.stringify(['b-fail']);
+  process.env.NPX_LOCK_OBS = lockObservations;
+  context.after(() => {
+    delete process.env.NPX_FAIL_NAMES;
+    delete process.env.NPX_LOCK_OBS;
+  });
+  const result = sharedUpdate(
+    {configDir: fixture.config},
+    ['a-success', 'b-fail', 'c-current'],
+    undefined,
+    plan,
+  );
+  assert.deepEqual(result.items.map(({name, outcome, reason}) => [name, outcome, reason]), [
+    ['a-success', 'updated', undefined],
+    ['b-fail', 'failed', 'exit 7'],
+    ['c-current', 'skipped', 'current'],
+  ]);
+  const observations = fs.readFileSync(lockObservations, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  assert.equal(observations.length, 2);
+  assert.doesNotMatch(observations[0], /held-across-items/);
+  assert.match(observations[1], /held-across-items/);
+  assert.ok(fs.existsSync(path.join(parking, 'b-fail', 'SKILL.md')));
+  assert.equal(fs.existsSync(path.join(discovery, 'b-fail')), false);
+  assert.equal(fs.existsSync(`${lock}.skillspub-operation-lock`), false);
+});
+
+test('JSON batch update returns itemized partial effects without claiming atomic failure', () => {
+  const fixture = setup();
+  const discovery = path.join(fixture.home, '.agents', 'skills');
+  const lock = path.join(fixture.home, '.agents', '.skill-lock.json');
+  const sourceUrl = 'https://github.com/owner/repo.git';
+  writeSkill(discovery, 'a-success', '# a');
+  writeSkill(discovery, 'b-fail', '# b');
+  writeLock(lock, {
+    'a-success': {source: 'owner/repo', sourceType: 'github', sourceUrl, skillPath: 'skills/a-success/SKILL.md', skillFolderHash: 'a-old'},
+    'b-fail': {source: 'owner/repo', sourceType: 'github', sourceUrl, skillPath: 'skills/b-fail/SKILL.md', skillFolderHash: 'b-old'},
+  });
+  assert.equal(fixture.run(['shared', 'refresh'], {
+    GIT_TREES: JSON.stringify({[sourceUrl]: {
+      'skills/a-success': 'a-new',
+      'skills/b-fail': 'b-new',
+    }}),
+  }).status, 0);
+
+  const result = fixture.run(
+    ['shared', 'update', 'a-success', 'b-fail', '--yes', '--json'],
+    {NPX_FAIL_NAMES: JSON.stringify(['b-fail'])},
+  );
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr, '');
+  const document = JSON.parse(result.stdout);
+  assert.equal(document.error.code, 'apply_failed');
+  assert.equal(document.error.details.partialEffects, 'present');
+  assert.deepEqual(document.error.details.items.map(
+    ({name, outcome}: {name: string; outcome: string}) => [name, outcome],
+  ), [['a-success', 'updated'], ['b-fail', 'failed']]);
+});
+
+test('failed shared update exposes partial Link effects and mirror-sync Drift without overwriting Mirrors', (context) => {
+  const fixture = setup();
+  useFixtureEnv(context, fixture.env);
+  const discovery = path.join(fixture.home, '.agents', 'skills');
+  const source = path.join(discovery, 'managed');
+  const consumer = path.join(fixture.root, 'consumer');
+  const mirror = path.join(consumer, 'managed');
+  const linked = path.join(consumer, 'managed-link');
+  const sourceUrl = 'https://github.com/owner/repo.git';
+  writeSkill(discovery, 'managed', '# original');
+  writeSkill(consumer, 'managed', '# original');
+  fs.symlinkSync(source, linked, 'dir');
+  writeLock(path.join(fixture.home, '.agents', '.skill-lock.json'), {managed: {
+    source: 'owner/repo', sourceType: 'github', sourceUrl,
+    skillPath: 'skills/managed/SKILL.md', skillFolderHash: 'old-hash',
+  }});
+  fs.mkdirSync(fixture.config, {recursive: true});
+  fs.writeFileSync(path.join(fixture.config, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [],
+    genericTargets: [{
+      key: 'consumer', kind: 'generic', discoveryRoot: consumer,
+      parkingRoot: path.join(fixture.root, 'consumer-off'), projectPath: '.consumer',
+    }],
+  }));
+  const sourceId = fs.realpathSync(source);
+  fs.writeFileSync(path.join(fixture.config, 'state.json'), JSON.stringify({
+    mirrors: {['global:consumer\0managed']: {sourceId, hash: hashDirectory(source)}},
+  }));
+  assert.equal(fixture.run(['shared', 'refresh'], {
+    GIT_TREES: JSON.stringify({[sourceUrl]: {'skills/managed': 'new-hash'}}),
+  }).status, 0);
+  const plan = planSharedUpdate({configDir: fixture.config}, ['managed']);
+  assert.ok(plan.items[0]?.relationshipEffects.some(({plannedAction}) =>
+    plannedAction === 'mirror-sync'));
+  const mirrorBefore = hashDirectory(mirror);
+
+  process.env.NPX_PARTIAL_FAIL_NAMES = JSON.stringify(['managed']);
+  context.after(() => delete process.env.NPX_PARTIAL_FAIL_NAMES);
+  const result = sharedUpdate({configDir: fixture.config}, ['managed'], undefined, plan);
+  assert.equal(result.items[0]?.outcome, 'failed');
+  assert.ok(result.drift.some((entry) => entry.includes('mirror-sync')));
+  assert.equal(hashDirectory(mirror), mirrorBefore);
+  assert.match(fs.readFileSync(path.join(linked, 'SKILL.md'), 'utf8'), /updated/);
+});
+
+test('shared update refuses a stale confirmed identity set before mutation', (context) => {
+  const fixture = setup();
+  useFixtureEnv(context, fixture.env);
+  const discovery = path.join(fixture.home, '.agents', 'skills');
+  const lock = path.join(fixture.home, '.agents', '.skill-lock.json');
+  const sourceUrl = 'https://github.com/owner/repo.git';
+  writeSkill(discovery, 'available', '# original');
+  writeLock(lock, {available: {
+    source: 'owner/repo', sourceType: 'github', sourceUrl,
+    skillPath: 'skills/available/SKILL.md', skillFolderHash: 'old-hash',
+  }});
+  const refreshed = fixture.run(['shared', 'refresh'], {
+    GIT_TREES: JSON.stringify({[sourceUrl]: {'skills/available': 'new-hash'}}),
+  });
+  assert.equal(refreshed.status, 0, refreshed.stderr);
+  const plan = planSharedUpdate({configDir: fixture.config}, ['available']);
+  fs.writeFileSync(path.join(discovery, 'available', 'SKILL.md'), '# changed after preview');
+
+  assert.throws(
+    () => sharedUpdate({configDir: fixture.config}, ['available'], undefined, plan),
+    /update plan changed after preview/i,
+  );
+  assert.equal(fixture.calls().length, 0);
+  assert.equal(fs.existsSync(`${lock}.skillspub-operation-lock`), false);
 });
 
 test('shared update refuses an identity-matching upstream-missing observation', () => {

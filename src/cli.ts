@@ -1291,16 +1291,31 @@ function cmdShared(
     case 'update': {
       if (rest.some((arg) => arg.startsWith('-')))
         throw new Error('usage: skillspub shared update [<managed-name>...]');
+      const plan = planSharedUpdate(home, rest, projectPath);
+      if (json && !confirmed) return { applied: false, plan };
+      const result = sharedUpdate(home, rest, projectPath, plan);
+      if (!json) for (const item of result.items)
+        console.log(`${item.name}: ${item.outcome}${item.reason ? ` (${item.reason})` : ''}`);
+      const failed = result.items.filter(({outcome}) => outcome === 'failed');
+      if (failed.length > 0) throw Object.assign(
+        new Error(`skills update failed (${failed.map(({name, reason}) => `${name}: ${reason}`).join(', ')})\nActual: ${result.actual}\nRemaining drift: ${result.drift.join(', ') || 'none'}`),
+        {
+          code: 'apply_failed',
+          details: {
+            actual: result.actual,
+            remainingDrift: result.drift,
+            partialEffects: result.items.some(({outcome}) => outcome === 'updated') ? 'present' : 'none-detected',
+            stage: 'upstream',
+            items: result.items,
+          },
+        },
+      );
       if (!json) {
-        const result = sharedUpdate(home, rest, projectPath);
         console.log(`Actual: ${result.actual}`);
         console.log(`Remaining drift: ${result.drift.join(', ') || 'none'}`);
         console.log('Running Harnesses must reload/restart to read the final Shared Target state.');
         break;
       }
-      const plan = planSharedUpdate(home, rest, projectPath);
-      if (!confirmed) return { applied: false, plan };
-      const result = sharedUpdate(home, rest, projectPath);
       return { applied: true, plan, result, remainingDrift: result.drift };
     }
     case 'remove': {

@@ -2019,6 +2019,74 @@ test('TUI startup reads availability cache only and shows stale cache as unknown
   stale.unmount();
 });
 
+test('Source marked update previews exclusions, reports partial truth, and retries only failed items', async (context) => {
+  const fixture = setupManagedTui([
+    {name: 'a-success', source: 'owner/one', hash: 'success-old'},
+    {name: 'b-fail', source: 'owner/two', hash: 'fail-old', off: true},
+    {name: 'c-current', source: 'owner/one', hash: 'current-hash'},
+    {name: 'd-unmarked', source: 'owner/one', hash: 'unmarked-old'},
+  ]);
+  useFixtureEnv(context, fixture.env);
+  process.env.TUI_GIT_TREES = JSON.stringify({
+    'https://github.com/owner/one.git': {
+      'skills/a-success': 'success-new',
+      'skills/c-current': 'current-hash',
+      'skills/d-unmarked': 'unmarked-new',
+    },
+    'https://github.com/owner/two.git': {'skills/b-fail': 'fail-new'},
+  });
+  process.env.TUI_NPX_FAIL_NAMES = JSON.stringify(['b-fail']);
+  sharedRefresh(fixture.home);
+  const t = await renderApp(fixture.home, 140, 38);
+  await t.send('3');
+  await t.send('\t');
+  await t.send(' ');
+  await t.send('j');
+  await t.send(' ');
+  await t.send('j');
+  await t.send(' ');
+  await t.send('b');
+  let frame = t.stdout.frame();
+  assert.match(frame, /Source Update plan — 2 included, 2 excluded/);
+  assert.match(frame, /a-success: included/);
+  assert.match(frame, /b-fail: included/);
+  assert.match(frame, /Desired=off; Preset claims=none; temporary visibility/);
+  assert.match(frame, /c-current: excluded \(current\)/);
+  assert.match(frame, /d-unmarked: excluded \(unmarked\)/);
+  assert.equal(fs.existsSync(fixture.npxLog), false);
+
+  await t.send('\r');
+  assert.match(t.stdout.frame(), /Source Update — confirmation/);
+  await t.send('\r');
+  await waitForFrame(t, /Error: 1 update failed/);
+  frame = t.stdout.frame();
+  assert.match(frame, /a-success: updated/);
+  assert.match(frame, /b-fail: failed \(exit 7\)/);
+  assert.match(frame, /c-current: skipped \(current\)/);
+  assert.match(frame, /d-unmarked: skipped \(unmarked\)/);
+  assert.ok(fs.existsSync(path.join(fixture.parking, 'b-fail', 'SKILL.md')));
+  assert.equal(fs.existsSync(path.join(fixture.discovery, 'b-fail')), false);
+  assert.match(frame, /Timeline: plan recheck succeeded/);
+  await t.send('l');
+  frame = t.stdout.frame();
+  assert.match(frame, /Full operation log \/ evidence/);
+  assert.match(frame, /skills@1\.5\.21 update a-success/);
+  assert.match(frame, /exit 7/);
+  assert.match(frame, /Operation lock:/);
+  await t.send('\x1b');
+
+  process.env.TUI_NPX_FAIL_NAMES = '[]';
+  await t.send('t');
+  await waitForFrame(t, /b-fail: updated/);
+  frame = t.stdout.frame();
+  assert.match(frame, /c-current=current/);
+  assert.doesNotMatch(frame, /Error: 1 update failed/);
+  const calls = fs.readFileSync(fixture.npxLog, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  assert.deepEqual(calls.map(({args}) => args[3]), ['a-success', 'b-fail', 'b-fail']);
+  assert.ok(fs.existsSync(path.join(fixture.parking, 'b-fail', 'SKILL.md')));
+  t.unmount();
+});
+
 test('r refreshes Global availability by source and preserves selection through failures', async (context) => {
   const fixture = setupManagedTui([
     {name: 'available', source: 'owner/one', hash: 'available-old'},
@@ -2034,60 +2102,22 @@ test('r refreshes Global availability by source and preserves selection through 
     },
   });
   const t = await renderApp(fixture.home, 120, 34);
+  await t.send('3');
   await t.send('\t');
   await t.send('j'); // current
   assert.match(t.stdout.frame(), /› current/);
   assert.match(t.stdout.frame(), /Update availability: unknown/);
 
   await t.send('r');
-  let frame = t.stdout.frame();
-  assert.match(frame, /Refresh results/);
-  assert.match(frame, /checked 4.*current 1.*available 1.*updated 0.*skipped 1.*failed 1/);
-  assert.match(frame, /owner\/one[\s\S]*available: available/);
-  assert.match(frame, /current: current/);
-  assert.match(frame, /missing: upstream-missing/);
-  assert.match(frame, /owner\/offline[\s\S]*offline: check-failed/);
-  assert.match(frame, /checkedAt=/);
-  assert.equal((fs.readFileSync(fixture.gitLog, 'utf8').match(/"clone"/g) ?? []).length, 2);
-  await t.send('\x1b');
-  frame = t.stdout.frame();
-  assert.match(frame, /› current/);
-  t.unmount();
-});
-
-test('u confirms and updates one available OFF Global Skill without changing Desired state', async (context) => {
-  const fixture = setupManagedTui([
-    {name: 'off-skill', source: 'owner/repo', hash: 'old-hash', off: true},
-  ]);
-  useFixtureEnv(context, fixture.env);
-  process.env.TUI_GIT_TREES = JSON.stringify({
-    'https://github.com/owner/repo.git': {'skills/off-skill': 'new-hash'},
-  });
-  sharedRefresh(fixture.home);
-  const t = await renderApp(fixture.home, 120, 30);
-  await t.send('\t');
-
-  await t.send('u');
-  assert.match(t.stdout.frame(), /Update 1 Skill\?/);
-  assert.match(t.stdout.frame(), /owner\/repo[\s\S]*off-skill: available/);
-  assert.equal(fs.existsSync(fixture.npxLog), false);
-  await t.send('n');
-  assert.equal(fs.existsSync(fixture.npxLog), false);
-
-  await t.send('u');
-  await t.send('y');
   const frame = t.stdout.frame();
-  assert.match(frame, /Update results/);
-  assert.match(frame, /updated 1/);
-  assert.match(frame, /off-skill: updated/);
-  assert.ok(fs.existsSync(path.join(fixture.parking, 'off-skill', 'SKILL.md')));
-  assert.equal(fs.existsSync(path.join(fixture.discovery, 'off-skill')), false);
-  const call = JSON.parse(fs.readFileSync(fixture.npxLog, 'utf8').trim());
-  assert.deepEqual(call.args, ['--yes', 'skills@1.5.21', 'update', 'off-skill', '--global']);
+  assert.match(frame, /Refreshed 4 managed resources/);
+  assert.match(frame, /› current/);
+  assert.match(frame, /Update availability: current/);
+  assert.equal((fs.readFileSync(fixture.gitLog, 'utf8').match(/"clone"/g) ?? []).length, 2);
   t.unmount();
 });
 
-test('available linked Skills keep update and unlink as distinct actions', async (context) => {
+test('Relationship views keep Source update separate from unlink actions', async (context) => {
   const fixture = setupManagedTui([
     {name: 'linked-update', source: 'owner/repo', hash: 'old-hash'},
   ]);
@@ -2113,64 +2143,55 @@ test('available linked Skills keep update and unlink as distinct actions', async
   await t.send('\t');
   await t.send('l');
   await t.send('j');
-  let frame = t.stdout.frame();
-  assert.match(frame, /x unlink/);
-  assert.match(frame, /u update/);
+  const frame = t.stdout.frame();
+  assert.match(frame, /u unlink/);
+  assert.doesNotMatch(frame, /u update/);
 
-  await t.send('x');
+  await t.send('u');
   assert.match(t.stdout.frame(), /Unlink relationship\?/);
   await t.send('n');
-  await t.send('u');
-  frame = t.stdout.frame();
-  assert.match(frame, /Update 1 Skill\?/);
+  assert.equal(fs.existsSync(fixture.npxLog), false);
   assert.ok(fs.lstatSync(path.join(consumer, 'linked-update')).isSymbolicLink());
   t.unmount();
 });
 
-test('batch u updates only marked available Skills and preserves failed or skipped marks', async (context) => {
+test('Project Source batch keeps inherited same-name identities read-only', async (context) => {
   const fixture = setupManagedTui([
-    {name: 'a-success', source: 'owner/one', hash: 'success-old'},
-    {name: 'b-fail', source: 'owner/two', hash: 'fail-old'},
-    {name: 'c-current', source: 'owner/one', hash: 'current-hash'},
-  ]);
+    {name: 'same', source: 'owner/project', hash: 'project-old'},
+  ], true);
   useFixtureEnv(context, fixture.env);
+  const globalDiscovery = path.join(fixture.env.HOME, '.agents', 'skills');
+  const globalLock = path.join(fixture.env.HOME, '.agents', '.skill-lock.json');
+  mkSkill(globalDiscovery, 'same', '# global variant');
+  fs.mkdirSync(path.dirname(globalLock), {recursive: true});
+  fs.writeFileSync(globalLock, JSON.stringify({version: 3, skills: {same: {
+    source: 'owner/global', sourceType: 'github',
+    sourceUrl: 'https://github.com/owner/global.git',
+    skillPath: 'skills/same/SKILL.md', skillFolderHash: 'global-old',
+  }}}));
   process.env.TUI_GIT_TREES = JSON.stringify({
-    'https://github.com/owner/one.git': {
-      'skills/a-success': 'success-new',
-      'skills/c-current': 'current-hash',
-    },
-    'https://github.com/owner/two.git': {'skills/b-fail': 'fail-new'},
+    'https://github.com/owner/project.git': {'skills/same': 'project-new'},
   });
-  process.env.TUI_NPX_FAIL_NAMES = JSON.stringify(['b-fail']);
-  sharedRefresh(fixture.home);
-  const t = await renderApp(fixture.home, 120, 34);
+  sharedRefresh(fixture.home, fixture.project);
+  const t = await renderApp(fixture.home, 140, 34, fixture.project);
+  await t.send('3');
   await t.send('\t');
-  await t.send('v');
   await t.send(' ');
   await t.send('j');
   await t.send(' ');
-  await t.send('j');
-  await t.send(' ');
-  assert.match(t.stdout.frame(), /3 marked/);
-
-  await t.send('u');
-  let frame = t.stdout.frame();
-  assert.match(frame, /Update 2 Skills\?/);
-  assert.match(frame, /available 2.*skipped 1/);
-  assert.match(frame, /owner\/one[\s\S]*a-success: available[\s\S]*c-current: skipped \(current\)/);
-  assert.match(frame, /owner\/two[\s\S]*b-fail: available/);
-  await t.send('y');
-  frame = t.stdout.frame();
-  assert.match(frame, /Update results/);
-  assert.match(frame, /updated 1.*skipped 1.*failed 1/);
-  assert.match(frame, /a-success: updated/);
-  assert.match(frame, /b-fail: failed/);
-  assert.match(frame, /c-current: skipped \(current\)/);
+  await t.send('b');
+  const frame = t.stdout.frame();
+  assert.match(frame, /Source Update plan — 1 included, 1/);
+  assert.match(frame, /excluded \[1\//);
+  assert.match(frame, /same: excluded \(inherited read-only\)/);
+  assert.equal(fs.existsSync(fixture.npxLog), false);
+  await t.send('\r');
+  await t.send('\r');
+  await waitForFrame(t, /same: updated/);
   const calls = fs.readFileSync(fixture.npxLog, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
-  assert.equal(calls.length, 2);
-  assert.deepEqual(calls.map(({args}) => args[3]).sort(), ['a-success', 'b-fail']);
-  await t.send('\x1b');
-  assert.match(t.stdout.frame(), /2 marked/);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].cwd, fs.realpathSync(fixture.project));
+  assert.equal(calls[0].args.includes('--global'), false);
   t.unmount();
 });
 
@@ -2184,10 +2205,12 @@ test('Project TUI update uses the exact project scope', async (context) => {
   });
   sharedRefresh(fixture.home, fixture.project);
   const t = await renderApp(fixture.home, 120, 30, fixture.project);
+  await t.send('3');
   await t.send('\t');
   await t.send('u');
-  await t.send('y');
-  assert.match(t.stdout.frame(), /project-skill: updated/);
+  await t.send('\r');
+  await t.send('\r');
+  await waitForFrame(t, /project-skill: updated/);
   const call = JSON.parse(fs.readFileSync(fixture.npxLog, 'utf8').trim());
   assert.equal(call.cwd, fs.realpathSync(fixture.project));
   assert.equal(call.args.includes('--global'), false);

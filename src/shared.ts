@@ -75,6 +75,56 @@ export interface SharedUpdateAvailabilityResult {
   entries: SharedUpdateAvailabilityEntry[];
 }
 
+export interface SharedUpdatePlanItem extends SharedUpdateAvailabilityEntry {
+  identity: string;
+  included: boolean;
+  reason?: string;
+  desired: 'on' | 'off';
+  temporaryVisibility: boolean;
+  currentTruth: {actual: string; hash: string; source: string; relationships: number};
+  intentPreservation: {
+    baseIntent: 'on' | 'off';
+    tags: string[];
+    bundles: string[];
+    presetClaims: string[];
+    presetSelectors: string[];
+  };
+  relationshipEffects: SharedRelationshipEffect[];
+  expectedFinalTruth: {
+    actual: string;
+    desired: 'on' | 'off';
+    drift: 'none' | 'mirror-sync';
+    source: string;
+    relationships: number;
+    effectiveVisibility: 'recompute-after-rescan';
+  };
+}
+
+export interface SharedUpdatePlan {
+  operation: 'shared.update';
+  targetId: string;
+  scope: {kind: 'global' | 'project'; path: string};
+  target: {discoveryRoot: string; parkingRoot: string; stateFile: string; lockFile: string};
+  sourceAdapter: {package: string; updateOwner: 'vercel-skills'};
+  preconditions: {
+    lock: ReturnType<typeof contentFingerprint> & {owner: 'vercel-skills'};
+    policy: ReturnType<typeof contentFingerprint>;
+    permissions: {target: 'writable' | 'blocked'; lock: 'writable' | 'blocked'};
+  };
+  blockers: string[];
+  items: SharedUpdatePlanItem[];
+  recovery: {operationLock: string; evidence: string[]; completedWork: 'preserved'};
+}
+
+export interface SharedUpdateResult extends SharedCommandResult {
+  items: Array<SharedUpdatePlanItem & {
+    outcome: 'updated' | 'skipped' | 'failed';
+    actual?: string;
+    drift?: string[];
+    log?: string;
+  }>;
+}
+
 interface CachedUpdateAvailabilityEntry {
   identity: string;
   status: Exclude<SharedUpdateAvailabilityStatus, 'unknown'>;
@@ -1070,22 +1120,137 @@ export function planSharedAdd(
   return buildSharedAddPlan(target, source, name, replace);
 }
 
+function buildSharedUpdatePlan(
+  target: Target,
+  names: string[],
+  consideredNames: string[] = names,
+): SharedUpdatePlan {
+  const managed = readNpxSkillsLock(target.lockFile);
+  const bySlot = new Map(managed.map((skill) => [skill.slot, skill]));
+  const requested = new Set((names.length > 0 ? names : managed.map(({slot}) => slot)).map(validateName));
+  const considered = [...new Set((consideredNames.length > 0
+    ? consideredNames
+    : [...requested]).map(validateName))];
+  if (considered.length === 0) throw new Error(`no skills managed by ${NPX_SKILLS_PACKAGE}`);
+  const cache = updateAvailabilityCache(target);
+  const items = considered.map((slot): SharedUpdatePlanItem => {
+    const skill = bySlot.get(slot);
+    if (!skill) return {
+      name: slot,
+      slot,
+      source: 'Source unknown',
+      status: 'unknown',
+      identity: `unmanaged:${slot}`,
+      included: false,
+      reason: `not managed by ${NPX_SKILLS_PACKAGE}`,
+      desired: 'off',
+      temporaryVisibility: false,
+      currentTruth: {actual: 'unmanaged', hash: 'unknown', source: 'Source unknown', relationships: 0},
+      intentPreservation: {
+        baseIntent: 'off', tags: [], bundles: [], presetClaims: [], presetSelectors: [],
+      },
+      relationshipEffects: [],
+      expectedFinalTruth: {
+        actual: 'unmanaged', desired: 'off', drift: 'none', source: 'Source unknown',
+        relationships: 0, effectiveVisibility: 'recompute-after-rescan',
+      },
+    };
+    const current = relationship(target, slot);
+    if (!current) throw new Error(`installer lock/file mismatch: ${skill.name}`);
+    const identity = managedIdentity(target, skill).identity;
+    const cached = cache.get(slot);
+    const observation = cached?.identity === identity ? cached : undefined;
+    const status = observation?.status ?? 'unknown';
+    const intentPreservation = policyIntent(
+      target,
+      slot,
+      current.resourceId ?? current.realPath ?? current.path,
+      current.activation,
+    );
+    const desired = intentPreservation.presetClaims.length > 0
+      ? 'on'
+      : intentPreservation.baseIntent;
+    const marked = requested.has(slot);
+    const relationshipEffects = addRelationshipEffects(target, slot, current, false);
+    const expectedDrift = relationshipEffects.some(({plannedAction}) => plannedAction === 'mirror-sync')
+      ? 'mirror-sync' as const
+      : 'none' as const;
+    return {
+      name: skill.name,
+      slot,
+      source: npxSkillsProvenanceLabel(skill.provenance),
+      ...(skill.provenance.skillPath ? {skillPath: skill.provenance.skillPath} : {}),
+      status,
+      ...(observation ? {checkedAt: observation.checkedAt} : {}),
+      ...(observation?.error ? {error: observation.error} : {}),
+      identity,
+      included: marked && status === 'available',
+      ...(marked ? status === 'available' ? {} : {reason: status} : {reason: 'unmarked'}),
+      desired,
+      temporaryVisibility: desired === 'off',
+      currentTruth: {
+        actual: `${current.activation}/${current.form}`,
+        hash: hashDirectory(current.path),
+        source: npxSkillsProvenanceLabel(skill.provenance),
+        relationships: relationshipEffects.length,
+      },
+      intentPreservation,
+      relationshipEffects,
+      expectedFinalTruth: {
+        actual: `${slot}=${desired}/local`,
+        desired,
+        drift: expectedDrift,
+        source: npxSkillsProvenanceLabel(skill.provenance),
+        relationships: relationshipEffects.length,
+        effectiveVisibility: 'recompute-after-rescan',
+      },
+    };
+  });
+  return {
+    operation: 'shared.update',
+    targetId: target.target.id,
+    scope: {
+      kind: target.projectPath ? 'project' : 'global',
+      path: target.projectPath ?? path.dirname(path.dirname(target.target.discoveryRoot)),
+    },
+    target: {
+      discoveryRoot: target.target.discoveryRoot,
+      parkingRoot: target.target.parkingRoot,
+      stateFile: target.report.stateFile,
+      lockFile: target.lockFile,
+    },
+    sourceAdapter: {package: NPX_SKILLS_PACKAGE, updateOwner: 'vercel-skills'},
+    preconditions: {
+      lock: {...contentFingerprint(target.lockFile), owner: 'vercel-skills'},
+      policy: contentFingerprint(target.report.stateFile),
+      permissions: {
+        target: writableAt(target.target.discoveryRoot),
+        lock: writableAt(path.dirname(target.lockFile)),
+      },
+    },
+    blockers: [
+      ...(writableAt(target.target.discoveryRoot) === 'blocked' ? ['Shared Target is not writable.'] : []),
+      ...(writableAt(path.dirname(target.lockFile)) === 'blocked' ? ['Source lock directory is not writable.'] : []),
+    ],
+    items,
+    recovery: {
+      operationLock: `${target.lockFile}.skillspub-operation-lock`,
+      evidence: [target.lockFile, target.report.stateFile, 'final filesystem rescan'],
+      completedWork: 'preserved',
+    },
+  };
+}
+
 export function planSharedUpdate(
   home: Home,
   names: string[],
   projectPath?: string,
-): SharedMutationPlan {
+  consideredNames: string[] = names,
+): SharedUpdatePlan {
   const target = resolveTarget(home, projectPath);
   validatePolicyState(target);
   assertNoOperationLock(target);
-  const selected = managedSelection(target, names);
-  assertNoBlockedUpdate(target, selected);
-  desiredFor(target, selected);
-  return {
-    operation: 'shared.update',
-    targetId: target.target.id,
-    slots: selected.map(({ slot }) => slot),
-  };
+  return buildSharedUpdatePlan(target, names, consideredNames);
 }
 
 function ensureVisible(target: Target, skills: NpxManagedSkill[]): void {
@@ -1284,19 +1449,6 @@ export function sharedOutdated(
   return sharedOutdatedFromInventory(home, target.report);
 }
 
-function assertNoBlockedUpdate(target: Target, selected: NpxManagedSkill[]): void {
-  const cached = updateAvailabilityCache(target);
-  const blocked = selected.flatMap((skill) => {
-    const entry = cached.get(skill.slot);
-    return entry && ['upstream-missing', 'check-failed'].includes(entry.status) &&
-      entry.identity === managedIdentity(target, skill).identity
-      ? [{name: skill.name, status: entry.status}]
-      : [];
-  });
-  if (blocked.length > 0)
-    throw new Error(`cannot update ${blocked.map(({name, status}) => `${status} Skill: ${name}`).join(', ')}`);
-}
-
 /** One guarded Shared Target operation: snapshot Desired state, make Slots visible,
  *  run the skills CLI under the operation lock, restore Desired state, report Drift.
  *  add/update/remove below are only select/args/check/after over this template. */
@@ -1468,16 +1620,98 @@ export function sharedUpdate(
   home: Home,
   names: string[],
   projectPath?: string,
-): SharedCommandResult {
-  return guardedSkillsOp(home, projectPath, {
-    name: 'update',
-    select(target) {
-      const selected = managedSelection(target, names);
-      assertNoBlockedUpdate(target, selected);
-      return selected;
-    },
-    args: (selected, global) =>
-      npxSkillsUpdateArgs(selected.map(({ name }) => name), global),
+  expectedPlan?: SharedUpdatePlan,
+): SharedUpdateResult {
+  const preview = expectedPlan ?? planSharedUpdate(home, names, projectPath);
+  const initial = resolveTarget(home, projectPath);
+  return withOperationLock(initial, () => {
+    const target = resolveTarget(home, projectPath);
+    validatePolicyState(target);
+    const currentPlan = buildSharedUpdatePlan(
+      target,
+      names,
+      expectedPlan?.items.map(({name}) => name) ?? names,
+    );
+    if (JSON.stringify(currentPlan) !== JSON.stringify(preview))
+      throw concurrentModification('Source update plan changed after preview; create a new preview.');
+    if (currentPlan.blockers.length > 0) throw new Error(currentPlan.blockers.join('\n'));
+    const includedNames = currentPlan.items.filter(({included}) => included).map(({name}) => name);
+    if (includedNames.length === 0) {
+      const excluded = currentPlan.items.map(({name, reason}) => `${reason ?? 'ineligible'} Skill: ${name}`);
+      throw new Error(`cannot update ${excluded.join(', ')}`);
+    }
+    const selected = managedSelection(target, includedNames);
+    const selectedBySlot = new Map(selected.map((skill) => [skill.slot, skill]));
+    const desired = desiredFor(target, selected);
+    const allDrift: string[] = [];
+    const results: SharedUpdateResult['items'] = [];
+    for (const item of currentPlan.items) {
+      if (!item.included) {
+        results.push({...item, outcome: 'skipped'});
+        continue;
+      }
+      const skill = selectedBySlot.get(item.slot);
+      if (!skill) {
+        results.push({...item, outcome: 'skipped', reason: 'selection changed'});
+        continue;
+      }
+      let result: NpxSkillsRunResult | undefined;
+      let failure: Error | undefined;
+      try {
+        ensureVisible(target, [skill]);
+        result = runNpxSkills(
+          npxSkillsUpdateArgs([skill.name], !projectPath),
+          target.cwd,
+          'output',
+        );
+      } catch (error) {
+        failure = error as Error;
+      }
+      const itemDrift = restoreDesired(target, new Map([[skill.slot, desired.get(skill.slot)!]]));
+      const actual = finalActual(target, [skill.slot], itemDrift);
+      let verificationFailure: string | undefined;
+      if (!failure && result?.status === 0) {
+        const updated = readNpxSkillsLock(target.lockFile).find(({slot}) => slot === skill.slot);
+        if (!updated || npxSkillsSourceKey(updated) !== npxSkillsSourceKey(skill))
+          verificationFailure = 'installer lock provenance changed or disappeared';
+        else if (managedIdentity(target, updated).identity === item.identity)
+          verificationFailure = 'updater reported success without a verified local change';
+      }
+      const failed = failure || !result || result.status !== 0 || verificationFailure;
+      for (const effect of item.relationshipEffects) {
+        if (effect.plannedAction !== 'mirror-sync') continue;
+        const mirrorFindings = target.report.findings.filter((finding) =>
+          finding.targetId === effect.targetId && finding.slot === effect.slot &&
+          (finding.code === 'mirror-drift' || finding.code === 'mirror-diverged'));
+        if (mirrorFindings.some(({code}) => code === 'mirror-drift'))
+          itemDrift.push(`${effect.targetId}/${effect.slot}: mirror-sync`);
+        if (mirrorFindings.some(({code}) => code === 'mirror-diverged'))
+          itemDrift.push(`${effect.targetId}/${effect.slot}: mirror-diverged (explicit overwrite or convert required)`);
+      }
+      allDrift.push(...itemDrift);
+      const reason = failure?.message ?? verificationFailure ??
+        (result?.stderr.trim() || `exit ${result?.status ?? 1}`);
+      const log = [
+        `$ npx --yes ${NPX_SKILLS_PACKAGE} ${npxSkillsUpdateArgs([skill.name], !projectPath).join(' ')}`,
+        result?.stdout.trim(),
+        result?.stderr.trim(),
+        failure?.message,
+        `exit ${result?.status ?? 1}`,
+      ].filter(Boolean).join('\n');
+      results.push({
+        ...item,
+        outcome: failed ? 'failed' : 'updated',
+        ...(failed ? {reason} : {}),
+        actual,
+        drift: itemDrift,
+        log,
+      });
+    }
+    return {
+      actual: finalActual(target, currentPlan.items.map(({slot}) => slot), allDrift),
+      drift: [...new Set(allDrift)],
+      items: results,
+    };
   });
 }
 
