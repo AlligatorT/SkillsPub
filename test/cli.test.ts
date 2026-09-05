@@ -911,6 +911,19 @@ test('Grok CLI supports read-only inspection and confirmed Global and Project se
   fs.mkdirSync(path.join(parent, '.git'), { recursive: true });
   fs.mkdirSync(selectedShared, { recursive: true });
   fs.mkdirSync(ancestorShared, { recursive: true });
+  const grokSkills = path.join(grokHome, 'skills');
+  fs.mkdirSync(grokSkills, { recursive: true });
+  for (let index = 1; index <= 90; index += 1) {
+    const name = `shared-${String(index).padStart(2, '0')}`;
+    const source = path.join(shared, name);
+    fs.mkdirSync(source, { recursive: true });
+    fs.writeFileSync(path.join(source, 'SKILL.md'), `# ${name}\n`);
+    fs.symlinkSync(source, path.join(grokSkills, name), 'dir');
+  }
+  const egoBrowser = path.join(configDir, 'external', 'ego-browser');
+  fs.mkdirSync(egoBrowser, { recursive: true });
+  fs.writeFileSync(path.join(egoBrowser, 'SKILL.md'), '# ego-browser\n');
+  fs.symlinkSync(egoBrowser, path.join(grokSkills, 'ego-browser'), 'dir');
   fs.writeFileSync(path.join(grokHome, 'config.toml'), '# preserve\n');
   fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
     version: 1,
@@ -947,6 +960,11 @@ test('Grok CLI supports read-only inspection and confirmed Global and Project se
   assert.match(inspected.stdout, /grok\s+managed\s+Shared enabled\s+Isolation unmanaged\s+Link unsupported\s+Mirror supported/);
   assert.match(projectInspected.stdout, new RegExp(path.join(project, '.grok', 'skills').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(globalPreview.stdout, new RegExp(shared.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(globalPreview.stdout, /90 Shared-backed Grok Link Relationships will be unlinked/);
+  assert.match(globalPreview.stdout, /90 source Skill resources will be preserved/);
+  assert.match(globalPreview.stdout, /1 non-Shared Grok Relationship will be retained/);
+  assert.match(globalPreview.stdout, /ego-browser/);
+  assert.match(globalPreview.stdout, /Recovery before confirmation:/);
   assert.match(preview.stdout, new RegExp(selectedShared.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(preview.stdout, new RegExp(ancestorShared.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.deepEqual(fs.readdirSync(configDir, { recursive: true }).sort(), before);
@@ -956,12 +974,49 @@ test('Grok CLI supports read-only inspection and confirmed Global and Project se
   const globalJsonPreviewDocument = JSON.parse(globalJsonPreview.stdout);
   assert.equal(globalJsonPreviewDocument.data.applied, false);
   assert.doesNotMatch(JSON.stringify(globalJsonPreviewDocument.data.plan), /[0-9a-f]{8}-[0-9a-f-]{27}/i);
+  const impact = globalJsonPreviewDocument.data.plan.relationshipImpact;
+  assert.deepEqual(impact.summary, {
+    affectedRelationships: 90,
+    unlinkedRelationships: 90,
+    retainedRelationships: 1,
+    preservedSourceResources: 90,
+  });
+  assert.deepEqual(impact.actual, { relationshipCount: 91, isolation: 'unmanaged' });
+  assert.deepEqual(impact.desired, { relationshipCount: 1, isolation: 'managed' });
+  assert.equal(impact.drift.relationships.length, 90);
+  assert.equal(impact.drift.isolation, true);
+  assert.equal(impact.configuration.path, path.join(grokHome, 'config.toml'));
+  assert.match(impact.configuration.originalHash, /^[0-9a-f]{64}$/);
+  assert.match(impact.configuration.backupPath, /<recovery-id>\.toml$/);
+  assert.match(impact.recovery.manifestPath, /<recovery-id>\.links\.json$/);
+  const relationshipEffects = impact.groups.flatMap((group: { relationships: unknown[] }) =>
+    group.relationships);
+  assert.equal(relationshipEffects.length, 91);
+  assert.equal(relationshipEffects.filter(({ plannedAction }: { plannedAction: string }) =>
+    plannedAction === 'unlink').length, 90);
+  const retained = relationshipEffects.find(({ name }: { name: string }) => name === 'ego-browser');
+  assert.equal(retained.plannedAction, 'retain');
+  assert.equal(retained.form, 'link');
+  assert.equal(retained.activation, 'on');
+  assert.equal(retained.sourcePath, fs.realpathSync(egoBrowser));
+  assert.equal(retained.targetPath, path.join(grokSkills, 'ego-browser'));
 
   const globalApplied = run(['harnesses', 'grok', 'setup', '--yes', '--json']);
   assert.equal(globalApplied.status, 0, globalApplied.stderr || globalApplied.stdout);
   const globalAppliedDocument = JSON.parse(globalApplied.stdout);
   assert.equal(globalAppliedDocument.data.applied, true);
   assert.deepEqual(globalAppliedDocument.data.plan, globalJsonPreviewDocument.data.plan);
+  assert.deepEqual(globalAppliedDocument.data.result.actual, {
+    unlinkedRelationships: 90,
+    retainedRelationships: 1,
+    preservedSourceResources: 90,
+  });
+  assert.deepEqual(globalAppliedDocument.data.result.desired, globalAppliedDocument.data.result.actual);
+  assert.deepEqual(globalAppliedDocument.data.result.drift, { relationships: [], isolation: false });
+  assert.equal(globalAppliedDocument.data.result.isolation.status, 'managed');
+  assert.equal(globalAppliedDocument.data.result.relationshipEffects.length, 91);
+  assert.equal(fs.lstatSync(path.join(grokSkills, 'ego-browser')).isSymbolicLink(), true);
+  assert.equal(fs.existsSync(path.join(shared, 'shared-01', 'SKILL.md')), true);
   fs.writeFileSync(
     path.join(grokHome, 'config.toml'),
     fs.readFileSync(path.join(grokHome, 'config.toml'), 'utf8')
@@ -974,6 +1029,11 @@ test('Grok CLI supports read-only inspection and confirmed Global and Project se
   const applied = run(['project', project, 'harnesses', 'grok', 'setup', '--yes']);
   assert.equal(applied.status, 0, applied.stderr);
   assert.match(applied.stdout, /Manual recovery:/);
+  assert.match(applied.stdout, /Actual:\s+0 unlinked, 1 retained, 0 source resources preserved/);
+  assert.match(applied.stdout, /Desired:\s+0 unlinked, 1 retained, 0 source resources preserved/);
+  assert.match(applied.stdout, /Drift:\s+0 Relationship effects; isolation no/);
+  assert.match(applied.stdout, /Isolation:\s+managed/);
+  assert.match(applied.stdout, /Relationship effects:/);
   assert.match(applied.stdout, /Grok Build setup verified/);
   const written = fs.readFileSync(path.join(grokHome, 'config.toml'), 'utf8');
   assert.match(written, /# preserve/);
@@ -1077,7 +1137,8 @@ test('bundle membership never merges same-name resource variants', () => {
   });
   fs.writeFileSync(path.join(configDir, 'runtimes.json'), JSON.stringify({
     version: 1,
-    runtimes: runtimes.map(({ skill: _, ...runtime }) => runtime),
+    runtimes: runtimes.map(({ key, kind, discoveryRoot, parkingRoot, projectPath }) =>
+      ({ key, kind, discoveryRoot, parkingRoot, projectPath })),
   }));
   const run = (args: string[]) => spawnSync('node', [CLI, ...args], {
     encoding: 'utf8',
@@ -1168,7 +1229,8 @@ test('bundle activation preflight rejects same-Slot variants without changing st
   });
   fs.writeFileSync(path.join(configDir, 'runtimes.json'), JSON.stringify({
     version: 1,
-    runtimes: runtimes.map(({ skill: _, ...runtime }) => runtime),
+    runtimes: runtimes.map(({ key, kind, discoveryRoot, parkingRoot, projectPath }) =>
+      ({ key, kind, discoveryRoot, parkingRoot, projectPath })),
   }));
   const run = (args: string[]) => spawnSync('node', [CLI, ...args], {
     encoding: 'utf8',
@@ -1291,7 +1353,8 @@ test('Tag commands use resource identity for filtering and planned Target mutati
   });
   fs.writeFileSync(path.join(configDir, 'runtimes.json'), JSON.stringify({
     version: 1,
-    runtimes: runtimes.map(({ skill: _, ...runtime }) => runtime),
+    runtimes: runtimes.map(({ key, kind, discoveryRoot, parkingRoot, projectPath }) =>
+      ({ key, kind, discoveryRoot, parkingRoot, projectPath })),
   }));
   const run = (args: string[]) => spawnSync('node', [CLI, ...args], {
     encoding: 'utf8',

@@ -19,6 +19,10 @@ import type {
   HarnessInspection,
   HarnessOperation,
   HarnessOperationPlan,
+  HarnessOperationResult,
+  HarnessRelationshipEffect,
+  HarnessRelationshipGroup,
+  HarnessRelationshipImpact,
 } from './types.ts';
 
 interface GrokConfig {
@@ -46,6 +50,7 @@ interface GrokPlan {
   affectedRoots: string[];
   targetRoots: string[];
   affectedLinks: AffectedLink[];
+  relationshipImpact: HarnessRelationshipImpact;
   projectPath?: string;
   backupFile: string;
   manifestFile: string;
@@ -301,6 +306,106 @@ function affectedLinks(
   }).sort((left, right) => left.path.localeCompare(right.path));
 }
 
+function relationshipGroups(
+  report: InventoryScanReport,
+  links: AffectedLink[],
+  targetRoots: string[],
+): HarnessRelationshipGroup[] {
+  const affectedPaths = new Set(links.map(({ path: linkPath }) => linkPath));
+  const effects = report.relationships.flatMap((relationship): HarnessRelationshipEffect[] => {
+    if (relationship.targetKey !== 'grok' ||
+      !targetRoots.some((root) => containsPath(root, relationship.path))) return [];
+    const target = report.targets.find(({ id }) => id === relationship.targetId);
+    const sourcePath = relationship.realPath ?? relationship.target ?? relationship.path;
+    return [{
+      scope: target?.scope ?? report.scope,
+      targetId: relationship.targetId,
+      targetKey: relationship.targetKey,
+      resourceId: relationship.resourceId ?? sourcePath,
+      name: relationship.name,
+      slot: relationship.slot,
+      form: relationship.form,
+      activation: relationship.activation,
+      sourcePath,
+      targetPath: relationship.path,
+      plannedAction: affectedPaths.has(relationship.path) ? 'unlink' : 'retain',
+      sourcePreserved: true,
+    }];
+  }).sort((left, right) =>
+    left.scope.localeCompare(right.scope) ||
+    left.targetId.localeCompare(right.targetId) ||
+    left.targetPath.localeCompare(right.targetPath));
+  const groups = new Map<string, HarnessRelationshipEffect[]>();
+  for (const effect of effects) {
+    const key = `${effect.scope}\0${effect.targetId}\0${effect.targetKey}`;
+    const group = groups.get(key) ?? [];
+    group.push(effect);
+    groups.set(key, group);
+  }
+  return [...groups.entries()].map(([key, relationships]) => {
+    const [scope, targetId, targetKey] = key.split('\0');
+    return {
+      scope: scope as HarnessRelationshipGroup['scope'],
+      targetId: targetId!,
+      targetKey: targetKey!,
+      relationships,
+    };
+  });
+}
+
+function relationshipImpact(
+  report: InventoryScanReport,
+  links: AffectedLink[],
+  targetRoots: string[],
+  file: string,
+  expectedHash: string,
+  backupFile: string,
+  manifestFile: string,
+  change: boolean,
+  inspection: HarnessInspection,
+): HarnessRelationshipImpact {
+  const groups = relationshipGroups(report, links, targetRoots);
+  const effects = groups.flatMap(({ relationships }) => relationships);
+  const preservedSources = new Set(effects
+    .filter(({ plannedAction }) => plannedAction === 'unlink')
+    .map(({ resourceId }) => resourceId));
+  return {
+    summary: {
+      affectedRelationships: links.length,
+      unlinkedRelationships: links.length,
+      retainedRelationships: effects.length - links.length,
+      preservedSourceResources: preservedSources.size,
+    },
+    actual: {
+      relationshipCount: effects.length,
+      isolation: inspection.isolation.status,
+    },
+    desired: {
+      relationshipCount: effects.length - links.length,
+      isolation: 'managed',
+    },
+    drift: {
+      relationships: effects.filter(({ plannedAction }) => plannedAction === 'unlink'),
+      isolation: inspection.isolation.status !== 'managed',
+    },
+    groups,
+    configuration: {
+      path: file,
+      plannedAction: change ? 'write' : 'retain',
+      originalHash: expectedHash,
+      backupPath: backupFile,
+    },
+    recovery: {
+      manifestPath: manifestFile,
+      instructions: [
+        `Restore config: cp ${backupFile} ${file}`,
+        `Review removed Links: ${manifestFile}`,
+        'Recreate only the Links you still want; source Skill resources were not deleted.',
+      ],
+    },
+  };
+}
+
 function hash(value: string | undefined): string {
   return crypto.createHash('sha256').update(value ?? '').digest('hex');
 }
@@ -448,25 +553,41 @@ function buildPlan(
   const rootsToAdd = roots.filter((root) => !coversRoot(config.ignore, root));
   const ignore = uniquePaths([...config.ignore, ...rootsToAdd]);
   const affectedRoots = operation === 'reconcile' ? roots : rootsToAdd;
-  const links = affectedLinks(operationReport(home, targets, projectPath), affectedRoots, targetRoots);
+  const report = operationReport(home, targets, projectPath);
+  const links = affectedLinks(report, affectedRoots, targetRoots);
   const updated = updatedConfig(config, ignore);
   const id = `${Date.now()}-${crypto.randomUUID()}`;
   const recoveryDir = projectPath
     ? path.join(projectPath, '.skillspub', 'grok-recovery')
     : path.join(home.configDir, 'grok-recovery');
+  const backupFile = path.join(recoveryDir, `${id}.toml`);
+  const manifestFile = path.join(recoveryDir, `${id}.links.json`);
+  const change = rootsToAdd.length > 0 || config.claudeSkills || config.cursorSkills;
+  const expectedHash = hash(config.raw);
   return {
     file,
     expected: config.raw,
-    expectedHash: hash(config.raw),
+    expectedHash,
     updated,
     rootsToAdd,
     affectedRoots,
     targetRoots,
     affectedLinks: links,
+    relationshipImpact: relationshipImpact(
+      report,
+      links,
+      targetRoots,
+      file,
+      expectedHash,
+      backupFile,
+      manifestFile,
+      change,
+      inspection,
+    ),
     projectPath,
-    backupFile: path.join(recoveryDir, `${id}.toml`),
-    manifestFile: path.join(recoveryDir, `${id}.links.json`),
-    change: rootsToAdd.length > 0 || config.claudeSkills || config.cursorSkills,
+    backupFile,
+    manifestFile,
+    change,
   };
 }
 
@@ -474,22 +595,26 @@ function sameLinks(left: AffectedLink[], right: AffectedLink[]): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function concurrentModification(message: string): Error & { code: 'concurrent_modification' } {
+  return Object.assign(new Error(message), { code: 'concurrent_modification' as const });
+}
+
 function preflightApply(home: Home, targets: SkillTarget[], plan: GrokPlan): void {
   const current = readConfig(plan.file);
   if (current.raw !== plan.expected || hash(current.raw) !== plan.expectedHash)
-    throw new Error(`Grok config changed after preview: ${plan.file}`);
+    throw concurrentModification(`Grok config changed after preview: ${plan.file}`);
   assertSafeConfig(current, operationGrokRoots(targets, plan.projectPath));
-  const currentLinks = affectedLinks(
-    operationReport(home, targets, plan.projectPath),
-    plan.affectedRoots,
-    plan.targetRoots,
-  );
+  const report = operationReport(home, targets, plan.projectPath);
+  const currentLinks = affectedLinks(report, plan.affectedRoots, plan.targetRoots);
   if (!sameLinks(currentLinks, plan.affectedLinks))
-    throw new Error('Grok affected Links changed after preview');
+    throw concurrentModification('Grok affected Links changed after preview');
+  const currentGroups = relationshipGroups(report, currentLinks, plan.targetRoots);
+  if (JSON.stringify(currentGroups) !== JSON.stringify(plan.relationshipImpact.groups))
+    throw concurrentModification('Grok Relationships changed after preview');
   for (const link of plan.affectedLinks) {
     const stat = fs.lstatSync(link.path);
     if (!stat.isSymbolicLink() || fs.realpathSync(link.path) !== link.target)
-      throw new Error(`Grok Link changed after preview: ${link.path}`);
+      throw concurrentModification(`Grok Link changed after preview: ${link.path}`);
   }
 }
 
@@ -499,7 +624,8 @@ function writeRecovery(plan: GrokPlan): void {
   fs.writeFileSync(plan.manifestFile, JSON.stringify({
     config: plan.file,
     originalHash: plan.expectedHash,
-    links: plan.affectedLinks,
+    links: plan.relationshipImpact.groups.flatMap(({ relationships }) =>
+      relationships.filter(({ plannedAction }) => plannedAction === 'unlink')),
   }, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
 }
 
@@ -523,6 +649,86 @@ function applyPlan(home: Home, targets: SkillTarget[], plan: GrokPlan): void {
   saveClaim(home, targets, plan);
 }
 
+function renderRelationshipImpact(plan: GrokPlan): string[] {
+  const { relationshipImpact: impact } = plan;
+  return [
+    `${impact.summary.unlinkedRelationships} Shared-backed Grok Link Relationships will be unlinked`,
+    `${impact.summary.preservedSourceResources} source Skill resources will be preserved`,
+    `${impact.summary.retainedRelationships} non-Shared Grok Relationship will be retained`,
+    `Actual\t${impact.actual.relationshipCount} Relationships; isolation ${impact.actual.isolation}`,
+    `Desired\t${impact.desired.relationshipCount} Relationships; isolation ${impact.desired.isolation}`,
+    `Drift\t${impact.drift.relationships.length} Relationship actions; ` +
+      `isolation ${impact.drift.isolation ? 'yes' : 'no'}`,
+    `configuration\t${impact.configuration.plannedAction}\t${impact.configuration.path}`,
+    `original hash\t${impact.configuration.originalHash}`,
+    `configuration backup\t${impact.configuration.backupPath}`,
+    `affected-Link manifest\t${impact.recovery.manifestPath}`,
+    ...impact.groups.flatMap((group) => [
+      `scope ${group.scope}\tSkill Target ${group.targetKey} (${group.targetId})`,
+      ...group.relationships.map((effect) =>
+        `${effect.plannedAction === 'unlink' ? 'Unlink' : 'Retain'}\t` +
+        `resource=${effect.resourceId}\tname=${effect.name}\tform=${effect.form}\t` +
+        `Activation=${effect.activation}\tsource=${effect.sourcePath}\t` +
+        `target=${effect.targetPath}\taction=${effect.plannedAction}`),
+    ]),
+    'source preservation\tall listed source Skill resources remain on disk',
+    'verify\tActual, Desired, Drift, isolation, Relationship effects, and recovery evidence',
+  ];
+}
+
+function operationResult(
+  home: Home,
+  targets: SkillTarget[],
+  plan: GrokPlan,
+  inspection: HarnessInspection,
+): HarnessOperationResult {
+  const report = operationReport(home, targets, plan.projectPath);
+  const present = new Set(report.relationships.map(({ targetId, path: relationshipPath }) =>
+    `${targetId}\0${relationshipPath}`));
+  const effects = plan.relationshipImpact.groups.flatMap(({ relationships }) => relationships);
+  const relationshipEffects = effects.map((effect) => {
+    const isPresent = present.has(`${effect.targetId}\0${effect.targetPath}`);
+    const desiredPresent = effect.plannedAction === 'retain';
+    return {
+      ...effect,
+      outcome: isPresent === desiredPresent
+        ? (desiredPresent ? 'retained' : 'unlinked') as 'retained' | 'unlinked'
+        : 'drift' as const,
+    };
+  });
+  const unlinkSources = new Set(effects
+    .filter(({ plannedAction }) => plannedAction === 'unlink')
+    .map(({ sourcePath }) => sourcePath));
+  const actual = {
+    unlinkedRelationships: relationshipEffects.filter(({ outcome }) => outcome === 'unlinked').length,
+    retainedRelationships: relationshipEffects.filter(({ outcome }) => outcome === 'retained').length,
+    preservedSourceResources: [...unlinkSources].filter((sourcePath) => fs.existsSync(sourcePath)).length,
+  };
+  const desired = {
+    unlinkedRelationships: plan.relationshipImpact.summary.unlinkedRelationships,
+    retainedRelationships: plan.relationshipImpact.summary.retainedRelationships,
+    preservedSourceResources: plan.relationshipImpact.summary.preservedSourceResources,
+  };
+  return {
+    inspection,
+    actual,
+    desired,
+    drift: {
+      relationships: relationshipEffects
+        .filter(({ outcome }) => outcome === 'drift')
+        .map(({ outcome: _outcome, ...effect }) => effect),
+      isolation: inspection.isolation.status !== 'managed',
+    },
+    isolation: inspection.isolation,
+    relationshipEffects,
+    recovery: {
+      ...plan.relationshipImpact.recovery,
+      configBackupPreserved: fs.existsSync(plan.backupFile),
+      manifestPreserved: fs.existsSync(plan.manifestFile),
+    },
+  };
+}
+
 function planOperation(
   home: Home,
   targets: SkillTarget[],
@@ -530,24 +736,16 @@ function planOperation(
   projectPath?: string,
 ): HarnessOperationPlan {
   const plan = buildPlan(home, targets, operation, projectPath);
-  const lines = [
-    `write\t${plan.file}`,
-    ...plan.rootsToAdd.map((root) => `Shared ignore\t${root}`),
-    'compat.claude.skills\tfalse',
-    'compat.cursor.skills\tfalse',
-    ...plan.affectedLinks.map((link) => `Unlink\t${link.path} -> ${link.target}`),
-    `backup\t${plan.backupFile}`,
-    `affected-Link manifest\t${plan.manifestFile}`,
-    'verify\tShared and vendor-compatible Skill isolation',
-  ];
   return {
     title: 'Grok Build isolation plan:',
-    lines,
-    recovery: [
-      `Restore config: cp ${plan.backupFile} ${plan.file}`,
-      `Review removed Links: ${plan.manifestFile}`,
-      'Recreate only the Links you still want; source Skill resources were not deleted.',
+    lines: [
+      ...plan.rootsToAdd.map((root) => `Shared ignore\t${root}`),
+      'compat.claude.skills\tfalse',
+      'compat.cursor.skills\tfalse',
+      ...renderRelationshipImpact(plan),
     ],
+    recovery: plan.relationshipImpact.recovery.instructions,
+    relationshipImpact: plan.relationshipImpact,
     apply: () => applyPlan(home, targets, plan),
     verify() {
       const inspection = grokAdapter.inspect(home, targets, plan.projectPath);
@@ -555,6 +753,7 @@ function planOperation(
         throw new Error(`Grok isolation verification failed: ${inspection.sharedConsumption.detail}`);
       return inspection;
     },
+    result: (inspection) => operationResult(home, targets, plan, inspection),
   };
 }
 

@@ -365,6 +365,33 @@ test('Grok setup rejects unsafe TOML and concurrent changes before mutation', ()
   assert.equal(fs.readFileSync(config, 'utf8'), '# changed\n');
   assert.equal(fs.existsSync(path.join(home.configDir, 'state.json')), false);
   assert.equal(fs.existsSync(path.join(home.configDir, 'grok-recovery')), false);
+
+  const relationships = setup();
+  const sharedSkill = path.join(relationships.shared, 'shared-skill');
+  const externalSkill = path.join(relationships.home.configDir, 'external', 'ego-browser');
+  const grokSkills = path.join(relationships.grokHome, 'skills');
+  fs.mkdirSync(sharedSkill, { recursive: true });
+  fs.mkdirSync(externalSkill, { recursive: true });
+  fs.mkdirSync(grokSkills, { recursive: true });
+  fs.writeFileSync(path.join(sharedSkill, 'SKILL.md'), '# shared');
+  fs.writeFileSync(path.join(externalSkill, 'SKILL.md'), '# ego-browser');
+  fs.symlinkSync(sharedSkill, path.join(grokSkills, 'shared-skill'), 'dir');
+  const retainedLink = path.join(grokSkills, 'ego-browser');
+  fs.symlinkSync(externalSkill, retainedLink, 'dir');
+  const relationshipConfig = path.join(relationships.grokHome, 'config.toml');
+  fs.writeFileSync(relationshipConfig, '# original\n');
+  const relationshipPlan = planHarnessOperation(
+    'grok',
+    'setup',
+    relationships.home,
+    relationships.targets,
+  );
+  fs.unlinkSync(retainedLink);
+  assert.throws(() => relationshipPlan.apply(), /Relationships changed after preview/i);
+  assert.equal(fs.readFileSync(relationshipConfig, 'utf8'), '# original\n');
+  assert.equal(fs.lstatSync(path.join(grokSkills, 'shared-skill')).isSymbolicLink(), true);
+  assert.equal(fs.existsSync(path.join(relationships.home.configDir, 'state.json')), false);
+  assert.equal(fs.existsSync(path.join(relationships.home.configDir, 'grok-recovery')), false);
 });
 
 test('Grok reports managed drift and requires explicit reconcile', () => {
