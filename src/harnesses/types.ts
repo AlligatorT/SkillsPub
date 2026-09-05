@@ -80,7 +80,7 @@ export interface HarnessRelationshipImpact {
   };
   desired: {
     relationshipCount: number;
-    isolation: 'managed';
+    isolation: HarnessInspection['isolation']['status'];
   };
   drift: {
     relationships: readonly HarnessRelationshipEffect[];
@@ -92,6 +92,18 @@ export interface HarnessRelationshipImpact {
     plannedAction: 'write' | 'retain';
     originalHash: string;
     backupPath: string;
+  };
+  ownershipState?: {
+    path: string;
+    status: 'owned' | 'unowned' | 'drift';
+    plannedAction: 'write' | 'retain';
+    originalHash: string;
+    backupPath: string;
+  };
+  expectedTruth?: {
+    sharedConsumption: SharedConsumption;
+    targetRelationships: 'retained';
+    effectiveVisibility: 'visible-on-next-load' | 'unknown';
   };
   recovery: {
     manifestPath: string;
@@ -121,7 +133,13 @@ export interface HarnessOperationResult {
   })[];
   recovery: HarnessRelationshipImpact['recovery'] & {
     configBackupPreserved: boolean;
+    stateBackupPreserved?: boolean;
     manifestPreserved: boolean;
+  };
+  sharedConsumption?: HarnessInspection['sharedConsumption'];
+  effectiveVisibility?: {
+    status: 'visible' | 'not-visible' | 'unknown' | 'conflicted';
+    detail: string;
   };
 }
 
