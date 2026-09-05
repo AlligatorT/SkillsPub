@@ -69,7 +69,7 @@ test('Harness registry keeps an undetected Pi in setup and does not write state'
 
   assert.deepEqual(report.detected, []);
   const pi = report.available.find(({ key }) => key === 'pi');
-  assert.equal(pi?.support, 'managed');
+  assert.equal(pi?.support, 'discoverable');
   assert.equal(pi?.sharedConsumption.status, 'enabled');
   assert.equal(pi?.link.supported, true);
   assert.equal(pi?.targets[0]?.discoveryRoot, path.join(piHome, 'agent', 'skills'));
@@ -84,11 +84,11 @@ test('Pi inspection resolves Global and Project Pi Targets and observes Shared e
   fs.mkdirSync(path.join(project, '.pi'), { recursive: true });
   fs.writeFileSync(
     path.join(piHome, 'agent', 'settings.json'),
-    JSON.stringify({ skills: ['!skills/**'] }),
+    JSON.stringify({ skills: [`!${path.join(home.configDir, 'agents', 'skills')}/**`] }),
   );
   fs.writeFileSync(
     path.join(project, '.pi', 'settings.json'),
-    JSON.stringify({ skills: ['!skills/**'] }),
+    JSON.stringify({ skills: [`!${path.join(project, '.agents', 'skills')}/**`] }),
   );
 
   const report = inspectHarnesses(home, targets, project);
@@ -479,25 +479,43 @@ test('Pi reports an unknown Shared relationship for unrecognised settings', () =
 });
 
 test('Pi isolation plans, applies, verifies, and reconciles only its own Shared exclusion', () => {
-  const { home, targets, piHome } = setup();
+  const { home, targets, piHome, shared } = setup();
   const settings = path.join(piHome, 'agent', 'settings.json');
   fs.mkdirSync(path.dirname(settings), { recursive: true });
   fs.writeFileSync(settings, JSON.stringify({ theme: 'dark', skills: ['+local'] }, null, 2));
+  const sharedSkill = path.join(shared, 'shared-skill');
+  const piLink = path.join(piHome, 'agent', 'skills', 'shared-skill');
+  fs.mkdirSync(sharedSkill, { recursive: true });
+  fs.mkdirSync(path.dirname(piLink), { recursive: true });
+  fs.writeFileSync(path.join(sharedSkill, 'SKILL.md'), '# shared');
+  fs.symlinkSync(sharedSkill, piLink, 'dir');
 
   const plan = planHarnessOperation('pi', 'setup', home, targets);
   assert.match(plan.lines.join('\n'), /stop consuming Shared/i);
   assert.match(plan.lines.join('\n'), new RegExp(settings.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.equal(fs.existsSync(path.join(home.configDir, 'state.json')), false);
+  assert.equal(plan.relationshipImpact?.summary.unlinkedRelationships, 0);
+  assert.equal(plan.relationshipImpact?.summary.retainedRelationships, 1);
+  assert.equal(plan.relationshipImpact?.groups[0]?.relationships[0]?.plannedAction, 'retain');
+  assert.equal(plan.relationshipImpact?.groups[0]?.relationships[0]?.targetPath, piLink);
+  assert.ok(plan.recovery?.some((line) => /hash/i.test(line)));
 
   plan.apply();
-  plan.verify();
+  const inspection = plan.verify();
+  const result = plan.result?.(inspection);
   const applied = JSON.parse(fs.readFileSync(settings, 'utf8'));
-  assert.deepEqual(applied, { theme: 'dark', skills: ['+local', '!skills/**'] });
+  assert.deepEqual(applied, { theme: 'dark', skills: ['+local', `!${path.resolve(shared)}/**`] });
+  assert.doesNotMatch(applied.skills.join('\n'), /^!skills\/\*\*$/m);
   assert.equal(inspectHarnesses(home, targets).detected[0]?.sharedConsumption.status, 'excluded');
   assert.equal(inspectHarnesses(home, targets).detected[0]?.isolation.status, 'managed');
+  assert.ok(fs.existsSync(piLink));
+  assert.equal(result?.actual.retainedRelationships, 1);
+  assert.equal(result?.drift.relationships.length, 0);
+  assert.equal(result?.recovery.configBackupPreserved, true);
+  assert.equal(result?.recovery.manifestPreserved, true);
 
-  fs.writeFileSync(settings, JSON.stringify({ theme: 'dark', skills: ['!**'] }));
-  assert.equal(inspectHarnesses(home, targets).detected[0]?.sharedConsumption.status, 'excluded');
+  fs.writeFileSync(settings, JSON.stringify({ theme: 'dark', skills: [] }));
+  assert.equal(inspectHarnesses(home, targets).detected[0]?.sharedConsumption.status, 'enabled');
   assert.equal(inspectHarnesses(home, targets).detected[0]?.isolation.status, 'drift');
   const reconcile = planHarnessOperation('pi', 'reconcile', home, targets);
   assert.match(reconcile.lines.join('\n'), /add exclusion/);
@@ -507,16 +525,19 @@ test('Pi isolation plans, applies, verifies, and reconciles only its own Shared 
 });
 
 test('Pi isolation preserves an unowned equivalent exclusion and rejects unsafe writes', () => {
-  const { home, targets, piHome } = setup();
+  const { home, targets, piHome, shared } = setup();
   const settings = path.join(piHome, 'agent', 'settings.json');
   fs.mkdirSync(path.dirname(settings), { recursive: true });
-  fs.writeFileSync(settings, JSON.stringify({ theme: 'dark', skills: ['!skills/**'] }));
+  const safeUnowned = JSON.stringify({ theme: 'dark', skills: [`!${shared}/../skills/**`] });
+  fs.writeFileSync(settings, safeUnowned);
 
   const satisfied = planHarnessOperation('pi', 'setup', home, targets);
   assert.match(satisfied.lines.join('\n'), /already satisfied/);
   satisfied.apply();
   satisfied.verify();
+  assert.equal(fs.readFileSync(settings, 'utf8'), safeUnowned);
   assert.equal(fs.existsSync(path.join(home.configDir, 'state.json')), false);
+  assert.equal(fs.existsSync(path.join(home.configDir, 'pi-recovery')), false);
 
   fs.writeFileSync(settings, JSON.stringify({ theme: 'dark', skills: [] }));
   const plan = planHarnessOperation('pi', 'setup', home, targets);
@@ -531,7 +552,153 @@ test('Pi isolation preserves an unowned equivalent exclusion and rejects unsafe 
   );
   assert.equal(fs.readFileSync(settings, 'utf8'), JSON.stringify({ skills: {} }));
 
+  fs.writeFileSync(settings, JSON.stringify({ skills: ['!skills/**'] }));
+  assert.throws(
+    () => planHarnessOperation('pi', 'setup', home, targets),
+    /conflicts with the Global Pi Target/,
+  );
+  assert.equal(fs.existsSync(path.join(home.configDir, 'state.json')), false);
+
+  const exactExclusion = `!${path.resolve(shared)}/**`;
+  const sharedForcePath = path.join(shared, 'forced');
+  fs.writeFileSync(settings, JSON.stringify({ skills: [exactExclusion, `+${sharedForcePath}`] }));
+  assert.equal(inspectHarnesses(home, targets).detected[0]?.sharedConsumption.status, 'enabled');
+  assert.throws(
+    () => planHarnessOperation('pi', 'setup', home, targets),
+    /force-include conflicts with Global Shared isolation/,
+  );
+  assert.deepEqual(JSON.parse(fs.readFileSync(settings, 'utf8')).skills, [exactExclusion, `+${sharedForcePath}`]);
+
+  fs.writeFileSync(settings, JSON.stringify({
+    skills: [exactExclusion, `+${sharedForcePath}`, `-${sharedForcePath}`],
+  }));
+  assert.equal(inspectHarnesses(home, targets).detected[0]?.sharedConsumption.status, 'excluded');
+  const forceExcluded = planHarnessOperation('pi', 'setup', home, targets);
+  forceExcluded.apply();
+  forceExcluded.verify();
+  assert.equal(fs.existsSync(path.join(home.configDir, 'state.json')), false);
+
   fs.writeFileSync(settings, JSON.stringify({ skills: ['!skills/skillspub-probe/**'] }));
   assert.equal(inspectHarnesses(home, targets).detected[0]?.sharedConsumption.status, 'enabled');
   assert.match(planHarnessOperation('pi', 'setup', home, targets).lines.join('\n'), /add exclusion/);
+
+  fs.writeFileSync(settings, JSON.stringify({ skills: ['!~/.agents/skills/**'] }));
+  assert.equal(inspectHarnesses(home, targets).detected[0]?.sharedConsumption.status, 'enabled');
+  assert.match(planHarnessOperation('pi', 'setup', home, targets).lines.join('\n'), /add exclusion/);
+});
+
+test('Pi reconcile releases stale ownership when a safe equivalent exclusion replaces its exact rule', () => {
+  const { home, targets, piHome, shared } = setup();
+  const settings = path.join(piHome, 'agent', 'settings.json');
+  fs.mkdirSync(path.dirname(settings), { recursive: true });
+  fs.writeFileSync(settings, JSON.stringify({ skills: [] }));
+
+  const setupPlan = planHarnessOperation('pi', 'setup', home, targets);
+  setupPlan.apply();
+  setupPlan.verify();
+
+  const ownedSettings = JSON.parse(fs.readFileSync(settings, 'utf8'));
+  const reformattedSettings = JSON.stringify({ ...ownedSettings, theme: 'dark' });
+  fs.writeFileSync(settings, reformattedSettings);
+  assert.equal(inspectHarnesses(home, targets).detected[0]?.isolation.status, 'drift');
+  const hashReconcile = planHarnessOperation('pi', 'reconcile', home, targets);
+  assert.equal(hashReconcile.relationshipImpact?.configuration.plannedAction, 'retain');
+  assert.equal(hashReconcile.relationshipImpact?.ownershipState?.plannedAction, 'write');
+  hashReconcile.apply();
+  hashReconcile.verify();
+  assert.equal(fs.readFileSync(settings, 'utf8'), reformattedSettings);
+  assert.equal(inspectHarnesses(home, targets).detected[0]?.isolation.status, 'managed');
+
+  const equivalent = `!${shared}/../skills/**`;
+  const equivalentSettings = JSON.stringify({ skills: [equivalent] });
+  fs.writeFileSync(settings, equivalentSettings);
+  assert.equal(inspectHarnesses(home, targets).detected[0]?.isolation.status, 'drift');
+
+  const reconcile = planHarnessOperation('pi', 'reconcile', home, targets);
+  assert.equal(reconcile.relationshipImpact?.configuration.plannedAction, 'retain');
+  assert.equal(reconcile.relationshipImpact?.ownershipState?.plannedAction, 'write');
+  reconcile.apply();
+  reconcile.verify();
+
+  assert.equal(fs.readFileSync(settings, 'utf8'), equivalentSettings);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(home.configDir, 'state.json'), 'utf8')).piIsolation, undefined);
+  assert.equal(inspectHarnesses(home, targets).detected[0]?.isolation.status, 'unmanaged');
+});
+
+test('Pi Global operation ignores exact-Project settings and rechecks Global state and Relationships', () => {
+  const { home, targets, piHome, shared } = setup();
+  const settings = path.join(piHome, 'agent', 'settings.json');
+  const project = path.join(home.configDir, 'project');
+  const projectSettings = path.join(project, '.pi', 'settings.json');
+  const projectState = path.join(project, '.skillspub', 'state.json');
+  const sharedSkill = path.join(shared, 'example');
+  const piLink = path.join(piHome, 'agent', 'skills', 'example');
+  fs.mkdirSync(path.dirname(settings), { recursive: true });
+  fs.mkdirSync(path.dirname(projectSettings), { recursive: true });
+  fs.mkdirSync(path.dirname(projectState), { recursive: true });
+  fs.mkdirSync(sharedSkill, { recursive: true });
+  fs.mkdirSync(path.dirname(piLink), { recursive: true });
+  fs.writeFileSync(settings, JSON.stringify({ theme: 'dark' }));
+  fs.writeFileSync(projectSettings, '{malformed');
+  fs.writeFileSync(projectState, '{"project":true}');
+  fs.writeFileSync(path.join(sharedSkill, 'SKILL.md'), '# example');
+  fs.symlinkSync(sharedSkill, piLink, 'dir');
+
+  const stale = planHarnessOperation('pi', 'setup', home, targets, project);
+  assert.match(stale.lines.join('\n'), /Global only/);
+  fs.writeFileSync(path.join(home.configDir, 'state.json'), '{"external":true}');
+  assert.throws(() => stale.apply(), /state changed after preview/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(settings, 'utf8')), { theme: 'dark' });
+  assert.equal(fs.existsSync(path.join(home.configDir, 'pi-recovery')), false);
+
+  const fresh = planHarnessOperation('pi', 'setup', home, targets, project);
+  fs.rmSync(piLink);
+  assert.throws(() => fresh.apply(), /Relationships changed after preview/);
+  assert.equal(fs.existsSync(path.join(home.configDir, 'pi-recovery')), false);
+  fs.symlinkSync(sharedSkill, piLink, 'dir');
+  const retry = planHarnessOperation('pi', 'setup', home, targets, project);
+  retry.apply();
+  retry.verify();
+
+  assert.equal(fs.readFileSync(projectSettings, 'utf8'), '{malformed');
+  assert.equal(fs.readFileSync(projectState, 'utf8'), '{"project":true}');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(home.configDir, 'state.json'), 'utf8')).external, true);
+  assert.ok(fs.existsSync(piLink));
+});
+
+test('Pi failed writes preserve recovery evidence and retry from fresh inspection', () => {
+  const { home, targets, piHome } = setup();
+  const settings = path.join(piHome, 'agent', 'settings.json');
+  const state = path.join(home.configDir, 'state.json');
+  fs.mkdirSync(path.dirname(settings), { recursive: true });
+  fs.writeFileSync(settings, JSON.stringify({ theme: 'dark' }));
+
+  const failed = planHarnessOperation('pi', 'setup', home, targets);
+  const renameSync = fs.renameSync;
+  fs.renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
+    if (String(to) === settings) throw new Error('simulated settings rename failure');
+    return renameSync(from, to);
+  }) as typeof fs.renameSync;
+  try {
+    assert.throws(() => failed.apply(), (error: unknown) => {
+      assert.match((error as Error).message, /simulated settings rename failure/);
+      assert.equal((error as Error & { partialEffects?: string }).partialEffects, 'present');
+      return true;
+    });
+  } finally {
+    fs.renameSync = renameSync;
+  }
+
+  assert.deepEqual(JSON.parse(fs.readFileSync(settings, 'utf8')), { theme: 'dark' });
+  assert.ok(JSON.parse(fs.readFileSync(state, 'utf8')).piIsolation);
+  const recoveryDir = path.join(home.configDir, 'pi-recovery');
+  const manifestPath = path.join(recoveryDir, fs.readdirSync(recoveryDir).find((entry) => entry.endsWith('.paths.json'))!);
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  assert.equal(manifest.settings.backupHash, manifest.settings.originalHash);
+  assert.equal(manifest.state.backupHash, manifest.state.originalHash);
+
+  const retry = planHarnessOperation('pi', 'reconcile', home, targets);
+  retry.apply();
+  retry.verify();
+  assert.equal(inspectHarnesses(home, targets).detected[0]?.isolation.status, 'managed');
 });

@@ -715,13 +715,13 @@ function cmdHarnesses(
     plan.apply();
     inspection = plan.verify();
   } catch (error) {
-    const cause = error as Error & { code?: string };
+    const cause = error as Error & { code?: string; partialEffects?: 'none' | 'present' | 'unknown' };
     throw new CliError(
       cause.code === 'concurrent_modification' ? 'concurrent_modification' : 'apply_failed',
       cause.message,
       1,
       {
-        partialEffects: cause.code === 'concurrent_modification' ? 'none' : 'unknown',
+        partialEffects: cause.partialEffects ?? (cause.code === 'concurrent_modification' ? 'none' : 'unknown'),
         recovery: plan.recovery ?? [],
       },
     );
@@ -748,6 +748,10 @@ function cmdHarnesses(
         `isolation ${result.drift.isolation ? 'yes' : 'no'}`,
       );
       console.log(`Isolation: ${result.isolation.status} — ${result.isolation.detail}`);
+      if (result.sharedConsumption)
+        console.log(`Shared consumption: ${result.sharedConsumption.status} — ${result.sharedConsumption.detail}`);
+      if (result.effectiveVisibility)
+        console.log(`Effective Visibility: ${result.effectiveVisibility.status} — ${result.effectiveVisibility.detail}`);
       console.log('Relationship effects:');
       for (const effect of result.relationshipEffects) {
         console.log(
@@ -759,6 +763,7 @@ function cmdHarnesses(
       }
       console.log(
         `Recovery evidence: config backup ${result.recovery.configBackupPreserved ? 'preserved' : 'missing'}; ` +
+        `${result.recovery.stateBackupPreserved === undefined ? '' : `state backup ${result.recovery.stateBackupPreserved ? 'preserved' : 'missing'}; `}` +
         `affected-Link manifest ${result.recovery.manifestPreserved ? 'preserved' : 'missing'}; ` +
         `${result.recovery.manifestPath}`,
       );

@@ -787,7 +787,7 @@ test('harnesses reports detected Pi support and Shared consumption without write
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Detected Harnesses:/);
-  assert.match(result.stdout, /pi\s+managed\s+Shared enabled\s+Isolation unmanaged\s+Link supported/);
+  assert.match(result.stdout, /pi\s+discoverable\s+Shared enabled\s+Isolation unmanaged\s+Link supported/);
   assert.match(result.stdout, /evidence\s+v0\.54\.0/);
   assert.match(result.stdout, /Available Harnesses:\nclaude\s+managed\s+Shared not-consumed\s+Isolation not-required\s+Link supported/);
   assert.deepEqual(fs.readdirSync(configDir).sort(), before);
@@ -799,6 +799,12 @@ test('Pi setup previews, confirms, and explicitly reconciles its managed Shared 
   const shared = path.join(configDir, 'agents', 'skills');
   fs.mkdirSync(path.join(piHome, 'agent'), { recursive: true });
   fs.writeFileSync(path.join(piHome, 'agent', 'settings.json'), JSON.stringify({ theme: 'dark' }));
+  const sharedSkill = path.join(shared, 'example');
+  const piLink = path.join(piHome, 'agent', 'skills', 'example');
+  fs.mkdirSync(sharedSkill, { recursive: true });
+  fs.mkdirSync(path.dirname(piLink), { recursive: true });
+  fs.writeFileSync(path.join(sharedSkill, 'SKILL.md'), '# example');
+  fs.symlinkSync(sharedSkill, piLink, 'dir');
   fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
     version: 1,
     overrides: [
@@ -822,16 +828,19 @@ test('Pi setup previews, confirms, and explicitly reconciles its managed Shared 
 
   const preview = run(['harnesses', 'pi', 'setup']);
   assert.equal(preview.status, 0, preview.stderr);
-  assert.match(preview.stdout, /Pi isolation plan:/);
+  assert.match(preview.stdout, /Pi Global isolation plan:/);
   assert.match(preview.stdout, /stop consuming Shared/i);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(piHome, 'agent', 'settings.json'), 'utf8')), { theme: 'dark' });
 
   const applied = run(['harnesses', 'pi', 'setup', '--yes']);
   assert.equal(applied.status, 0, applied.stderr);
   assert.match(applied.stdout, /verified/i);
+  assert.match(applied.stdout, /Shared consumption:\s*excluded/i);
+  assert.match(applied.stdout, /Effective Visibility:\s*unknown.*resource-specific explain/i);
+  assert.doesNotMatch(applied.stdout, /running Pi process reloaded/i);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(piHome, 'agent', 'settings.json'), 'utf8')), {
     theme: 'dark',
-    skills: ['!skills/**'],
+    skills: [`!${path.resolve(shared)}/**`],
   });
 
   fs.writeFileSync(path.join(piHome, 'agent', 'settings.json'), JSON.stringify({ theme: 'dark' }));
@@ -851,6 +860,12 @@ test('Pi setup previews, confirms, and explicitly reconciles its managed Shared 
   assert.equal(reconcilePreview.stderr, '');
   const reconcilePreviewDocument = JSON.parse(reconcilePreview.stdout);
   assert.equal(reconcilePreviewDocument.data.applied, false);
+  assert.equal(reconcilePreviewDocument.data.plan.relationshipImpact.summary.unlinkedRelationships, 0);
+  assert.equal(reconcilePreviewDocument.data.plan.relationshipImpact.summary.retainedRelationships, 1);
+  assert.equal(reconcilePreviewDocument.data.plan.relationshipImpact.groups[0].relationships[0].plannedAction, 'retain');
+  assert.equal(reconcilePreviewDocument.data.plan.relationshipImpact.groups[0].relationships[0].targetPath, piLink);
+  assert.equal(reconcilePreviewDocument.data.plan.relationshipImpact.ownershipState.path, path.join(configDir, 'state.json'));
+  assert.match(reconcilePreviewDocument.data.plan.recovery.join('\n'), /Hash-check/);
   assert.equal(fs.readFileSync(settingsFile, 'utf8'), beforeJsonPreview);
 
   const reconciled = run(['harnesses', 'pi', 'reconcile', '--yes', '--json']);
@@ -860,6 +875,12 @@ test('Pi setup previews, confirms, and explicitly reconciles its managed Shared 
   assert.equal(reconciledDocument.data.applied, true);
   assert.deepEqual(reconciledDocument.data.plan, reconcilePreviewDocument.data.plan);
   assert.equal(reconciledDocument.data.result.inspection.isolation.status, 'managed');
+  assert.equal(reconciledDocument.data.result.inspection.support, 'discoverable');
+  assert.equal(reconciledDocument.data.result.actual.retainedRelationships, 1);
+  assert.equal(reconciledDocument.data.result.sharedConsumption.status, 'excluded');
+  assert.equal(reconciledDocument.data.result.effectiveVisibility.status, 'unknown');
+  assert.equal(reconciledDocument.data.result.recovery.stateBackupPreserved, true);
+  assert.ok(fs.existsSync(piLink));
 });
 
 test('Claude Code inspect is read-only and setup reports its unsupported optional capability', () => {

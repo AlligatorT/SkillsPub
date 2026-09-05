@@ -245,14 +245,17 @@ function RowLine({
 
 export function HarnessBadge({
   harness,
+  compact = false,
 }: {
   harness: Pick<HarnessSummary, 'support' | 'isolation'>;
+  compact?: boolean;
 }): ReactNode {
   const badge = harnessStatusBadge(harness);
+  const text = compact && harness.support === 'discoverable' ? '[discover]' : badge.text;
   return h(Text, {
     color: badge.tone === 'success' ? 'green' : badge.tone === 'danger' ? 'red' : badge.tone === 'warning' ? 'yellow' : undefined,
     dimColor: badge.tone === 'muted',
-  }, ` ${badge.text}`);
+  }, ` ${text}`);
 }
 
 function HarnessRow({harness}: {harness: HarnessSummary}): ReactNode {
@@ -260,7 +263,7 @@ function HarnessRow({harness}: {harness: HarnessSummary}): ReactNode {
     Box,
     {width: '100%'},
     h(Box, {flexGrow: 1, flexShrink: 1}, h(Text, {dimColor: true, wrap: 'truncate-end'}, `  ${harness.name}`)),
-    h(Box, {flexShrink: 0}, h(HarnessBadge, {harness})),
+    h(Box, {flexShrink: 0}, h(HarnessBadge, {harness, compact: true})),
   );
 }
 
