@@ -49,6 +49,7 @@ import {
   planSharedRemove,
   planSharedUpdate,
   sharedRemove,
+  sharedRemoveCascade,
   sharedRefresh,
   sharedOutdated,
   sharedUpdate,
@@ -1301,30 +1302,68 @@ function cmdShared(
       return { applied: true, plan, result, remainingDrift: result.drift };
     }
     case 'remove': {
-      const { values, positionals } = parseArgs({
+      const {values, positionals} = parseArgs({
         args: rest,
-        options: { yes: { type: 'boolean' } },
+        options: {
+          yes: {type: 'boolean'},
+          cascade: {type: 'boolean'},
+        },
         allowPositionals: true,
         strict: true,
       });
-      if (positionals.length === 0)
-        throw new Error('usage: skillspub shared remove <managed-name...> [--yes]');
+      if (positionals.length !== 1)
+        throw new Error('usage: skillspub shared remove <managed-name> [--cascade|--yes]');
+      const cascadeRequested = Boolean(values.cascade);
+      const yes = json ? confirmed : Boolean(values.yes);
+      const sourceConfirmed = yes && !cascadeRequested;
       const preview = planSharedRemove(home, positionals, projectPath);
-      if (json && !confirmed) return { applied: false, plan: preview };
       if (!json) {
         console.log('Removal plan:');
+        console.log(`  Source: ${preview.source.provenance} ${preview.source.path}`);
         if (preview.dependencies.length === 0) console.log('  no scanned dependent Relationships');
         else for (const dependency of preview.dependencies)
-          console.log(`  - ${dependency.targetId}/${dependency.slot}: ${dependency.form} ${dependency.path}`);
+          console.log(
+            `  - ${dependency.targetId}/${dependency.slot}: ${dependency.form}/${dependency.activation} ` +
+            `source=${dependency.source} target=${dependency.path} action=${dependency.plannedAction} ` +
+            `fingerprint=${dependency.fingerprint}`,
+          );
+        for (const blocker of preview.blockers) console.log(`Blocker: ${blocker}`);
         for (const warning of preview.warnings) console.log(`Warning: ${warning}`);
+        console.log(`Recovery manifest: ${preview.recovery.manifest}`);
+      }
+      if (!json && preview.blockers.length > 0)
+        throw new Error(preview.blockers.join('; '));
+      if (!cascadeRequested && !sourceConfirmed) {
+        if (json) return {applied: false, phase: 'preview', plan: preview};
+        throw new Error('confirm the complete Relationship cascade with --cascade --yes');
+      }
+      if (cascadeRequested && !yes) {
+        if (json) return {applied: false, phase: 'cascade-preview', plan: preview, requiredOption: '--yes'};
+        throw new Error('Relationship cascade requires --cascade --yes');
+      }
+      if (cascadeRequested) {
+        const result = sharedRemoveCascade(home, positionals, preview, projectPath);
+        if (json) return {
+          applied: true,
+          phase: 'cascade',
+          plan: preview,
+          result,
+          nextConfirmation: 'source-deletion',
+        };
+        console.log('Relationship cascade complete.');
+        console.log(`Completed work: ${result.completedWork?.join(', ') || 'no dependent Relationships'}`);
+        console.log(`Recovery manifest: ${result.recoveryManifest}`);
+        console.log(`Confirm source deletion separately with: skillspub shared remove ${preview.source.name} --yes`);
+        break;
       }
       const result = sharedRemove(home, positionals, {
-        cascadeConfirmed: json ? true : Boolean(values.yes),
+        sourceConfirmed: true,
         projectPath,
         expected: preview,
       });
-      if (json) return { applied: true, plan: preview, result, remainingDrift: result.drift };
+      if (json) return {applied: true, phase: 'source', plan: preview, result, remainingDrift: result.drift};
       console.log(`Actual: ${result.actual}`);
+      console.log(`Completed work: ${result.completedWork?.join(', ')}`);
       console.log(`Remaining drift: ${result.drift.join(', ') || 'none'}`);
       console.log('Running Harnesses must reload/restart to read the final Shared Target state.');
       break;

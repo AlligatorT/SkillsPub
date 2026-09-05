@@ -283,6 +283,23 @@ if (args[2] === 'add') {
   fs.writeFileSync(lockFile, JSON.stringify(lock));
   process.exit(0);
 }
+if (args[2] === 'remove') {
+  if (process.env.TUI_NPX_FAIL_ONCE && !fs.existsSync(process.env.TUI_NPX_FAIL_ONCE)) {
+    fs.writeFileSync(process.env.TUI_NPX_FAIL_ONCE, 'failed');
+    process.exit(7);
+  }
+  const names = args.slice(3, args.indexOf('--agent')).filter((arg) => !arg.startsWith('-'));
+  const lockFile = args.includes('--global')
+    ? path.join(process.env.HOME, '.agents', '.skill-lock.json')
+    : path.join(process.cwd(), 'skills-lock.json');
+  const lock = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
+  for (const name of names) {
+    fs.rmSync(path.join(base, '.agents', 'skills', name), {recursive: true, force: true});
+    delete lock.skills[name];
+  }
+  fs.writeFileSync(lockFile, JSON.stringify(lock));
+  process.exit(0);
+}
 if (args[2] !== 'update') process.exit(2);
 const names = args.slice(3).filter((arg) => !arg.startsWith('-'));
 const failed = new Set(JSON.parse(process.env.TUI_NPX_FAIL_NAMES || '[]'));
@@ -465,6 +482,113 @@ test('Source Catalog search keeps same-name candidates distinct and traps detail
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].args.slice(0, 3), ['--yes', 'skills@1.5.21', 'find']);
   assert.equal(calls[0].cwd, fs.realpathSync(fixture.project));
+});
+
+test('Source remove previews the full cascade and requires separate cascade and source confirmations', async (context) => {
+  const fixture = setupManagedTui([
+    {name: 'managed', source: 'owner/repo', hash: 'managed-hash'},
+  ]);
+  useFixtureEnv(context, fixture.env);
+  const consumer = path.join(fixture.env.HOME, '.consumer', 'skills');
+  const linked = path.join(consumer, 'managed');
+  fs.mkdirSync(consumer, {recursive: true});
+  fs.symlinkSync(path.join(fixture.discovery, 'managed'), linked, 'dir');
+  const targetsFile = path.join(fixture.home.configDir, 'targets.json');
+  const targets = JSON.parse(fs.readFileSync(targetsFile, 'utf8'));
+  targets.genericTargets.push({
+    key: 'consumer', kind: 'generic', discoveryRoot: consumer,
+    parkingRoot: path.join(fixture.env.HOME, '.consumer', 'off'), projectPath: '.consumer/skills',
+  });
+  fs.writeFileSync(targetsFile, JSON.stringify(targets));
+
+  const t = await renderApp(fixture.home, 140, 38);
+  await t.send('3');
+  await t.send('\t');
+  assert.match(t.stdout.frame(), /d remove/);
+  await t.send('d');
+  let frame = t.stdout.frame();
+  assert.match(frame, /Source Remove plan/);
+  assert.match(frame, /consumer/);
+  assert.match(frame, /link\/on/);
+  assert.match(frame, /Relationship effects: 1/);
+  assert.match(frame, /Source fingerprint:/);
+  await t.send('\x1b');
+  assert.ok(fs.existsSync(path.join(fixture.discovery, 'managed', 'SKILL.md')));
+  assert.ok(fs.lstatSync(linked).isSymbolicLink());
+
+  await t.send('d');
+  await t.send('\r');
+  assert.match(t.stdout.frame(), /Confirm complete Relationship cascade/);
+  await t.send('\r');
+  frame = await waitForFrame(t, /Confirm Vercel skills source deletion/);
+  assert.equal(fs.existsSync(linked), false);
+  assert.ok(fs.existsSync(path.join(fixture.discovery, 'managed', 'SKILL.md')));
+  await t.send('\r');
+  frame = await waitForFrame(t, /Source operation — Verify truth/);
+  assert.match(frame, /Actual: .*missing/);
+  assert.match(frame, /Desired: removed/);
+  assert.match(frame, /Drift:/);
+  assert.match(frame, /Provenance:/);
+  assert.match(frame, /Relationship effects:/);
+  assert.equal(fs.existsSync(path.join(fixture.discovery, 'managed')), false);
+  t.unmount();
+});
+
+test('Project Source removal stays in the exact Project scope', async (context) => {
+  const fixture = setupManagedTui([
+    {name: 'project-managed', source: 'owner/project', hash: 'managed-hash'},
+  ], true);
+  useFixtureEnv(context, fixture.env);
+  const t = await renderApp(fixture.home, 120, 34, fixture.project);
+  await t.send('3');
+  await t.send('\t');
+  await t.send('d');
+  assert.match(t.stdout.frame(), /Scope: exact Project/);
+  await t.send('\r');
+  await t.send('\r');
+  await waitForFrame(t, /Confirm Vercel skills source deletion/);
+  await t.send('\r');
+  const frame = await waitForFrame(t, /Source operation — Verify truth/);
+  assert.match(frame, /Desired: removed/);
+  const call = JSON.parse(fs.readFileSync(fixture.npxLog, 'utf8').trim());
+  assert.equal(call.cwd, fs.realpathSync(fixture.project));
+  assert.equal(call.args.includes('--global'), false);
+  assert.equal(fs.existsSync(path.join(fixture.discovery, 'project-managed')), false);
+  t.unmount();
+});
+
+test('failed Source deletion keeps cascade evidence and retries only the source step', async (context) => {
+  const fixture = setupManagedTui([
+    {name: 'retry-remove', source: 'owner/retry', hash: 'managed-hash'},
+  ]);
+  const failOnce = path.join(fixture.project, 'remove-failed-once');
+  useFixtureEnv(context, {...fixture.env, TUI_NPX_FAIL_ONCE: failOnce});
+  const t = await renderApp(fixture.home, 120, 34);
+  await t.send('3');
+  await t.send('\t');
+  await t.send('d');
+  await t.send('\r');
+  await t.send('\r');
+  await waitForFrame(t, /Confirm Vercel skills source deletion/);
+  await t.send('\r');
+  let frame = await waitForFrame(t, /Source operation — failed/);
+  assert.match(frame, /Raw log:/);
+  assert.match(frame, /Relationship cascade succeeded/);
+  assert.match(frame, /recovery manifest succeeded/);
+  assert.match(frame, /Vercel skills remove failed/);
+  await t.send('l');
+  assert.match(t.stdout.frame(), /Source operation log & evidence/);
+  assert.match(t.stdout.frame(), /Evidence:/);
+  await t.send('\x1b');
+  assert.ok(fs.existsSync(path.join(fixture.discovery, 'retry-remove', 'SKILL.md')));
+  await t.send('t');
+  frame = await waitForFrame(t, /Source operation — Verify truth/);
+  assert.match(frame, /Desired: removed/);
+  assert.equal(fs.existsSync(path.join(fixture.discovery, 'retry-remove')), false);
+  const calls = fs.readFileSync(fixture.npxLog, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every(({args}) => args[2] === 'remove' && !args.includes('--all')));
+  t.unmount();
 });
 
 test('Source Add and explicit Replace run A+C preview, cancellation, confirmation, and Verify truth in both scopes', async (context) => {

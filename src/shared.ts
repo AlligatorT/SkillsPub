@@ -39,6 +39,8 @@ import type { Home } from './core.ts';
 export interface SharedCommandResult {
   actual: string;
   drift: string[];
+  recoveryManifest?: string;
+  completedWork?: string[];
 }
 
 export interface SharedFindResult {
@@ -90,20 +92,83 @@ interface Target {
 }
 
 export interface SharedRemovalDependency {
+  scope: 'global' | 'project' | 'parent';
   targetId: string;
+  targetKey: string;
+  name: string;
   slot: string;
   form: 'link' | 'mirror';
+  activation: 'on' | 'off';
   path: string;
+  source: string;
   resourceId: string;
   fingerprint: string;
+  plannedAction: 'delete';
 }
 
 export interface SharedRemovalPlan {
   operation: 'shared.remove';
   targetId: string;
   slots: string[];
+  source: {
+    name: string;
+    slot: string;
+    path: string;
+    provenance: string;
+    fingerprint: string;
+  };
+  scope: {kind: 'global' | 'project'; path: string};
+  target: {
+    discoveryRoot: string;
+    parkingRoot: string;
+    stateFile: string;
+    lockFile: string;
+  };
+  sourceAdapter: {
+    package: string;
+    removeOwner: 'vercel-skills';
+    proceedOwner: 'vercel-skills';
+  };
+  preconditions: {
+    sourceEntry: {path: string; state: 'missing' | 'present'; hash: string};
+    lock: {path: string; hash: string; owner: 'vercel-skills' | 'unknown'};
+    policy: {path: string; hash: string};
+    permissions: {
+      source: 'writable' | 'blocked';
+      state: 'writable' | 'blocked';
+      lock: 'writable' | 'blocked';
+      dependencies: Array<{path: string; status: 'writable' | 'blocked'}>;
+    };
+  };
+  selection: {
+    included: Array<{identity: string; reason: string}>;
+    excluded: Array<{identity: string; reason: string}>;
+  };
   dependencies: SharedRemovalDependency[];
+  blockers: string[];
   warnings: string[];
+  cascadeConfirmed: boolean;
+  recovery: {
+    operationLock: string;
+    manifest: string;
+    evidence: string[];
+    completedWork: 'preserved';
+  };
+  currentTruth: {
+    actual: string;
+    desired: 'on' | 'off' | 'unknown';
+    drift: string;
+    source: string;
+    relationships: number;
+  };
+  expectedFinalTruth: {
+    actual: string;
+    desired: 'removed';
+    drift: 'none';
+    source: 'removed';
+    relationships: 0;
+    effectiveVisibility: 'recompute-after-rescan';
+  };
 }
 
 export interface SharedRelationshipEffect {
@@ -188,6 +253,7 @@ export interface SharedMutationPlan {
 }
 
 interface StagedDependencies {
+  stagingRoot: string;
   rollback(): void;
   commit(): void;
 }
@@ -448,39 +514,48 @@ function dependencyFingerprint(
   form: SharedRemovalDependency['form'],
   entryPath: string,
 ): string {
-  const stat = fs.lstatSync(entryPath, { throwIfNoEntry: false });
+  const stat = fs.lstatSync(entryPath, {throwIfNoEntry: false});
   if (!stat || (form === 'link' && !stat.isSymbolicLink()))
     throw new Error(`relationship disappeared during preview: ${entryPath}`);
   return form === 'link' ? fs.readlinkSync(entryPath) : hashDirectory(entryPath);
 }
 
-function removalDependencies(target: Target, selected: NpxManagedSkill[]): SharedRemovalDependency[] {
-  const sourceIds = new Set(selected.map((skill) => {
-    const current = relationship(target, skill.slot);
-    if (!current?.resourceId) throw new Error(`installer lock/file mismatch: ${skill.name}`);
-    return current.resourceId;
-  }));
-  const relationships = target.report.relationships.filter((item) =>
-    item.targetId !== target.target.id &&
-    (item.form === 'link' || item.form === 'mirror') && item.resourceId &&
-    sourceIds.has(item.resourceId));
-  const readOnly = relationships.find((item) => item.readOnly);
-  if (readOnly)
-    throw new Error(`cannot remove Shared source with read-only dependent Relationship: ${readOnly.path}`);
-  return relationships
-    .map(({ targetId, slot, form, path: entryPath, resourceId }) => {
-      if (!resourceId) throw new Error(`relationship disappeared during preview: ${entryPath}`);
-      const dependencyForm = form as 'link' | 'mirror';
-      return {
-        targetId,
-        slot,
-        form: dependencyForm,
-        path: entryPath,
-        resourceId,
-        fingerprint: dependencyFingerprint(dependencyForm, entryPath),
-      };
-    })
-    .sort((a, b) => a.path.localeCompare(b.path));
+function pathIsWithin(root: string, entryPath: string): boolean {
+  const relative = path.relative(root, entryPath);
+  return relative !== '' && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative);
+}
+
+function removalManifestPath(target: Target, slot: string): string {
+  const id = crypto.createHash('sha256').update(`${target.target.id}\0${slot}`).digest('hex').slice(0, 12);
+  return `${target.lockFile}.skillspub-remove-${id}.json`;
+}
+
+function removalDependencies(
+  target: Target,
+  source: TargetRelationship,
+): SharedRemovalDependency[] {
+  if (!source.resourceId) return [];
+  return target.report.relationships
+    .filter((item) => item.path !== source.path &&
+      (item.form === 'link' || item.form === 'mirror') && item.resourceId === source.resourceId)
+    .map((item): SharedRemovalDependency => ({
+      scope: target.report.targets.find(({id}) => id === item.targetId)?.scope ?? 'global',
+      targetId: item.targetId,
+      targetKey: item.targetKey,
+      name: item.name,
+      slot: item.slot,
+      form: item.form as 'link' | 'mirror',
+      activation: item.activation,
+      path: item.path,
+      source: source.path,
+      resourceId: item.resourceId!,
+      fingerprint: dependencyFingerprint(item.form as 'link' | 'mirror', item.path),
+      plannedAction: 'delete',
+    }))
+    .sort((left, right) =>
+      left.scope.localeCompare(right.scope) ||
+      left.targetId.localeCompare(right.targetId) ||
+      left.path.localeCompare(right.path));
 }
 
 function sameDependencies(
@@ -491,6 +566,53 @@ function sameDependencies(
     JSON.stringify(dependency) === JSON.stringify(actual[index]));
 }
 
+function removalBlockers(
+  target: Target,
+  skill: NpxManagedSkill,
+  source: TargetRelationship | undefined,
+  sourceRelationships: TargetRelationship[],
+  dependencies: SharedRemovalDependency[],
+): string[] {
+  const claims = claimedSlots(readStateFile(target.report.stateFile));
+  const blockers: string[] = [];
+  if (sourceRelationships.length !== 1)
+    blockers.push(`Target Slot ${target.target.id}/${skill.slot} has unresolved same-name or ON/OFF conflicts.`);
+  if (source) {
+    if (source.form !== 'local' || !source.resourceId)
+      blockers.push('Shared source ownership is unknown; expected one local Vercel-managed resource.');
+    if (!pathIsWithin(target.target.discoveryRoot, source.path) &&
+      !pathIsWithin(target.target.parkingRoot, source.path))
+      blockers.push(`unsafe Shared source path: ${source.path}`);
+  } else {
+    blockers.push(`installer lock/file mismatch: ${skill.name}`);
+  }
+  if (!skill.provenance.source && !skill.provenance.sourceUrl)
+    blockers.push('Shared source ownership is not proven by the Vercel skills lock.');
+  if (source && writableAt(path.dirname(source.path)) === 'blocked')
+    blockers.push(`Shared source parent is not writable: ${path.dirname(source.path)}`);
+  if (writableAt(path.dirname(target.lockFile)) === 'blocked')
+    blockers.push(`Source lock directory is not writable: ${path.dirname(target.lockFile)}`);
+  if (writableAt(path.dirname(target.report.stateFile)) === 'blocked')
+    blockers.push(`policy state directory is not writable: ${path.dirname(target.report.stateFile)}`);
+  const sourceSlotId = `${target.target.id}\0${skill.slot}`;
+  if (claims.has(sourceSlotId))
+    blockers.push(`cannot remove claimed Target Slot ${sourceSlotId.replace('\0', '/')}`);
+  for (const dependency of dependencies) {
+    const slotId = `${dependency.targetId}\0${dependency.slot}`;
+    if (claims.has(slotId))
+      blockers.push(`cannot remove claimed Target Slot ${slotId.replace('\0', '/')}`);
+    const dependencyTarget = target.report.targets.find(({id}) => id === dependency.targetId);
+    if (dependencyTarget && !pathIsWithin(dependencyTarget.discoveryRoot, dependency.path) &&
+      !pathIsWithin(dependencyTarget.parkingRoot, dependency.path))
+      blockers.push(`unsafe dependent Relationship path: ${dependency.path}`);
+    if (target.report.relationships.find((item) => item.path === dependency.path)?.readOnly)
+      blockers.push(`cannot remove Shared source with read-only dependent Relationship: ${dependency.path}`);
+    if (writableAt(path.dirname(dependency.path)) === 'blocked')
+      blockers.push(`dependent Relationship parent is not writable: ${path.dirname(dependency.path)}`);
+  }
+  return [...new Set(blockers)];
+}
+
 function assertRemovalDependenciesAllowed(target: Target, dependencies: SharedRemovalDependency[]): void {
   const claims = claimedSlots(readStateFile(target.report.stateFile));
   for (const dependency of dependencies) {
@@ -498,7 +620,7 @@ function assertRemovalDependenciesAllowed(target: Target, dependencies: SharedRe
     if (claims.has(slotId))
       throw new Error(`cannot remove claimed Target Slot ${slotId.replace('\0', '/')}`);
     if (dependencyFingerprint(dependency.form, dependency.path) !== dependency.fingerprint)
-      throw new Error(`relationship changed during preview: ${dependency.path}`);
+      throw concurrentModification(`dependent Relationship changed after preview: ${dependency.path}`);
   }
 }
 
@@ -506,44 +628,80 @@ function stageDependencies(target: Target, dependencies: SharedRemovalDependency
   if (dependencies.length === 0) return undefined;
   assertRemovalDependenciesAllowed(target, dependencies);
   const root = fs.mkdtempSync(path.join(path.dirname(target.lockFile), '.skillspub-remove-'));
-  const staged: Array<{ from: string; to: string }> = [];
+  const staged: Array<{from: string; to: string}> = [];
   const rollback = (): void => {
     for (const item of staged.toReversed()) fs.renameSync(item.to, item.from);
-    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(root, {recursive: true, force: true});
   };
   try {
     for (const [index, dependency] of dependencies.entries()) {
       assertRemovalDependenciesAllowed(target, [dependency]);
       const destination = path.join(root, String(index));
       fs.renameSync(dependency.path, destination);
-      staged.push({ from: dependency.path, to: destination });
+      staged.push({from: dependency.path, to: destination});
     }
   } catch (error) {
     rollback();
     throw error;
   }
   return {
+    stagingRoot: root,
     rollback,
-    commit: () => fs.rmSync(root, { recursive: true, force: true }),
+    commit: () => fs.rmSync(root, {recursive: true, force: true}),
   };
 }
 
 function removeDependencyState(target: Target, dependencies: SharedRemovalDependency[]): void {
   if (dependencies.length === 0) return;
   const state = readStateFile(target.report.stateFile);
-  const baseIntent = { ...baseIntents(state) };
-  const mirrors = { ...(state.mirrors as Record<string, unknown> | undefined) };
-  for (const { targetId, slot } of dependencies) {
+  const baseIntent = {...baseIntents(state)};
+  const mirrors = {...(state.mirrors as Record<string, unknown> | undefined)};
+  for (const {targetId, slot} of dependencies) {
     const slotId = `${targetId}\0${slot}`;
     delete baseIntent[slotId];
     delete mirrors[slotId];
   }
-  const { baseIntent: _baseIntent, mirrors: _mirrors, ...remaining } = state;
+  const {baseIntent: _baseIntent, mirrors: _mirrors, ...remaining} = state;
   writeStateFile(target.report.stateFile, {
     ...remaining,
-    ...(Object.keys(baseIntent).length > 0 ? { baseIntent } : {}),
-    ...(Object.keys(mirrors).length > 0 ? { mirrors } : {}),
+    ...(Object.keys(baseIntent).length > 0 ? {baseIntent} : {}),
+    ...(Object.keys(mirrors).length > 0 ? {mirrors} : {}),
   });
+}
+
+function manifestMatches(
+  manifestPath: string,
+  targetId: string,
+  slot: string,
+  sourceFingerprint: string,
+  lockFingerprint: string,
+): boolean {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as {
+      targetId?: string;
+      slot?: string;
+      sourceFingerprint?: string;
+      lockFingerprint?: string;
+    };
+    return manifest.targetId === targetId && manifest.slot === slot &&
+      manifest.sourceFingerprint === sourceFingerprint &&
+      manifest.lockFingerprint === lockFingerprint;
+  } catch {
+    return false;
+  }
+}
+
+function assertRemovalPlan(expected: SharedRemovalPlan, fresh: SharedRemovalPlan): void {
+  if (expected.targetId !== fresh.targetId || expected.source.slot !== fresh.source.slot ||
+    expected.source.path !== fresh.source.path || expected.source.fingerprint !== fresh.source.fingerprint ||
+    expected.preconditions.lock.hash !== fresh.preconditions.lock.hash ||
+    expected.preconditions.policy.hash !== fresh.preconditions.policy.hash ||
+    !sameDependencies(expected.dependencies, fresh.dependencies))
+    throw concurrentModification('Shared source or dependent Relationships changed after preview');
+}
+
+function assertRemovalUnblocked(plan: SharedRemovalPlan): void {
+  if (plan.blockers.length > 0) throw new Error(plan.blockers.join('; '));
 }
 
 export function planSharedRemove(
@@ -551,27 +709,111 @@ export function planSharedRemove(
   names: string[],
   projectPath?: string,
 ): SharedRemovalPlan {
-  if (names.length === 0) throw new Error('usage: skillspub shared remove <managed-name...>');
+  if (names.length !== 1) throw new Error('usage: skillspub shared remove <managed-name>');
   const target = resolveTarget(home, projectPath);
   validatePolicyState(target);
   assertNoOperationLock(target);
-  const selected = managedSelection(target, names);
-  const claims = claimedSlots(readStateFile(target.report.stateFile));
-  for (const skill of selected) {
-    const slotId = `${target.target.id}\0${skill.slot}`;
-    if (claims.has(slotId)) throw new Error(`cannot remove claimed Target Slot ${slotId.replace('\0', '/')}`);
-  }
-  desiredFor(target, selected);
-  const dependencies = removalDependencies(target, selected);
-  assertRemovalDependenciesAllowed(target, dependencies);
+  const skill = managedSelection(target, names)[0]!;
+  const sourceRelationships = target.report.relationships.filter((item) =>
+    item.targetId === target.target.id && item.slot === skill.slot);
+  const source = sourceRelationships.length === 1 ? sourceRelationships[0] : undefined;
+  const dependencies = source ? removalDependencies(target, source) : [];
+  const blockers = removalBlockers(target, skill, source, sourceRelationships, dependencies);
+  const sourcePath = source?.path ?? path.join(target.target.discoveryRoot, skill.slot);
+  const sourceEntry = contentFingerprint(sourcePath);
+  const desired = source ? desiredActivation(target, skill, source) : 'unknown';
+  const manifest = removalManifestPath(target, skill.slot);
+  const provenance = npxSkillsProvenanceLabel(skill.provenance);
   return {
     operation: 'shared.remove',
     targetId: target.target.id,
-    slots: selected.map(({ slot }) => slot),
+    slots: [skill.slot],
+    source: {
+      name: skill.name,
+      slot: skill.slot,
+      path: sourcePath,
+      provenance,
+      fingerprint: sourceEntry.hash,
+    },
+    scope: {
+      kind: target.projectPath ? 'project' : 'global',
+      path: target.projectPath ?? path.dirname(path.dirname(target.target.discoveryRoot)),
+    },
+    target: {
+      discoveryRoot: target.target.discoveryRoot,
+      parkingRoot: target.target.parkingRoot,
+      stateFile: target.report.stateFile,
+      lockFile: target.lockFile,
+    },
+    sourceAdapter: {
+      package: NPX_SKILLS_PACKAGE,
+      removeOwner: 'vercel-skills',
+      proceedOwner: 'vercel-skills',
+    },
+    preconditions: {
+      sourceEntry,
+      lock: {
+        path: target.lockFile,
+        hash: contentFingerprint(target.lockFile).hash,
+        owner: skill.provenance.source || skill.provenance.sourceUrl ? 'vercel-skills' : 'unknown',
+      },
+      policy: {
+        path: target.report.stateFile,
+        hash: contentFingerprint(target.report.stateFile).hash,
+      },
+      permissions: {
+        source: writableAt(path.dirname(sourcePath)),
+        state: writableAt(path.dirname(target.report.stateFile)),
+        lock: writableAt(path.dirname(target.lockFile)),
+        dependencies: dependencies.map(({path: dependencyPath}) => ({
+          path: dependencyPath,
+          status: writableAt(path.dirname(dependencyPath)),
+        })),
+      },
+    },
+    selection: {
+      included: [
+        {identity: `${provenance}\0${skill.name}`, reason: 'proven Vercel-managed local Shared source'},
+        ...dependencies.map(({targetId, slot}) => ({
+          identity: `${targetId}\0${slot}`,
+          reason: 'known dependent Link or Mirror',
+        })),
+      ],
+      excluded: [],
+    },
     dependencies,
-    warnings: [
-      'SkillsPub has no central project index; projects outside this scan may retain broken Links.',
+    blockers,
+    warnings: target.projectPath ? [] : [
+      'SkillsPub has no central project index; projects outside this scan may retain broken Links when unopened.',
     ],
+    cascadeConfirmed: manifestMatches(
+      manifest,
+      target.target.id,
+      skill.slot,
+      sourceEntry.hash,
+      contentFingerprint(target.lockFile).hash,
+    ),
+    recovery: {
+      operationLock: `${target.lockFile}.skillspub-operation-lock`,
+      manifest,
+      evidence: [target.lockFile, target.report.stateFile, manifest, 'final filesystem rescan'],
+      completedWork: 'preserved',
+    },
+    currentTruth: {
+      actual: actualSummary(target.report, target.target.id, [skill.slot]),
+      desired,
+      drift: source && desired !== 'unknown' && source.activation === desired ? 'none' : 'observed',
+      source: provenance,
+      relationships: dependencies.length,
+    },
+    expectedFinalTruth: {
+      actual: `${skill.slot}=missing`,
+      desired: 'removed',
+      drift: 'none',
+      source: 'removed',
+      relationships: 0,
+      effectiveVisibility: 'recompute-after-rescan',
+    },
   };
 }
 
@@ -1239,49 +1481,191 @@ export function sharedUpdate(
   });
 }
 
+export function sharedRemoveCascade(
+  home: Home,
+  names: string[],
+  expected: SharedRemovalPlan,
+  projectPath?: string,
+): SharedCommandResult {
+  const preview = planSharedRemove(home, names, projectPath);
+  assertRemovalPlan(expected, preview);
+  assertRemovalUnblocked(preview);
+  const initial = resolveTarget(home, projectPath);
+  try {
+    return withOperationLock(initial, () => {
+      const target = resolveTarget(home, projectPath);
+    const skill = managedSelection(target, names)[0];
+    if (!skill) throw new Error('managed Shared source disappeared');
+    const sourceRelationships = target.report.relationships.filter((item) =>
+      item.targetId === target.target.id && item.slot === preview.source.slot);
+    const source = sourceRelationships.length === 1 ? sourceRelationships[0] : undefined;
+    const dependencies = source ? removalDependencies(target, source) : [];
+    const blockers = removalBlockers(target, skill, source, sourceRelationships, dependencies);
+    if (blockers.length > 0) throw new Error(blockers.join('; '));
+    if (contentFingerprint(preview.source.path).hash !== preview.source.fingerprint ||
+      contentFingerprint(target.lockFile).hash !== preview.preconditions.lock.hash ||
+      contentFingerprint(target.report.stateFile).hash !== preview.preconditions.policy.hash ||
+      !sameDependencies(preview.dependencies, dependencies))
+      throw concurrentModification('Shared source or dependent Relationships changed after preview');
+    assertRemovalDependenciesAllowed(target, dependencies);
+    const staged = stageDependencies(target, dependencies);
+    const temporaryManifest = `${preview.recovery.manifest}.tmp-${process.pid}`;
+    try {
+      fs.mkdirSync(path.dirname(preview.recovery.manifest), {recursive: true});
+      fs.writeFileSync(temporaryManifest, JSON.stringify({
+        version: 1,
+        targetId: preview.targetId,
+        slot: preview.source.slot,
+        sourcePath: preview.source.path,
+        sourceFingerprint: preview.source.fingerprint,
+        lockFingerprint: preview.preconditions.lock.hash,
+        provenance: preview.source.provenance,
+        dependencies: preview.dependencies,
+        stagingRoot: staged?.stagingRoot,
+      }, null, 2) + '\n');
+      fs.renameSync(temporaryManifest, preview.recovery.manifest);
+      removeDependencyState(target, dependencies);
+    } catch (error) {
+      fs.rmSync(temporaryManifest, {force: true});
+      fs.rmSync(preview.recovery.manifest, {force: true});
+      staged?.rollback();
+      throw error;
+    }
+    try {
+      staged?.commit();
+    } catch (error) {
+      throw Object.assign(
+        new Error(`Relationship cascade cleanup failed: ${(error as Error).message}`),
+        {
+          code: 'apply_failed',
+          details: {
+            completedWork: dependencies.map(({targetId, slot}) => `deleted ${targetId}/${slot}`),
+            recovery: preview.recovery,
+            stagingRoot: staged?.stagingRoot,
+          },
+        },
+      );
+    }
+      const final = scan(home, projectPath);
+      return {
+        actual: actualSummary(final, target.target.id, [preview.source.slot]),
+        drift: [],
+        recoveryManifest: preview.recovery.manifest,
+        completedWork: dependencies.map(({targetId, slot}) => `deleted ${targetId}/${slot}`),
+      };
+    });
+  } catch (error) {
+    const failure = error as Error & {details?: Record<string, unknown>};
+    let actual = 'rescan unavailable';
+    let remainingDependencies = preview.dependencies.map(({targetId, slot}) => `${targetId}/${slot}`);
+    try {
+      const final = scan(home, projectPath);
+      actual = actualSummary(final, preview.targetId, [preview.source.slot]);
+      const paths = new Set(final.relationships.map(({path: relationshipPath}) => relationshipPath));
+      remainingDependencies = preview.dependencies
+        .filter(({path: dependencyPath}) => paths.has(dependencyPath))
+        .map(({targetId, slot}) => `${targetId}/${slot}`);
+    } catch {
+      // Keep the original failure primary and report that the rescan was unavailable.
+    }
+    failure.details = {
+      ...failure.details,
+      actual,
+      desired: preview.currentTruth.desired,
+      source: preview.source,
+      remainingDependencies,
+      recovery: preview.recovery,
+      completedWork: preview.dependencies
+        .filter(({targetId, slot}) => !remainingDependencies.includes(`${targetId}/${slot}`))
+        .map(({targetId, slot}) => `deleted ${targetId}/${slot}`),
+    };
+    throw failure;
+  }
+}
+
 export function sharedRemove(
   home: Home,
   names: string[],
-  options: { cascadeConfirmed?: boolean; projectPath?: string; expected?: SharedRemovalPlan } = {},
+  options: {sourceConfirmed?: boolean; projectPath?: string; expected?: SharedRemovalPlan} = {},
 ): SharedCommandResult {
-  const { cascadeConfirmed = false, projectPath, expected } = options;
+  const {sourceConfirmed = false, projectPath, expected} = options;
   const preview = planSharedRemove(home, names, projectPath);
-  if (expected && !sameDependencies(expected.dependencies, preview.dependencies))
-    throw concurrentModification('dependent Relationships changed after preview');
-  if (preview.dependencies.length > 0 && !cascadeConfirmed)
-    throw new Error('dependent Relationships will also be deleted; rerun with --yes');
-  let dependencies: SharedRemovalDependency[] = [];
-  return guardedSkillsOp(home, projectPath, {
-    name: 'remove',
-    restoreOnFailureOnly: true,
-    select(target) {
-      const selected = managedSelection(target, names);
-      const claims = claimedSlots(readStateFile(target.report.stateFile));
-      for (const skill of selected) {
-        const slotId = `${target.target.id}\0${skill.slot}`;
-        if (claims.has(slotId)) throw new Error(`cannot remove claimed Target Slot ${slotId.replace('\0', '/')}`);
-      }
-      return selected;
-    },
-    args: (selected, global) =>
-      npxSkillsRemoveArgs(selected.map(({ name }) => name), global),
-    before(target, selected) {
-      dependencies = removalDependencies(target, selected);
-      if (!sameDependencies(preview.dependencies, dependencies))
-        throw new Error('dependent Relationships changed after preview');
-      assertRemovalDependenciesAllowed(target, dependencies);
-      return stageDependencies(target, dependencies);
-    },
-    check(target, selected, _drift, { result, failure }) {
-      target.report = scan(home, projectPath);
-      const remaining = selected.filter((skill) => target.report.relationships.some((item) =>
-        item.targetId === target.target.id && item.slot === skill.slot));
-      const runFailed = failure || !result || result.status !== 0;
-      if (!runFailed && remaining.length > 0) throw new Error(`exit ${result?.status ?? 1}`);
-    },
-    after(target, selected) {
-      updateBaseIntent(target, selected.map(({ slot }) => slot));
-      removeDependencyState(target, dependencies);
-    },
-  });
+  if (!sourceConfirmed) throw new Error('confirm source deletion separately');
+  if (!preview.cascadeConfirmed)
+    throw new Error('confirm the Relationship cascade first with --cascade');
+  if (preview.dependencies.length > 0)
+    throw concurrentModification('new dependent Relationships appeared after cascade confirmation');
+  if (expected && (expected.targetId !== preview.targetId ||
+    expected.source.slot !== preview.source.slot ||
+    expected.source.path !== preview.source.path ||
+    expected.source.fingerprint !== preview.source.fingerprint ||
+    expected.source.provenance !== preview.source.provenance))
+    throw concurrentModification('Shared source changed after preview');
+  assertRemovalUnblocked(preview);
+  try {
+    const result = guardedSkillsOp(home, projectPath, {
+      name: 'remove',
+      restoreOnFailureOnly: true,
+      select(target) {
+        const selected = managedSelection(target, names);
+        const skill = selected[0];
+        if (!skill) throw new Error('managed Shared source disappeared');
+        if (contentFingerprint(target.lockFile).hash !== preview.preconditions.lock.hash ||
+          contentFingerprint(target.report.stateFile).hash !== preview.preconditions.policy.hash ||
+          npxSkillsProvenanceLabel(skill.provenance) !== preview.source.provenance)
+          throw concurrentModification('Shared source lock, provenance, or policy changed after preview');
+        if (!manifestMatches(
+          preview.recovery.manifest,
+          preview.targetId,
+          preview.source.slot,
+          preview.source.fingerprint,
+          preview.preconditions.lock.hash,
+        )) throw new Error('Relationship cascade confirmation is stale or missing');
+        const sourceRelationships = target.report.relationships.filter((item) =>
+          item.targetId === target.target.id && item.slot === preview.source.slot);
+        const source = sourceRelationships.length === 1 ? sourceRelationships[0] : undefined;
+        const dependencies = source ? removalDependencies(target, source) : [];
+        if (!source || source.form !== 'local' || source.path !== preview.source.path ||
+          contentFingerprint(source.path).hash !== preview.source.fingerprint)
+          throw concurrentModification('Shared source changed after preview');
+        if (dependencies.length > 0)
+          throw concurrentModification('new dependent Relationships appeared after cascade confirmation');
+        const blockers = removalBlockers(target, skill, source, sourceRelationships, dependencies);
+        if (blockers.length > 0) throw new Error(blockers.join('; '));
+        return selected;
+      },
+      args: (selected, global) => {
+        const skill = selected[0];
+        if (!skill) throw new Error('managed Shared source disappeared');
+        return npxSkillsRemoveArgs([skill.name], global);
+      },
+      check(target, selected, _drift, {result, failure}) {
+        target.report = scan(home, projectPath);
+        const skill = selected[0];
+        if (!skill) throw new Error('managed Shared source disappeared');
+        const remaining = target.report.relationships.some((item) =>
+          item.targetId === target.target.id && item.slot === skill.slot);
+        const lockRemains = readNpxSkillsLock(target.lockFile).some(({slot}) => slot === skill.slot);
+        if (!failure && result?.status === 0 && (remaining || lockRemains))
+          throw new Error(`verification failed: source=${remaining ? 'present' : 'missing'} lock=${lockRemains ? 'present' : 'removed'}`);
+      },
+      after(target, selected) {
+        const skill = selected[0];
+        if (!skill) throw new Error('managed Shared source disappeared');
+        updateBaseIntent(target, [skill.slot]);
+        fs.rmSync(preview.recovery.manifest, {force: true});
+      },
+    });
+    return {...result, completedWork: ['Relationship cascade', `deleted ${preview.source.name}`]};
+  } catch (error) {
+    const failure = error as Error & {details?: Record<string, unknown>};
+    failure.details = {
+      ...failure.details,
+      source: preview.source,
+      recovery: preview.recovery,
+      completedWork: ['Relationship cascade'],
+      remainingWork: [`delete Shared source ${preview.source.name}`],
+    };
+    throw failure;
+  }
 }
