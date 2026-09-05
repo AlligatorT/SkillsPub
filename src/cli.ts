@@ -1277,6 +1277,7 @@ function cmdShared(
         values.skill,
         Boolean(values.replace),
         projectPath,
+        plan,
       );
       if (json) return { applied: true, plan, result, remainingDrift: result.drift };
       console.log(`Actual: ${result.actual}`);

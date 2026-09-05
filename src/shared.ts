@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -105,6 +106,21 @@ export interface SharedRemovalPlan {
   warnings: string[];
 }
 
+export interface SharedRelationshipEffect {
+  scope: 'global' | 'project' | 'parent';
+  targetId: string;
+  targetKey: string;
+  resourceId: string;
+  name: string;
+  slot: string;
+  form: 'local' | 'link' | 'mirror';
+  activation: 'on' | 'off';
+  sourcePath: string;
+  targetPath: string;
+  plannedAction: 'create' | 'replace-content' | 'refresh-content' | 'retain' | 'consume-replacement' | 'consume-refresh' | 'mirror-sync';
+  sourcePreserved: true;
+}
+
 export interface SharedMutationPlan {
   operation: 'shared.add' | 'shared.update';
   targetId: string;
@@ -113,6 +129,62 @@ export interface SharedMutationPlan {
   replace?: boolean;
   currentSource?: string;
   replacement?: { from: string; to: string };
+  scope?: {kind: 'global' | 'project'; path: string};
+  target?: {
+    discoveryRoot: string;
+    parkingRoot: string;
+    stateFile: string;
+    lockFile: string;
+  };
+  candidate?: {
+    identity: string;
+    source: string;
+    name: string;
+    normalizedSlot: string;
+    provenance: {source: string};
+  };
+  sourceAdapter?: {
+    package: string;
+    securityAuditOwner: 'vercel-skills';
+    proceedOwner: 'vercel-skills';
+  };
+  preconditions?: {
+    sourceEntry: {path: string; state: 'missing' | 'present'; hash: string};
+    discoveryEntry: {path: string; state: 'missing' | 'present'; hash: string};
+    parkingEntry: {path: string; state: 'missing' | 'present'; hash: string};
+    lock: {path: string; hash: string; owner: 'vercel-skills' | 'unclaimed' | 'unknown'};
+    policy: {path: string; hash: string};
+    permissions: {target: 'writable' | 'blocked'; lock: 'writable' | 'blocked'};
+  };
+  blockers?: string[];
+  intentPreservation?: {
+    baseIntent: 'on' | 'off';
+    tags: string[];
+    bundles: string[];
+    presetClaims: string[];
+    presetSelectors: string[];
+  };
+  relationshipEffects?: SharedRelationshipEffect[];
+  recovery?: {
+    operationLock: string;
+    evidence: string[];
+    completedWork: 'preserved';
+  };
+  currentTruth?: {
+    actual: string;
+    desired: 'on' | 'off';
+    drift: string;
+    source: string;
+    relationships: number;
+  };
+  expectedFinalTruth?: {
+    actual: string;
+    desired: 'on' | 'off';
+    drift: 'none' | 'mirror-sync';
+    source: string;
+    relationships: number;
+    effectiveVisibility: 'recompute-after-rescan';
+  };
 }
 
 interface StagedDependencies {
@@ -503,6 +575,245 @@ export function planSharedRemove(
   };
 }
 
+function contentFingerprint(entryPath: string): {path: string; state: 'missing' | 'present'; hash: string} {
+  const stat = fs.lstatSync(entryPath, {throwIfNoEntry: false});
+  if (!stat) return {path: entryPath, state: 'missing', hash: 'missing'};
+  const hash = stat.isDirectory() || stat.isSymbolicLink()
+    ? hashDirectory(entryPath)
+    : crypto.createHash('sha256').update(fs.readFileSync(entryPath)).digest('hex');
+  return {path: entryPath, state: 'present', hash};
+}
+
+function writableAt(entryPath: string): 'writable' | 'blocked' {
+  let current = entryPath;
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) return 'blocked';
+    current = parent;
+  }
+  try {
+    fs.accessSync(current, fs.constants.W_OK);
+    return 'writable';
+  } catch {
+    return 'blocked';
+  }
+}
+
+function policyIntent(
+  target: Target,
+  slot: string,
+  resourceId: string | undefined,
+  fallback: 'on' | 'off',
+) {
+  const policy = readStateFile(target.report.stateFile);
+  const catalog = readStateFile(path.join(target.home.configDir, 'state.json'));
+  const slotId = `${target.target.id}\0${slot}`;
+  const claims = stringLists(policy.claims, 'claims')[slotId] ?? [];
+  const lastClaims = Object.entries(stringLists(policy.lastClaims, 'lastClaims'))
+    .filter(([, slots]) => slots.includes(slotId))
+    .map(([preset]) => `preset:${preset}`);
+  const baseIntent = baseIntents(policy)[slotId] ?? fallback;
+  const tags = resourceId
+    ? stringLists(catalog.tags, 'tags')[resourceId] ?? []
+    : [];
+  const bundles = resourceId
+    ? Object.entries(stringLists(catalog.bundles, 'bundles'))
+        .filter(([, members]) => members.includes(resourceId))
+        .map(([bundle]) => bundle)
+        .sort()
+    : [];
+  const presets = catalog.presets && typeof catalog.presets === 'object' && !Array.isArray(catalog.presets)
+    ? catalog.presets as Record<string, {selectors?: unknown}>
+    : {};
+  const presetSelectors = resourceId
+    ? Object.entries(presets)
+        .filter(([, preset]) =>
+          Array.isArray(preset.selectors) && preset.selectors.includes(`skill:${resourceId}`))
+        .map(([preset]) => preset)
+        .sort()
+    : [];
+  return {
+    baseIntent,
+    tags: [...tags],
+    bundles,
+    presetClaims: [...new Set([...claims, ...lastClaims])].sort(),
+    presetSelectors,
+  };
+}
+
+function addRelationshipEffects(
+  target: Target,
+  slot: string,
+  existing: TargetRelationship | undefined,
+  replacement: boolean,
+): SharedRelationshipEffect[] {
+  if (!existing) return [{
+    scope: target.target.scope,
+    targetId: target.target.id,
+    targetKey: target.target.key,
+    resourceId: path.join(target.target.discoveryRoot, slot),
+    name: slot,
+    slot,
+    form: 'local',
+    activation: 'on',
+    sourcePath: path.join(target.target.discoveryRoot, slot),
+    targetPath: path.join(target.target.discoveryRoot, slot),
+    plannedAction: 'create',
+    sourcePreserved: true,
+  }];
+  const resourceId = existing.resourceId ?? existing.realPath ?? existing.path;
+  return target.report.relationships
+    .filter((item) => item.resourceId === resourceId)
+    .map((item): SharedRelationshipEffect => ({
+      scope: item.targetId === target.target.id ? target.target.scope :
+        target.report.targets.find(({id}) => id === item.targetId)?.scope ?? 'global',
+      targetId: item.targetId,
+      targetKey: item.targetKey,
+      resourceId,
+      name: item.name,
+      slot: item.slot,
+      form: item.form,
+      activation: item.activation,
+      sourcePath: existing.path,
+      targetPath: item.path,
+      plannedAction: item.targetId === target.target.id
+        ? replacement ? 'replace-content' : 'refresh-content'
+        : item.form === 'mirror'
+          ? 'mirror-sync'
+          : replacement ? 'consume-replacement' : 'consume-refresh',
+      sourcePreserved: true,
+    }))
+    .sort((left, right) =>
+      left.scope.localeCompare(right.scope) ||
+      left.targetId.localeCompare(right.targetId) ||
+      left.targetPath.localeCompare(right.targetPath));
+}
+
+function buildSharedAddPlan(
+  target: Target,
+  source: string,
+  name: string,
+  replace: boolean,
+): SharedMutationPlan {
+  const slot = validateName(name);
+  const existing = relationship(target, slot);
+  const slotInfo = target.report.slots.find((item) =>
+    item.targetId === target.target.id && item.name === slot);
+  const managed = readNpxSkillsLock(target.lockFile).find((skill) => skill.slot === slot);
+  const currentSource = existing ? npxSkillsProvenanceLabel(slotInfo?.provenance) : undefined;
+  const replacement = existing && !sameNpxSkillsSource(source, name, slotInfo?.provenance)
+    ? {from: currentSource!, to: source}
+    : undefined;
+  if (existing)
+    desiredFor(target, [{name: existing.name, slot, provenance: slotInfo?.provenance ?? {}}]);
+  const discoveryEntry = path.join(target.target.discoveryRoot, slot);
+  const parkingEntry = path.join(target.target.parkingRoot, slot);
+  const sourceEntry = existing?.path ?? discoveryEntry;
+  const sourceFingerprint = contentFingerprint(sourceEntry);
+  const discoveryFingerprint = contentFingerprint(discoveryEntry);
+  const parkingFingerprint = contentFingerprint(parkingEntry);
+  const lockOwner = managed
+    ? 'vercel-skills' as const
+    : existing ? 'unknown' as const : 'unclaimed' as const;
+  const intentPreservation = policyIntent(
+    target,
+    slot,
+    existing?.resourceId ?? existing?.realPath ?? existing?.path,
+    existing?.activation ?? 'on',
+  );
+  const desired = intentPreservation.presetClaims.length > 0 ? 'on' : intentPreservation.baseIntent;
+  const relationshipEffects = addRelationshipEffects(target, slot, existing, Boolean(replacement));
+  const pathConflicts = [discoveryFingerprint, parkingFingerprint].flatMap((entry) => {
+    const isExpectedExisting = existing && entry.path === existing.path;
+    return entry.state === 'present' && !isExpectedExisting
+      ? [`Shared Slot path conflict: ${entry.path}`]
+      : [];
+  });
+  const blockers = [
+    ...pathConflicts,
+    ...(replacement && !replace ? ['source replacement requires --replace'] : []),
+    ...(existing && lockOwner === 'unknown'
+      ? ['Shared Slot ownership is not proven by the Vercel skills lock.']
+      : []),
+    ...(writableAt(target.target.discoveryRoot) === 'blocked' ? ['Shared Target is not writable.'] : []),
+    ...(writableAt(path.dirname(target.lockFile)) === 'blocked' ? ['Source lock directory is not writable.'] : []),
+  ];
+  return {
+    operation: 'shared.add',
+    targetId: target.target.id,
+    slots: [slot],
+    source,
+    replace,
+    ...(currentSource ? {currentSource} : {}),
+    ...(replacement ? {replacement} : {}),
+    scope: {
+      kind: target.projectPath ? 'project' : 'global',
+      path: target.projectPath ?? path.dirname(path.dirname(target.target.discoveryRoot)),
+    },
+    target: {
+      discoveryRoot: target.target.discoveryRoot,
+      parkingRoot: target.target.parkingRoot,
+      stateFile: target.report.stateFile,
+      lockFile: target.lockFile,
+    },
+    candidate: {
+      identity: `${source}\0${name}`,
+      source,
+      name,
+      normalizedSlot: slot,
+      provenance: {source},
+    },
+    sourceAdapter: {
+      package: NPX_SKILLS_PACKAGE,
+      securityAuditOwner: 'vercel-skills',
+      proceedOwner: 'vercel-skills',
+    },
+    preconditions: {
+      sourceEntry: sourceFingerprint,
+      discoveryEntry: discoveryFingerprint,
+      parkingEntry: parkingFingerprint,
+      lock: {
+        path: target.lockFile,
+        hash: contentFingerprint(target.lockFile).hash,
+        owner: lockOwner,
+      },
+      policy: {
+        path: target.report.stateFile,
+        hash: contentFingerprint(target.report.stateFile).hash,
+      },
+      permissions: {
+        target: writableAt(target.target.discoveryRoot),
+        lock: writableAt(path.dirname(target.lockFile)),
+      },
+    },
+    blockers,
+    intentPreservation,
+    relationshipEffects,
+    recovery: {
+      operationLock: `${target.lockFile}.skillspub-operation-lock`,
+      evidence: [target.lockFile, target.report.stateFile, 'final filesystem rescan'],
+      completedWork: 'preserved',
+    },
+    currentTruth: {
+      actual: actualSummary(target.report, target.target.id, [slot]),
+      desired,
+      drift: existing && existing.activation === desired ? 'none' : existing ? 'activation' : 'missing',
+      source: currentSource ?? 'Source unknown',
+      relationships: relationshipEffects.length,
+    },
+    expectedFinalTruth: {
+      actual: `${slot}=${desired}/local`,
+      desired,
+      drift: relationshipEffects.some(({plannedAction}) => plannedAction === 'mirror-sync')
+        ? 'mirror-sync'
+        : 'none',
+      source,
+      relationships: relationshipEffects.length,
+      effectiveVisibility: 'recompute-after-rescan',
+    },
+  };
+}
+
 export function planSharedAdd(
   home: Home,
   source: string,
@@ -511,36 +822,10 @@ export function planSharedAdd(
   projectPath?: string,
 ): SharedMutationPlan {
   validateSource(source);
-  const slot = validateName(name);
   const target = resolveTarget(home, projectPath);
   validatePolicyState(target);
   assertNoOperationLock(target);
-  const existing = relationship(target, slot);
-  const slotInfo = target.report.slots.find((item) =>
-    item.targetId === target.target.id && item.name === slot);
-  let currentSource: string | undefined;
-  let replacement: SharedMutationPlan['replacement'];
-  if (existing) {
-    currentSource = npxSkillsProvenanceLabel(slotInfo?.provenance);
-    if (!sameNpxSkillsSource(source, name, slotInfo?.provenance))
-      replacement = { from: currentSource, to: source };
-    desiredFor(target, [{ name: existing.name, slot, provenance: slotInfo?.provenance ?? {} }]);
-  } else {
-    for (const root of [target.target.discoveryRoot, target.target.parkingRoot]) {
-      const candidate = path.join(root, slot);
-      if (fs.lstatSync(candidate, { throwIfNoEntry: false }))
-        throw new Error(`path conflict: ${candidate}`);
-    }
-  }
-  return {
-    operation: 'shared.add',
-    targetId: target.target.id,
-    slots: [slot],
-    source,
-    replace,
-    ...(currentSource ? { currentSource } : {}),
-    ...(replacement ? { replacement } : {}),
-  };
+  return buildSharedAddPlan(target, source, name, replace);
 }
 
 export function planSharedUpdate(
@@ -802,10 +1087,11 @@ function sharedApplyFailure(
   actual: string,
   drift: string[],
   partialEffects: 'present' | 'none-detected' | 'unknown',
+  stage: 'upstream' | 'verify',
 ): Error {
   return Object.assign(
     new Error(`skills ${operation} failed (${reason})\nActual: ${actual}\nRemaining drift: ${drift.join(', ') || 'none'}`),
-    { code: 'apply_failed', details: { actual, remainingDrift: drift, partialEffects } },
+    { code: 'apply_failed', details: { actual, remainingDrift: drift, partialEffects, stage } },
   );
 }
 
@@ -867,6 +1153,7 @@ function guardedSkillsOp(
         actual,
         drift,
         drift.length > 0 ? 'present' : 'none-detected',
+        checkError ? 'verify' : 'upstream',
       );
     }
     try {
@@ -874,7 +1161,7 @@ function guardedSkillsOp(
       staged?.commit();
     } catch (error) {
       actual = finalActual(target, slots, drift);
-      throw sharedApplyFailure(op.name, (error as Error).message, actual, drift, 'unknown');
+      throw sharedApplyFailure(op.name, (error as Error).message, actual, drift, 'unknown', 'verify');
     }
     return { actual, drift };
   });
@@ -886,26 +1173,29 @@ export function sharedAdd(
   name: string,
   replace: boolean,
   projectPath?: string,
+  expectedPlan?: SharedMutationPlan,
 ): SharedCommandResult {
   validateSource(source);
   const slot = validateName(name);
+  const preview = expectedPlan ?? planSharedAdd(home, source, name, replace, projectPath);
+  const preflight = resolveTarget(home, projectPath);
+  validatePolicyState(preflight);
+  const currentPreview = buildSharedAddPlan(preflight, source, name, replace);
+  if (JSON.stringify(currentPreview) !== JSON.stringify(preview))
+    throw concurrentModification('Source add plan changed after preview; create a new preview.');
+  const blockers = currentPreview.blockers ?? [];
+  if (blockers.length > 0) throw new Error(blockers.join('\n'));
   return guardedSkillsOp(home, projectPath, {
     name: 'add',
     select(target) {
+      const currentPlan = buildSharedAddPlan(target, source, name, replace);
+      if (JSON.stringify(currentPlan) !== JSON.stringify(preview))
+        throw concurrentModification('Source add plan changed after preview; create a new preview.');
+      const currentBlockers = currentPlan.blockers ?? [];
+      if (currentBlockers.length > 0) throw new Error(currentBlockers.join('\n'));
       const existing = relationship(target, slot);
       const slotInfo = target.report.slots.find((item) =>
         item.targetId === target.target.id && item.name === slot);
-      if (existing) {
-        const current = npxSkillsProvenanceLabel(slotInfo?.provenance);
-        if (!sameNpxSkillsSource(source, name, slotInfo?.provenance) && !replace)
-          throw new Error(`source replacement requires --replace (${current} -> ${source})`);
-      } else {
-        for (const root of [target.target.discoveryRoot, target.target.parkingRoot]) {
-          const candidate = path.join(root, slot);
-          if (fs.lstatSync(candidate, { throwIfNoEntry: false }))
-            throw new Error(`path conflict: ${candidate}`);
-        }
-      }
       return existing
         ? [{ name: existing.name, slot, provenance: slotInfo?.provenance ?? {} }]
         : [];
@@ -923,8 +1213,10 @@ export function sharedAdd(
     after(target, selected, actual) {
       const managed = readNpxSkillsLock(target.lockFile)
         .find((skill) => skill.slot === slot);
-      if (managed && !sameNpxSkillsSource(source, name, managed.provenance))
-        throw new Error(`skills add failed (installer lock source changed)\nActual: ${actual}\nRemaining drift: ${target.target.id}/${slot}: unverified provenance`);
+      const expectsManagedProvenance = /^[^/@\s]+\/[^/@\s]+(?:@[^/\s]+)?$/.test(source);
+      if ((expectsManagedProvenance && !managed) ||
+          (managed && !sameNpxSkillsSource(source, name, managed.provenance)))
+        throw new Error(`skills add failed (installer lock source changed or missing)\nActual: ${actual}\nRemaining drift: ${target.target.id}/${slot}: unverified provenance`);
       if (selected.length === 0) updateBaseIntent(target, [slot], 'on');
     },
   });

@@ -8,9 +8,11 @@ import { createElement as h } from 'react';
 import { render } from 'ink';
 import { App, HarnessBadge } from '../src/tui.ts';
 import { sharedRefresh } from '../src/shared.ts';
+import { hashDirectory } from '../src/inventory.ts';
 
-const stripAnsi = (s: string): string =>
-  s.replace(/\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][0-9A-B]/g, '');
+const ANSI_PATTERN = /\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][0-9A-B]/g;
+const RENDER_CONTROL_PATTERN = /\x1b\[(2K|2J|3J|1A|\d+F)/;
+const stripAnsi = (s: string): string => s.replace(ANSI_PATTERN, '');
 
 class FakeStdin extends PassThrough {
   isTTY = true;
@@ -40,11 +42,11 @@ class FakeStdout extends PassThrough {
   write(chunk: unknown, encoding?: unknown, cb?: unknown): boolean {
     const s = String(chunk);
     // Each interactive render starts with erase/clear control sequences.
-    if (/\x1b\[(2K|2J|3J|1A|\d+F)/.test(s)) this.current = s;
+    if (RENDER_CONTROL_PATTERN.test(s)) this.current = s;
     else this.current += s;
-    const done = typeof encoding === 'function'
-      ? encoding as () => void
-      : typeof cb === 'function' ? cb as () => void : undefined;
+    let done: (() => void) | undefined;
+    if (typeof encoding === 'function') done = encoding as () => void;
+    else if (typeof cb === 'function') done = cb as () => void;
     if (done) queueMicrotask(done);
     return true;
   }
@@ -140,6 +142,21 @@ async function renderApp(
     await flush();
   };
   return { stdin, stdout, send, flush, unmount: () => app.unmount() };
+}
+
+async function waitForFrame(
+  app: {stdout: FakeStdout; flush(): Promise<void>},
+  pattern: RegExp,
+): Promise<string> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const frame = app.stdout.frame();
+    if (pattern.test(frame)) return frame;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await app.flush();
+  }
+  const frame = app.stdout.frame();
+  assert.match(frame, pattern);
+  return frame;
 }
 
 test('Harness badge renderer keeps non-managed support explicit', async () => {
@@ -244,11 +261,32 @@ if (args[2] === 'find') {
   process.stdout.write(process.env.TUI_NPX_FIND_OUTPUT || '');
   process.exit(0);
 }
+const base = args.includes('--global') ? process.env.HOME : process.cwd();
+if (args[2] === 'add') {
+  if (process.env.TUI_NPX_FAIL_ONCE && !fs.existsSync(process.env.TUI_NPX_FAIL_ONCE)) {
+    fs.writeFileSync(process.env.TUI_NPX_FAIL_ONCE, 'failed');
+    process.exit(7);
+  }
+  const source = args[3];
+  const requestedName = args[args.indexOf('--skill') + 1];
+  const name = requestedName.toLowerCase().replace(/[^a-z0-9._]+/g, '-').replace(/^[.\\-]+|[.\\-]+$/g, '') || 'unnamed-skill';
+  const skillsRoot = path.join(base, '.agents', 'skills');
+  const lockFile = args.includes('--global')
+    ? path.join(process.env.HOME, '.agents', '.skill-lock.json')
+    : path.join(process.cwd(), 'skills-lock.json');
+  fs.mkdirSync(path.join(skillsRoot, name), {recursive: true});
+  fs.writeFileSync(path.join(skillsRoot, name, 'SKILL.md'), '# ' + source + '\\n');
+  let lock = {version: 3, skills: {}};
+  try { lock = JSON.parse(fs.readFileSync(lockFile, 'utf8')); } catch {}
+  lock.skills[name] = {source, sourceUrl: 'https://github.com/' + source + '.git', skillPath: 'skills/' + name};
+  fs.mkdirSync(path.dirname(lockFile), {recursive: true});
+  fs.writeFileSync(lockFile, JSON.stringify(lock));
+  process.exit(0);
+}
 if (args[2] !== 'update') process.exit(2);
 const names = args.slice(3).filter((arg) => !arg.startsWith('-'));
 const failed = new Set(JSON.parse(process.env.TUI_NPX_FAIL_NAMES || '[]'));
 if (names.some((name) => failed.has(name))) process.exit(7);
-const base = args.includes('--global') ? process.env.HOME : process.cwd();
 for (const name of names)
   fs.appendFileSync(path.join(base, '.agents', 'skills', name, 'SKILL.md'), '\\n# updated');
 `, {mode: 0o755});
@@ -429,6 +467,228 @@ test('Source Catalog search keeps same-name candidates distinct and traps detail
   assert.equal(calls[0].cwd, fs.realpathSync(fixture.project));
 });
 
+test('Source Add and explicit Replace run A+C preview, cancellation, confirmation, and Verify truth in both scopes', async (context) => {
+  const environmentKeys = ['HOME', 'PATH', 'TUI_GIT_LOG', 'TUI_NPX_LOG', 'TUI_NPX_FIND_OUTPUT'];
+  const previousEnv = Object.fromEntries(environmentKeys.map((key) => [key, process.env[key]]));
+  context.after(() => {
+    for (const [key, value] of Object.entries(previousEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  for (const projectScope of [false, true]) {
+    const fixture = setupManagedTui([{name: 'same', source: 'old/repo', hash: 'old-hash'}], projectScope);
+    const source = path.join(fixture.discovery, 'same');
+    const globalConsumerRoot = path.join(fixture.env.HOME, '.consumer', 'skills');
+    const consumerRoot = projectScope
+      ? path.join(fixture.project, '.consumer', 'skills')
+      : globalConsumerRoot;
+    const consumerParking = path.join(fixture.env.HOME, '.consumer', '.skillspub-off', 'skills');
+    const consumer = path.join(consumerRoot, 'same');
+    const globalMirrorRoot = path.join(fixture.env.HOME, '.mirror-consumer', 'skills');
+    const mirrorRoot = projectScope
+      ? path.join(fixture.project, '.mirror-consumer', 'skills')
+      : globalMirrorRoot;
+    const mirror = path.join(mirrorRoot, 'same');
+    const targetFile = path.join(fixture.home.configDir, 'targets.json');
+    const targets = JSON.parse(fs.readFileSync(targetFile, 'utf8'));
+    targets.genericTargets.push({
+      key: 'consumer',
+      kind: 'generic',
+      discoveryRoot: globalConsumerRoot,
+      parkingRoot: consumerParking,
+      projectPath: '.consumer/skills',
+      relationship: {support: 'managed', link: 'supported'},
+    }, {
+      key: 'mirror-consumer',
+      kind: 'generic',
+      discoveryRoot: globalMirrorRoot,
+      parkingRoot: path.join(fixture.env.HOME, '.mirror-consumer', '.skillspub-off', 'skills'),
+      projectPath: '.mirror-consumer/skills',
+      relationship: {support: 'managed', link: 'unsupported'},
+    });
+    fs.writeFileSync(targetFile, JSON.stringify(targets));
+    fs.mkdirSync(consumerRoot, {recursive: true});
+    fs.symlinkSync(source, consumer, 'dir');
+    mkSkill(mirrorRoot, 'same', '# same');
+
+    const resourceId = fs.realpathSync(source);
+    const projectId = fs.realpathSync(fixture.project);
+    const sharedSlotId = projectScope
+      ? `project:${projectId}:shared\0same`
+      : 'global:shared\0same';
+    const mirrorSlotId = projectScope
+      ? `project:${projectId}:mirror-consumer\0same`
+      : 'global:mirror-consumer\0same';
+    const catalogState = {
+      tags: {[resourceId]: ['reviewed']},
+      bundles: {tools: [resourceId]},
+      presets: {work: {selectors: [`skill:${resourceId}`]}},
+    };
+    const policyState = {
+      baseIntent: {[sharedSlotId]: 'off'},
+      claims: {[sharedSlotId]: ['preset:work']},
+      mirrors: {[mirrorSlotId]: {sourceId: resourceId, hash: hashDirectory(source)}},
+    };
+    const globalStateFile = path.join(fixture.home.configDir, 'state.json');
+    if (projectScope) {
+      fs.writeFileSync(globalStateFile, JSON.stringify(catalogState));
+      const projectStateFile = path.join(fixture.project, '.skillspub', 'state.json');
+      fs.mkdirSync(path.dirname(projectStateFile), {recursive: true});
+      fs.writeFileSync(projectStateFile, JSON.stringify(policyState));
+    } else {
+      fs.writeFileSync(globalStateFile, JSON.stringify({...catalogState, ...policyState}));
+    }
+    Object.assign(process.env, {
+      ...fixture.env,
+      TUI_NPX_FIND_OUTPUT: [
+        'new/repo@same  12 installs',
+        '└ https://skills.sh/new/repo/same',
+      ].join('\n'),
+    });
+    const t = await renderApp(fixture.home, 132, 38, projectScope ? fixture.project : undefined);
+    await t.send('3');
+    await t.send('/');
+    await t.send('s');
+    await t.send('\r');
+
+    await t.send('a');
+    let frame = t.stdout.frame();
+    assert.match(frame, /Source Replace plan/);
+    assert.match(frame, new RegExp(projectScope ? 'exact Project' : 'Global'));
+    assert.match(frame, /Candidate: new\/repo@same/);
+    assert.match(frame, /Source Adapter: skills@1\.5\.21/);
+    assert.match(frame, /old\/repo.*new\/repo/);
+    assert.match(frame, /consume-replacement/);
+    assert.match(frame, /mirror-sync/);
+    assert.match(frame, /Tags: reviewed/);
+    assert.match(frame, /Bundles: tools/);
+    assert.match(frame, /Preset claims: preset:work/);
+    assert.match(frame, /queued/);
+    await t.send('j');
+    assert.match(t.stdout.frame(), /Source Replace plan \[2\//);
+    await t.send('k');
+    await t.send('\x1b');
+    assert.doesNotMatch(t.stdout.frame(), /Source Replace plan/);
+    assert.equal(fs.readFileSync(path.join(source, 'SKILL.md'), 'utf8'), '# same');
+
+    await t.send('a');
+    await t.send('\r');
+    frame = t.stdout.frame();
+    assert.match(frame, /Confirm SkillsPub intent/);
+    assert.match(frame, /Scope · identity · Slot · Relationships/);
+    assert.match(frame, /Vercel skills owns security audit and final Proceed/);
+    await t.send('\r');
+    assert.match(t.stdout.frame(), /Source operation — running|Source operation — Verify truth/);
+    frame = await waitForFrame(t, /Source operation — Verify truth/);
+    assert.match(frame, /Verify truth/);
+    assert.match(frame, /succeeded/);
+    assert.match(frame, /Actual:/);
+    assert.match(frame, /Desired:/);
+    assert.match(frame, /Drift:/);
+    assert.match(frame, /Provenance: https:\/\/github\.com\/new\/repo\.git/);
+    assert.match(frame, /Slot: same/);
+    assert.match(frame, /Relationships: 3/);
+    assert.match(frame, /Drift: .*mirror-sync required/);
+    assert.match(frame, /Update availability:/);
+    assert.match(frame, /next-load Effective Visibility:/);
+    assert.equal(fs.readFileSync(path.join(source, 'SKILL.md'), 'utf8'), '# new/repo\n');
+    assert.equal(fs.realpathSync(consumer), fs.realpathSync(source));
+    assert.equal(fs.readFileSync(path.join(mirror, 'SKILL.md'), 'utf8'), '# same');
+    const finalCatalog = JSON.parse(fs.readFileSync(globalStateFile, 'utf8'));
+    assert.deepEqual(finalCatalog.tags[resourceId], ['reviewed']);
+    assert.deepEqual(finalCatalog.bundles.tools, [resourceId]);
+    assert.deepEqual(finalCatalog.presets.work.selectors, [`skill:${resourceId}`]);
+    const finalPolicy = projectScope
+      ? JSON.parse(fs.readFileSync(path.join(fixture.project, '.skillspub', 'state.json'), 'utf8'))
+      : finalCatalog;
+    assert.equal(finalPolicy.baseIntent[sharedSlotId], 'off');
+    assert.deepEqual(finalPolicy.claims[sharedSlotId], ['preset:work']);
+    await t.send('\r');
+    assert.doesNotMatch(t.stdout.frame(), /Source operation — Verify truth/);
+    t.unmount();
+  }
+});
+
+test('Source Add failure stays in Variant C, retries idempotently, and rejects concurrent plan changes in both scopes', async (context) => {
+  const environmentKeys = [
+    'HOME', 'PATH', 'TUI_GIT_LOG', 'TUI_NPX_LOG', 'TUI_NPX_FAIL_ONCE', 'TUI_NPX_FIND_OUTPUT',
+  ];
+  const previousEnv = Object.fromEntries(environmentKeys.map((key) => [key, process.env[key]]));
+  context.after(() => {
+    for (const [key, value] of Object.entries(previousEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  for (const projectScope of [false, true]) {
+    const fixture = setupManagedTui([], projectScope);
+    const failMarker = path.join(fixture.project, `fail-once-${projectScope}`);
+    Object.assign(process.env, {
+      ...fixture.env,
+      TUI_NPX_FAIL_ONCE: failMarker,
+      TUI_NPX_FIND_OUTPUT: [
+        'owner/repo@fresh  1 installs',
+        '└ https://skills.sh/owner/repo/fresh',
+      ].join('\n'),
+    });
+    const t = await renderApp(
+      fixture.home,
+      124,
+      36,
+      projectScope ? fixture.project : undefined,
+    );
+    await t.send('3');
+    await t.send('/');
+    await t.send('f');
+    await t.send('\r');
+    await t.send('a');
+    await t.send('\r');
+    await t.send('\r');
+    let frame = await waitForFrame(t, /Source operation — failed/);
+    assert.match(frame, new RegExp(projectScope ? 'exact Project' : 'Global'));
+    assert.match(frame, /failed/);
+    assert.match(frame, /Raw log:/);
+    assert.match(frame, /t retry/);
+    await t.send('t');
+    frame = await waitForFrame(t, /Source operation — Verify truth/);
+    assert.match(frame, /Source operation — Verify truth/);
+    assert.match(frame, /succeeded/);
+    assert.ok(fs.existsSync(path.join(fixture.discovery, 'fresh', 'SKILL.md')));
+    await t.send('\r');
+
+    await t.send('/');
+    await t.send('f');
+    await t.send('\r');
+    await t.send('a');
+    const policyFile = projectScope
+      ? path.join(fixture.project, '.skillspub', 'state.json')
+      : path.join(fixture.home.configDir, 'state.json');
+    fs.mkdirSync(path.dirname(policyFile), {recursive: true});
+    fs.writeFileSync(policyFile, JSON.stringify({baseIntent: {}, claims: {}}));
+    await t.send('\r');
+    await t.send('\r');
+    frame = await waitForFrame(t, /Source operation — failed/);
+    assert.match(frame, /new preview required/i);
+    assert.equal(fs.readFileSync(path.join(fixture.discovery, 'fresh', 'SKILL.md'), 'utf8'), '# owner/repo\n');
+
+    const lockFile = projectScope
+      ? path.join(fixture.project, 'skills-lock.json')
+      : path.join(fixture.env.HOME, '.agents', '.skill-lock.json');
+    const lock = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
+    lock.skills.fresh.source = 'third/repo';
+    lock.skills.fresh.sourceUrl = 'https://github.com/third/repo.git';
+    fs.writeFileSync(lockFile, JSON.stringify(lock));
+    await t.send('t');
+    frame = await waitForFrame(t, /Source operation — failed/);
+    assert.match(frame, /Source intent changed/i);
+    assert.match(frame, /New preview required/i);
+    assert.equal(fs.readFileSync(path.join(fixture.discovery, 'fresh', 'SKILL.md'), 'utf8'), '# owner/repo\n');
+    t.unmount();
+  }
+});
+
 test('TUI shows a detected built-in missing from an older Target registry without writes', async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-tui-forward-targets-'));
   const configDir = path.join(root, 'config');
@@ -438,7 +698,7 @@ test('TUI shows a detected built-in missing from an older Target registry withou
   fs.mkdirSync(grokHome, { recursive: true });
   fs.writeFileSync(path.join(grokHome, 'config.toml'), '# detected\n');
   const targetFile = path.join(configDir, 'targets.json');
-  fs.writeFileSync(targetFile, JSON.stringify({
+  fs.writeFileSync(targetFile, `${JSON.stringify({
     version: 1,
     overrides: ['claude', 'shared', 'pi'].map((key) => ({
       key,
@@ -447,7 +707,7 @@ test('TUI shows a detected built-in missing from an older Target registry withou
       projectPath: `.${key}/skills`,
     })),
     genericTargets: [],
-  }, null, 2) + '\n');
+  }, null, 2)}\n`);
   useFixtureEnv(context, { HOME: userHome, GROK_HOME: grokHome });
   const before = fs.readFileSync(targetFile, 'utf8');
   const beforeEntries = fs.readdirSync(root, { recursive: true }).sort();
@@ -472,7 +732,7 @@ test('TUI reports a detected built-in pending explicit legacy migration without 
   mkSkill(path.join(userHome, '.claude', 'skills'), 'demo');
   fs.mkdirSync(grokHome, { recursive: true });
   fs.writeFileSync(path.join(grokHome, 'config.toml'), '# detected\n');
-  fs.writeFileSync(legacyFile, JSON.stringify({
+  fs.writeFileSync(legacyFile, `${JSON.stringify({
     version: 1,
     runtimes: ['claude', 'shared', 'pi'].map((key) => ({
       key,
@@ -481,7 +741,7 @@ test('TUI reports a detected built-in pending explicit legacy migration without 
       parkingRoot: path.join(userHome, `.${key}`, '.skillspub-off', 'skills'),
       projectPath: `.${key}/skills`,
     })),
-  }, null, 2) + '\n');
+  }, null, 2)}\n`);
   useFixtureEnv(context, { HOME: userHome, GROK_HOME: grokHome });
   const before = fs.readFileSync(legacyFile, 'utf8');
   const beforeEntries = fs.readdirSync(root, { recursive: true }).sort();
