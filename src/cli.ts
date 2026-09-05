@@ -108,6 +108,7 @@ const USAGE = `SkillsPub — multi-agent skills on/off manager (disk is the sour
   skillspub project <path> scan|doctor|explain|shared|preset|mirror|harnesses ...  operate on exact Project Skill Targets
   skillspub targets                    list resolved Skill Targets
   skillspub harnesses [name inspect|setup|reconcile [--yes]]  inspect or configure a Harness
+  skillspub project <path> harnesses pi migrate [--yes]  migrate a stale Project Pi Target
   skillspub migrate targets [--yes]    preview or migrate runtimes.json to targets.json
   skillspub tui [--project [path]]     interactive full-screen skill browser
                                        (--project: project-scope view, cwd when path omitted)
@@ -185,7 +186,7 @@ function errorInfo(error: unknown, mutation = false): {
 
 const MUTATING_COMMANDS = new Set(['on', 'off', 'mirror', 'migrate']);
 const MUTATING_ACTIONS: Record<string, ReadonlySet<string>> = {
-  harnesses: new Set(['setup', 'reconcile']),
+  harnesses: new Set(['setup', 'reconcile', 'migrate']),
   bundle: new Set(['create', 'add', 'rm']),
   tag: new Set(['add', 'rm']),
   preset: new Set(['create', 'add', 'rm', 'activate', 'deactivate', 'reconcile', 'delete']),
@@ -661,9 +662,10 @@ function cmdHarnesses(
     return;
   }
   const [harness, action, ...rest] = args;
-  if (!harness || !['inspect', 'setup', 'reconcile'].includes(action ?? '') ||
-    rest.some((arg) => arg !== '--yes') || (action === 'inspect' && rest.length > 0))
-    throw new Error('usage: skillspub harnesses [name inspect|setup|reconcile [--yes]]');
+  if (!harness || !['inspect', 'setup', 'reconcile', 'migrate'].includes(action ?? '') ||
+    rest.some((arg) => arg !== '--yes') || (action === 'inspect' && rest.length > 0) ||
+    (action === 'migrate' && (!selectedProject || harness !== 'pi')))
+    throw new Error('usage: skillspub harnesses [name inspect|setup|reconcile [--yes]] (Pi migrate is Project-only)');
   if (action === 'inspect') {
     const inspection = inspectHarness(harness, home, targets, selectedProject);
     if (json) return inspection;
@@ -672,7 +674,7 @@ function cmdHarnesses(
   }
   const plan = planHarnessOperation(
     harness,
-    action as 'setup' | 'reconcile',
+    action as 'setup' | 'reconcile' | 'migrate',
     home,
     targets,
     selectedProject,

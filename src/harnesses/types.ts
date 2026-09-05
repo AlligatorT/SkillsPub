@@ -9,7 +9,7 @@ import type {
 
 type SupportLevel = 'managed' | 'discoverable' | 'unsupported';
 type SharedConsumption = 'not-consumed' | 'required' | 'enabled' | 'excluded' | 'unknown';
-export type HarnessOperation = 'setup' | 'reconcile';
+export type HarnessOperation = 'setup' | 'reconcile' | 'migrate';
 
 export interface HarnessEvidence {
   url: string;

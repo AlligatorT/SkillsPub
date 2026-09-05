@@ -81,11 +81,14 @@ skillspub migrate targets
 skillspub project <path> <command...>  # 包括 scan/doctor/explain/shared/preset/mirror/harnesses
 skillspub project <path> explain <selector> [--harness H] [--want visible|hidden]
 skillspub project <path> harnesses grok setup|reconcile [--yes]
+skillspub project <path> harnesses pi setup|reconcile|migrate [--yes]
 ```
 
 裸命令只在交互式 TTY 中启动 Ink。非 TTY 环境输出 CLI usage。`tui` 不接受额外参数。
 
 `--target` 是当前术语；现有 `--agent` 暂作兼容别名并输出弃用提示。只读命令和打开 TUI 严格不创建目录、不迁移文件、不修改 Harness 配置。
+
+Pi `migrate` 仅可用于显式 `project <path>` 边界，并与 Project `setup`/`reconcile` 分开预览、确认和应用。它把旧 Target override 的 `.pi/agent/skills` 迁移到 canonical `.pi/skills`，拒绝 Global 调用、目标冲突或 preview 后的并发变化。未带 `--yes` 时 text 只打印 immutable preview，`--json` 返回 `applied: false` 且 `plan.operation` 为 `harness.migrate`；带 `--yes` 才执行迁移与 hash-checked recovery evidence 写入。普通 `inspect`、scan、ls 与 TUI 打开均不触发迁移。
 
 ## Effective Visibility Explain
 

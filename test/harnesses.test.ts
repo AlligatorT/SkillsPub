@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -82,13 +83,15 @@ test('Pi inspection resolves Global and Project Pi Targets and observes Shared e
   const project = path.join(home.configDir, 'project');
   fs.mkdirSync(path.join(piHome, 'agent'), { recursive: true });
   fs.mkdirSync(path.join(project, '.pi'), { recursive: true });
+  fs.mkdirSync(path.join(project, '.git'), { recursive: true });
+  const canonicalProject = fs.realpathSync(project);
   fs.writeFileSync(
     path.join(piHome, 'agent', 'settings.json'),
-    JSON.stringify({ skills: [`!${path.join(home.configDir, 'agents', 'skills')}/**`] }),
+    JSON.stringify({ defaultProjectTrust: 'always', skills: [`!${path.join(home.configDir, 'agents', 'skills')}/**`] }),
   );
   fs.writeFileSync(
     path.join(project, '.pi', 'settings.json'),
-    JSON.stringify({ skills: [`!${path.join(project, '.agents', 'skills')}/**`] }),
+    JSON.stringify({ skills: [`!${path.join(canonicalProject, '.agents', 'skills')}/**`] }),
   );
 
   const report = inspectHarnesses(home, targets, project);
@@ -101,7 +104,7 @@ test('Pi inspection resolves Global and Project Pi Targets and observes Shared e
     pi?.targets.map(({ scope, discoveryRoot }) => ({ scope, discoveryRoot })),
     [
       { scope: 'global', discoveryRoot: path.join(piHome, 'agent', 'skills') },
-      { scope: 'project', discoveryRoot: path.join(project, '.pi', 'skills') },
+      { scope: 'project', discoveryRoot: path.join(canonicalProject, '.pi', 'skills') },
     ],
   );
   assert.equal(pi?.evidence.length, 3);
@@ -434,6 +437,7 @@ test('Grok inspection reports malformed configuration as unconfirmable', () => {
 test('Harness inspection resolves Global Targets from a multi-scope project inventory', () => {
   const { home, targets, piHome, claudeHome } = setup();
   const project = path.join(home.configDir, 'project');
+  fs.mkdirSync(project, { recursive: true });
   fs.mkdirSync(path.join(piHome, 'agent'), { recursive: true });
   fs.mkdirSync(claudeHome, { recursive: true });
   const scopedTargets = targets.flatMap((target) => [
@@ -625,45 +629,181 @@ test('Pi reconcile releases stale ownership when a safe equivalent exclusion rep
   assert.equal(inspectHarnesses(home, targets).detected[0]?.isolation.status, 'unmanaged');
 });
 
-test('Pi Global operation ignores exact-Project settings and rechecks Global state and Relationships', () => {
-  const { home, targets, piHome, shared } = setup();
-  const settings = path.join(piHome, 'agent', 'settings.json');
-  const project = path.join(home.configDir, 'project');
+test('Pi exact-Project operation covers trusted ancestor roots and leaves Global truth unchanged', () => {
+  const { home, targets, piHome } = setup();
+  const globalSettings = path.join(piHome, 'agent', 'settings.json');
+  const globalState = path.join(home.configDir, 'state.json');
+  const repo = path.join(home.configDir, 'repo');
+  const project = path.join(repo, 'nested');
   const projectSettings = path.join(project, '.pi', 'settings.json');
   const projectState = path.join(project, '.skillspub', 'state.json');
-  const sharedSkill = path.join(shared, 'example');
-  const piLink = path.join(piHome, 'agent', 'skills', 'example');
-  fs.mkdirSync(path.dirname(settings), { recursive: true });
+  const source = path.join(home.configDir, 'source');
+  const projectLink = path.join(project, '.pi', 'skills', 'example');
+  fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
+  fs.mkdirSync(path.dirname(globalSettings), { recursive: true });
   fs.mkdirSync(path.dirname(projectSettings), { recursive: true });
-  fs.mkdirSync(path.dirname(projectState), { recursive: true });
+  fs.mkdirSync(source, { recursive: true });
+  fs.mkdirSync(path.dirname(projectLink), { recursive: true });
+  fs.writeFileSync(path.join(source, 'SKILL.md'), '# example');
+  fs.symlinkSync(source, projectLink, 'dir');
+  fs.writeFileSync(globalSettings, JSON.stringify({ theme: 'dark' }));
+  fs.writeFileSync(globalState, '{"external":true}');
+  const canonicalRepo = fs.realpathSync(repo);
+  const canonicalProject = fs.realpathSync(project);
+  fs.writeFileSync(path.join(piHome, 'agent', 'trust.json'), JSON.stringify({ [canonicalRepo]: true }));
+  fs.writeFileSync(projectSettings, JSON.stringify({ theme: 'light', skills: [] }));
+
+  const plan = planHarnessOperation('pi', 'setup', home, targets, project);
+  assert.match(plan.lines.join('\n'), /Project only/);
+  assert.match(plan.lines.join('\n'), new RegExp(path.join(canonicalProject, '.agents', 'skills').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(plan.lines.join('\n'), new RegExp(path.join(canonicalRepo, '.agents', 'skills').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  plan.apply();
+  const inspection = plan.verify();
+
+  const skills = JSON.parse(fs.readFileSync(projectSettings, 'utf8')).skills;
+  assert.deepEqual(skills, [
+    `!${path.join(canonicalProject, '.agents', 'skills')}/**`,
+    `!${path.join(canonicalRepo, '.agents', 'skills')}/**`,
+  ]);
+  assert.equal(inspection.isolation.status, 'managed');
+  assert.equal(JSON.parse(fs.readFileSync(projectState, 'utf8')).piIsolation.scope, 'project');
+  assert.equal(fs.readFileSync(globalSettings, 'utf8'), JSON.stringify({ theme: 'dark' }));
+  assert.equal(fs.readFileSync(globalState, 'utf8'), '{"external":true}');
+  assert.ok(fs.existsSync(projectLink));
+  assert.ok(fs.readdirSync(path.join(project, '.skillspub', 'pi-recovery')).some((entry) => entry.endsWith('.paths.json')));
+
+  fs.writeFileSync(projectSettings, JSON.stringify({ theme: 'changed', skills }));
+  const reconcile = planHarnessOperation('pi', 'reconcile', home, targets, project);
+  fs.writeFileSync(projectState, '{"changed":true}');
+  assert.throws(() => reconcile.apply(), /state changed after preview/);
+});
+
+test('Pi Project inspection and setup conservatively gate unresolved or rejected trust', () => {
+  const { home, targets, piHome } = setup();
+  const project = path.join(home.configDir, 'project');
+  fs.mkdirSync(path.join(project, '.git'), { recursive: true });
+  fs.mkdirSync(path.join(project, '.pi'), { recursive: true });
+  fs.mkdirSync(path.join(piHome, 'agent'), { recursive: true });
+  fs.writeFileSync(path.join(project, '.pi', 'settings.json'), JSON.stringify({ skills: [] }));
+
+  assert.equal(inspectHarnesses(home, targets, project).detected[0]?.isolation.status, 'unknown');
+  assert.throws(() => planHarnessOperation('pi', 'setup', home, targets, project), /requires confirmed trust/);
+  const canonicalProject = fs.realpathSync(project);
+  fs.writeFileSync(path.join(piHome, 'agent', 'trust.json'), JSON.stringify({ [canonicalProject]: false }));
+  assert.throws(() => planHarnessOperation('pi', 'setup', home, targets, project), /does not trust/);
+
+  fs.writeFileSync(path.join(piHome, 'agent', 'trust.json'), JSON.stringify({ [canonicalProject]: true }));
+  const sharedRoot = path.join(canonicalProject, '.agents', 'skills');
+  fs.mkdirSync(path.join(sharedRoot, 'forced'), { recursive: true });
+  fs.writeFileSync(path.join(sharedRoot, 'forced', 'SKILL.md'), '# forced');
+  fs.writeFileSync(path.join(project, '.pi', 'settings.json'), JSON.stringify({
+    skills: [`!${sharedRoot}/**`, '+forced'],
+  }));
+  const forceIncludedInspection = inspectHarnesses(home, targets, project).detected[0];
+  assert.equal(
+    forceIncludedInspection?.roots.find((root) => root.kind === 'shared' && root.scope === 'project')?.consumption,
+    'consumed',
+  );
+  assert.throws(
+    () => planHarnessOperation('pi', 'setup', home, targets, project),
+    /force-include conflicts with Project Shared isolation/,
+  );
+  fs.writeFileSync(path.join(project, '.pi', 'settings.json'), JSON.stringify({
+    skills: [`!${sharedRoot}/**`, '+forced', '-forced'],
+  }));
+  const forceExcludedInspection = inspectHarnesses(home, targets, project).detected[0];
+  assert.equal(
+    forceExcludedInspection?.roots.find((root) => root.kind === 'shared' && root.scope === 'project')?.consumption,
+    'excluded',
+  );
+});
+
+test('Pi Project matcher dedupes canonical aliases and blocks competing Variants', () => {
+  const { home, targets, piHome } = setup();
+  const project = path.join(home.configDir, 'project');
+  const canonicalProject = fs.realpathSync(fs.mkdirSync(project, { recursive: true }) ?? project);
+  fs.mkdirSync(path.join(piHome, 'agent'), { recursive: true });
+  fs.writeFileSync(path.join(piHome, 'agent', 'trust.json'), JSON.stringify({ [canonicalProject]: true }));
+  const sharedSkill = path.join(project, '.agents', 'skills', 'variant');
+  const piSkill = path.join(project, '.pi', 'skills', 'variant');
   fs.mkdirSync(sharedSkill, { recursive: true });
-  fs.mkdirSync(path.dirname(piLink), { recursive: true });
-  fs.writeFileSync(settings, JSON.stringify({ theme: 'dark' }));
-  fs.writeFileSync(projectSettings, '{malformed');
-  fs.writeFileSync(projectState, '{"project":true}');
-  fs.writeFileSync(path.join(sharedSkill, 'SKILL.md'), '# example');
-  fs.symlinkSync(sharedSkill, piLink, 'dir');
+  fs.mkdirSync(path.dirname(piSkill), { recursive: true });
+  fs.writeFileSync(path.join(sharedSkill, 'SKILL.md'), '# shared');
+  fs.symlinkSync(sharedSkill, piSkill, 'dir');
+  const settings = path.join(project, '.pi', 'settings.json');
+  fs.writeFileSync(settings, JSON.stringify({
+    skills: [`!${path.join(project, '.agents', 'skills')}/**`, `+${sharedSkill}`],
+  }));
 
-  const stale = planHarnessOperation('pi', 'setup', home, targets, project);
-  assert.match(stale.lines.join('\n'), /Global only/);
-  fs.writeFileSync(path.join(home.configDir, 'state.json'), '{"external":true}');
-  assert.throws(() => stale.apply(), /state changed after preview/);
-  assert.deepEqual(JSON.parse(fs.readFileSync(settings, 'utf8')), { theme: 'dark' });
-  assert.equal(fs.existsSync(path.join(home.configDir, 'pi-recovery')), false);
+  assert.notEqual(inspectHarnesses(home, targets, project).detected[0]?.isolation.status, 'unknown');
+  fs.rmSync(piSkill);
+  fs.mkdirSync(piSkill, { recursive: true });
+  fs.writeFileSync(path.join(piSkill, 'SKILL.md'), '# competing');
+  assert.match(inspectHarnesses(home, targets, project).detected[0]?.isolation.detail ?? '', /collision/i);
+  assert.throws(() => planHarnessOperation('pi', 'setup', home, targets, project), /competing Variant/i);
+});
 
-  const fresh = planHarnessOperation('pi', 'setup', home, targets, project);
-  fs.rmSync(piLink);
-  assert.throws(() => fresh.apply(), /Relationships changed after preview/);
-  assert.equal(fs.existsSync(path.join(home.configDir, 'pi-recovery')), false);
-  fs.symlinkSync(sharedSkill, piLink, 'dir');
-  const retry = planHarnessOperation('pi', 'setup', home, targets, project);
-  retry.apply();
-  retry.verify();
+test('Pi Project Target migration previews, preserves content and state, and refuses conflicts', () => {
+  const { home, targets } = setup();
+  const project = path.join(home.configDir, 'project');
+  const stale = targets.map((target) => target.key === 'pi' ? { ...target, projectPath: '.pi/agent/skills' } : target);
+  const source = path.join(project, '.pi', 'agent', 'skills');
+  const destination = path.join(project, '.pi', 'skills');
+  const relationship = path.join(source, 'example');
+  const resource = path.join(home.configDir, 'resource');
+  const state = path.join(project, '.skillspub', 'state.json');
+  fs.mkdirSync(resource, { recursive: true });
+  fs.mkdirSync(source, { recursive: true });
+  fs.mkdirSync(path.dirname(state), { recursive: true });
+  fs.writeFileSync(path.join(resource, 'SKILL.md'), '# example');
+  fs.symlinkSync(resource, relationship, 'dir');
+  fs.writeFileSync(state, '{"baseIntent":{"project:example":"on"}}');
+  fs.writeFileSync(path.join(home.configDir, 'targets.json'), `${JSON.stringify({ version: 1, overrides: [{ key: 'pi', projectPath: '.pi/agent/skills' }], genericTargets: [] })}\n`);
 
-  assert.equal(fs.readFileSync(projectSettings, 'utf8'), '{malformed');
-  assert.equal(fs.readFileSync(projectState, 'utf8'), '{"project":true}');
-  assert.equal(JSON.parse(fs.readFileSync(path.join(home.configDir, 'state.json'), 'utf8')).external, true);
-  assert.ok(fs.existsSync(piLink));
+  const plan = planHarnessOperation('pi', 'migrate', home, stale, project);
+  assert.match(plan.lines.join('\n'), /source content SHA-256/);
+  assert.match(plan.lines.join('\n'), /canonical \.pi\/skills/);
+  assert.equal(plan.relationshipImpact?.summary.retainedRelationships, 1);
+  plan.apply();
+  plan.verify();
+
+  assert.equal(fs.existsSync(source), false);
+  assert.equal(fs.realpathSync(path.join(destination, 'example')), fs.realpathSync(resource));
+  assert.equal(fs.readFileSync(state, 'utf8'), '{"baseIntent":{"project:example":"on"}}');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home.configDir, 'targets.json'), 'utf8')).overrides, []);
+  const recoveryEntries = fs.readdirSync(path.join(project, '.skillspub', 'pi-recovery'));
+  const manifest = path.join(
+    project,
+    '.skillspub',
+    'pi-recovery',
+    recoveryEntries.find((entry) => entry.endsWith('.migration.json'))!,
+  );
+  const recoveryScript = path.join(
+    project,
+    '.skillspub',
+    'pi-recovery',
+    recoveryEntries.find((entry) => entry.endsWith('.recover.mjs'))!,
+  );
+  const manifestRaw = fs.readFileSync(manifest, 'utf8');
+  fs.appendFileSync(manifest, 'tampered');
+  assert.throws(() => execFileSync(process.execPath, [recoveryScript]), /Migration manifest hash mismatch/);
+  fs.writeFileSync(manifest, manifestRaw);
+  fs.writeFileSync(path.join(destination, 'unexpected.txt'), 'preserve me');
+  assert.match(execFileSync(process.execPath, [recoveryScript], { encoding: 'utf8' }), /recovery verified/);
+  assert.equal(fs.realpathSync(path.join(source, 'example')), fs.realpathSync(resource));
+  assert.equal(fs.existsSync(destination), false);
+  assert.equal(fs.readFileSync(`${destination}.recovery-conflict/unexpected.txt`, 'utf8'), 'preserve me');
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(home.configDir, 'targets.json'), 'utf8')).overrides[0].projectPath,
+    '.pi/agent/skills',
+  );
+  assert.equal(fs.readFileSync(state, 'utf8'), '{"baseIntent":{"project:example":"on"}}');
+
+  const conflictProject = path.join(home.configDir, 'conflict');
+  fs.writeFileSync(path.join(home.configDir, 'targets.json'), `${JSON.stringify({ version: 1, overrides: [{ key: 'pi', projectPath: '.pi/agent/skills' }], genericTargets: [] })}\n`);
+  fs.mkdirSync(path.join(conflictProject, '.pi', 'agent', 'skills'), { recursive: true });
+  fs.mkdirSync(path.join(conflictProject, '.pi', 'skills'), { recursive: true });
+  assert.throws(() => planHarnessOperation('pi', 'migrate', home, stale, conflictProject), /destination conflict/);
 });
 
 test('Pi failed writes preserve recovery evidence and retry from fresh inspection', () => {

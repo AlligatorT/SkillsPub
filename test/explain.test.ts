@@ -212,6 +212,7 @@ test('per-root Pi evidence distinguishes excluded Global Shared from consumed Pr
   fs.mkdirSync(path.join(project, '.pi'), { recursive: true });
   fs.mkdirSync(path.dirname(roots.pi), { recursive: true });
   fs.writeFileSync(path.join(path.dirname(roots.pi), 'settings.json'), JSON.stringify({
+    defaultProjectTrust: 'always',
     skills: [`!${roots.shared}/**`],
   }));
 
