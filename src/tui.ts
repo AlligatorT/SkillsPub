@@ -1,5 +1,6 @@
 import {createElement as h, useEffect, useMemo, useState} from 'react';
 import type {ReactNode} from 'react';
+import fs from 'node:fs';
 import path from 'node:path';
 import {Box, Text, render, useApp, useInput, useStdout} from 'ink';
 import wrapAnsi from 'wrap-ansi';
@@ -48,17 +49,24 @@ import {
   type WantedVisibility,
 } from './explain.ts';
 import {
+  sharedFind,
   sharedOutdated,
   sharedRefresh,
   sharedUpdate,
   type SharedUpdateAvailabilityEntry,
 } from './shared.ts';
+import {
+  normalizeNpxSkillsName,
+  type NpxSkillsCandidate,
+} from './npx-skills.ts';
 
 /** Below this width the passive summary column is hidden. */
 const WIDE_MIN = 80;
 const MANAGED_SUPPORT_EXPLANATION = 'Managed support: verified Adapter can control and explain this Harness; it does not mean optional setup/reconcile was applied.';
 
-type Tab = 'target' | 'skill';
+type Tab = 'target' | 'skill' | 'source';
+type SourceScope = 'global' | 'project';
+type SourceSurface = 'catalog' | 'inventory';
 type HarnessSummary = TuiSnapshot['harnesses']['detected'][number];
 
 interface RelEntry {
@@ -759,6 +767,200 @@ function DetailModal({
   );
 }
 
+function sourceRelationships(row: Row | undefined): SkillRelationship[] {
+  return (row?.observedRelationships ?? row?.relationships ?? [])
+    .filter(({target}) => target === 'shared');
+}
+
+function sourceDesiredTruth(
+  home: Home,
+  row: Row | undefined,
+  scope: SourceScope,
+  projectPath: string,
+): {desired: string; drift: string} {
+  if (!row) return {desired: 'not applicable', drift: 'not applicable'};
+  const relationships = sourceRelationships(row);
+  let state: Record<string, unknown> = {};
+  try {
+    const file = scope === 'global'
+      ? path.join(home.configDir, 'state.json')
+      : path.join(projectPath, '.skillspub', 'state.json');
+    if (fs.existsSync(file)) state = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+  } catch {
+    return {desired: 'unknown', drift: 'unknown'};
+  }
+  const baseIntent = state.baseIntent && typeof state.baseIntent === 'object' && !Array.isArray(state.baseIntent)
+    ? state.baseIntent as Record<string, unknown>
+    : {};
+  const claims = state.claims && typeof state.claims === 'object' && !Array.isArray(state.claims)
+    ? state.claims as Record<string, unknown>
+    : {};
+  let observedDrift = false;
+  const desired = relationships.map((relationship) => {
+    const actual = relationship.info.underOff ? 'OFF' : 'ON';
+    if (relationship.info.presence === 'deadlink' || relationship.info.diverged)
+      observedDrift = true;
+    if (relationship.readOnly) return `read-only ${actual}`;
+    const slotId = `${relationship.targetId}\0${relationship.slot}`;
+    const activation = Array.isArray(claims[slotId]) && claims[slotId].length > 0
+      ? 'ON'
+      : baseIntent[slotId] === 'off'
+        ? 'OFF'
+        : baseIntent[slotId] === 'on'
+          ? 'ON'
+          : actual;
+    if (activation !== actual) observedDrift = true;
+    return activation;
+  });
+  return {
+    desired: [...new Set(desired)].join('/') || 'unknown',
+    drift: observedDrift ? 'observed' : 'none observed',
+  };
+}
+
+function sourceInventoryRows(snapshot: TuiSnapshot): Row[] {
+  return snapshot.rows.filter((row) => sourceRelationships(row).length > 0);
+}
+
+function candidateId(candidate: NpxSkillsCandidate): string {
+  return `${candidate.source}\0${candidate.name}`;
+}
+
+function sourceDetailLines(
+  candidate: NpxSkillsCandidate | undefined,
+  row: Row | undefined,
+): string[] {
+  if (candidate) return [
+    `Identity: ${candidate.source}@${candidate.name}`,
+    `Source: ${candidate.source}`,
+    `Skill path/name: ${candidate.name}`,
+    `Destination Slot: ${normalizeNpxSkillsName(candidate.name)}`,
+    `Installs: ${candidate.installs ?? 'unknown'}`,
+    `Detail: ${candidate.detailUrl}`,
+  ];
+  if (!row) return ['No resource selected.'];
+  const relationships = sourceRelationships(row);
+  return [
+    `Identity: ${row.realPath ?? row.id}`,
+    `Name: ${row.name}`,
+    `Provenance: ${row.sourceLabel}`,
+    `Real path: ${row.realPath ?? 'unresolved'}`,
+    `Update availability: ${row.updateAvailability?.status ?? 'unknown'}`,
+    ...relationships.map((relationship) =>
+      `${relationship.readOnly ? 'Read-only inherited' : relationship.info.form} ${relationship.scope ?? 'global'}: ${relationship.info.path}`),
+  ];
+}
+
+function SourceDetail({
+  title,
+  lines,
+  bordered = false,
+}: {
+  title: string;
+  lines: string[];
+  bordered?: boolean;
+}): ReactNode {
+  return h(
+    Box,
+    {
+      flexDirection: 'column',
+      flexGrow: 1,
+      ...(bordered ? {borderStyle: 'round' as const, borderColor: 'cyan', paddingX: 1} : {}),
+    },
+    h(Text, {bold: true}, title),
+    ...lines.map((line, index) => h(Text, {key: index, wrap: 'truncate-end'}, line)),
+  );
+}
+
+function SourceWorkspace({
+  scope,
+  scopePath,
+  surface,
+  candidates,
+  candidateIndex,
+  inventory,
+  inventoryIndex,
+  marks,
+  visibility,
+  desired,
+  drift,
+  width,
+  height,
+}: {
+  scope: SourceScope;
+  scopePath: string;
+  surface: SourceSurface;
+  candidates: NpxSkillsCandidate[];
+  candidateIndex: number;
+  inventory: Row[];
+  inventoryIndex: number;
+  marks: Set<string>;
+  visibility?: VisibilityExplanation;
+  desired: string;
+  drift: string;
+  width: number;
+  height: number;
+}): ReactNode {
+  const candidate = surface === 'catalog' ? candidates[candidateIndex] : undefined;
+  const row = surface === 'inventory' ? inventory[inventoryIndex] : undefined;
+  const relationships = sourceRelationships(row);
+  const detail = sourceDetailLines(surface === 'catalog' ? candidate : undefined, surface === 'inventory' ? row : undefined);
+  const actual = row
+    ? relationships.map(({info}) =>
+        `${info.presence === 'deadlink' ? 'BROKEN' : info.underOff ? 'OFF' : 'ON'} ${info.form}`).join(', ')
+    : candidate ? 'not installed' : 'none selected';
+  const effective = row
+    ? [...new Set(visibility?.harnesses.map(({effectiveVisibility}) => effectiveVisibility) ?? ['unknown'])].join('/')
+    : 'not applicable';
+  const selectedIndex = surface === 'catalog' ? candidateIndex : inventoryIndex;
+  const list = surface === 'catalog'
+    ? candidates.map((item, index) => h(RowLine, {
+        key: candidateId(item),
+        active: index === candidateIndex,
+        focused: true,
+      }, `${item.source}@${item.name}${item.installs ? `  ${item.installs}` : ''}`))
+    : inventory.map((item, index) => {
+        const rel = sourceRelationships(item)[0];
+        const inherited = rel?.readOnly ? `  [inherited ${rel.scope}: ${path.dirname(rel.info.path)}]` : '';
+        return h(RowLine, {
+          key: item.id,
+          active: index === inventoryIndex,
+          focused: true,
+          marked: marks.has(item.id),
+        }, `${item.displayName}  ${item.sourceLabel}${inherited}`);
+      });
+  return h(
+    Box,
+    {height, flexDirection: 'column'},
+    h(Text, {wrap: 'wrap'}, `Scope: ${scope === 'global' ? 'Global' : 'exact Project'}  Path: ${scopePath}`),
+    h(Text, {color: 'cyan', wrap: 'wrap'}, 'Discover → Inspect & plan → Confirm ownership → Run & maintain → Verify truth'),
+    h(
+      Box,
+      {flexGrow: 1, overflow: 'hidden'},
+      h(ListColumn, {title: surface === 'catalog' ? 'Catalog' : 'Inventory', focused: true, flexGrow: 1},
+        ...(list.length > 0
+          ? list.slice(
+              windowStart(list.length, selectedIndex, Math.max(1, height - 8)),
+              windowStart(list.length, selectedIndex, Math.max(1, height - 8)) + Math.max(1, height - 8),
+            )
+          : [h(Text, {key: 'empty', dimColor: true}, surface === 'catalog' ? ' / search the pinned Source' : ' No Shared resources')]),
+      ),
+      width >= WIDE_MIN
+        ? h(Box, {width: Math.max(34, Math.floor(width * 0.42)), paddingX: 1},
+            h(SourceDetail, {title: surface === 'catalog' ? 'Selected candidate' : 'Selected resource', lines: detail}))
+        : null,
+    ),
+    width < WIDE_MIN
+      ? h(SourceDetail, {
+          title: surface === 'catalog' ? 'Selected candidate' : 'Selected resource',
+          lines: detail.slice(0, 3),
+        })
+      : null,
+    h(Text, {wrap: 'wrap'}, `Selected: ${detail[0] ?? 'none'}  Actual: ${actual}  Desired: ${desired}`),
+    h(Text, {wrap: 'wrap'}, `Drift: ${drift}  Update: ${row?.updateAvailability?.status ?? 'unknown'}  Relationship: ${relationships.length}  Effective Visibility: ${effective}`),
+  );
+}
+
 function resolveVisibility(
   home: Home,
   row: Row | undefined,
@@ -875,6 +1077,18 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   const takeSnapshot = () =>
     projectPath ? projectTuiSnapshot(home, projectPath) : tuiSnapshot(home);
   const [snapshot, setSnapshot] = useState<TuiSnapshot>(takeSnapshot);
+  const exactProjectPath = projectPath ?? process.cwd();
+  const initialSourceScope: SourceScope = projectPath ? 'project' : 'global';
+  const sourceTakeSnapshot = (scope: SourceScope) =>
+    scope === 'project' ? projectTuiSnapshot(home, exactProjectPath) : tuiSnapshot(home);
+  const [sourceScope, setSourceScope] = useState<SourceScope>(initialSourceScope);
+  const [sourceSnapshot, setSourceSnapshot] = useState<TuiSnapshot>(snapshot);
+  const [sourceSurface, setSourceSurface] = useState<SourceSurface>('catalog');
+  const [sourceCandidates, setSourceCandidates] = useState<NpxSkillsCandidate[]>([]);
+  const [sourceCandidateId, setSourceCandidateId] = useState<string>();
+  const [sourceResourceId, setSourceResourceId] = useState<string>();
+  const [sourceMarks, setSourceMarks] = useState<Set<string>>(new Set());
+  const [sourceDetailOpen, setSourceDetailOpen] = useState(false);
   const planScope: PresetScope = projectPath ? { projectPath } : {};
   const prepareMutation = () => {
     if (projectPath) scanProjectInventory(home, projectPath);
@@ -921,6 +1135,16 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     () => (target ? entriesFor(rows, target.name) : []),
     [rows, target],
   );
+  const sourceInventory = useMemo(() => sourceInventoryRows(sourceSnapshot), [sourceSnapshot]);
+  const sourceCandidateFound = sourceCandidates.findIndex((candidate) =>
+    candidateId(candidate) === sourceCandidateId);
+  const sourceCandidateIndex = sourceCandidateFound < 0 ? 0 : sourceCandidateFound;
+  const sourceResourceFound = sourceInventory.findIndex(({id}) => id === sourceResourceId);
+  const sourceResourceIndex = sourceResourceFound < 0
+    ? sourceResourceId === '' ? -1 : 0
+    : sourceResourceFound;
+  const sourceCandidate = sourceCandidates[sourceCandidateIndex];
+  const sourceResource = sourceInventory[sourceResourceIndex];
   const relationshipFound = entries.findIndex((entry) => entry.key === relationshipKey);
   const relationshipIndex = relationshipFound === -1 ? 0 : relationshipFound;
   const entry = entries[relationshipIndex];
@@ -954,6 +1178,10 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     : '';
   const modalLines = modal ? detailLines(modalContent, Math.max(1, width - 8)) : [];
   const modalPage = Math.max(1, height - 6);
+  const sourceDetailContent = sourceDetailLines(
+    sourceSurface === 'catalog' ? sourceCandidate : undefined,
+    sourceSurface === 'inventory' ? sourceResource : undefined,
+  );
 
   const selectedRow = tab === 'target' ? entry?.row : instance;
   const selectedTarget = tab === 'target' ? target : targets[instTarget];
@@ -969,6 +1197,21 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     () => resolveVisibility(home, selectedRow, projectPath),
     [home, projectPath, selectedRow, snapshot],
   );
+  const activeSourceResource = sourceSurface === 'inventory' ? sourceResource : undefined;
+  const sourceVisibility = useMemo(
+    () => resolveVisibility(
+      home,
+      activeSourceResource,
+      sourceScope === 'project' ? exactProjectPath : undefined,
+    ),
+    [home, exactProjectPath, activeSourceResource, sourceScope, sourceSnapshot],
+  );
+  const sourceTruth = useMemo(
+    () => sourceDesiredTruth(home, activeSourceResource, sourceScope, exactProjectPath),
+    [home, activeSourceResource, sourceScope, exactProjectPath, sourceSnapshot],
+  );
+  const sourcePath = sourceSnapshot.targets.find(({name}) => name === 'shared')?.dir
+    ?? (sourceSnapshot.project ?? home.configDir);
   const explained = useMemo(
     () => resolveVisibility(
       home,
@@ -1081,6 +1324,10 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   };
 
   useInput((input, key) => {
+    if (sourceDetailOpen) {
+      if (key.escape) setSourceDetailOpen(false);
+      return;
+    }
     if (targetInfoOpen) {
       if (key.escape) setTargetInfoOpen(false);
       return;
@@ -1218,7 +1465,26 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         setQuery('');
         return setSearching(false);
       }
-      if (key.return) return setSearching(false);
+      if (key.return) {
+        if (tab === 'source') {
+          try {
+            const result = sharedFind(
+              home,
+              query.trim().split(/\s+/).filter(Boolean),
+              sourceScope === 'project' ? exactProjectPath : undefined,
+              false,
+            );
+            setSourceCandidates(result.candidates);
+            setSourceCandidateId(result.candidates[0]
+              ? candidateId(result.candidates[0])
+              : undefined);
+            setFeedback(result.raw ? 'Source returned unstructured output' : `${result.candidates.length} candidates`);
+          } catch (error) {
+            setFeedback((error as Error).message);
+          }
+        }
+        return setSearching(false);
+      }
       if (key.backspace || key.delete || input === '\x7f')
         return setQuery((value) => value.slice(0, -1));
       if (input && !key.ctrl && !key.meta) return setQuery((value) => value + input);
@@ -1364,6 +1630,99 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         return setConfirmation(null);
       }
       if (input === 'n' || key.escape) return setConfirmation(null);
+      return;
+    }
+    if (input === '1' || input === '2' || input === '3') {
+      setBatch(null);
+      setQuery('');
+      if (input === '3') {
+        try {
+          setSourceSnapshot(sourceTakeSnapshot(sourceScope));
+        } catch (error) {
+          setFeedback((error as Error).message);
+        }
+      }
+      setTab(input === '1' ? 'target' : input === '2' ? 'skill' : 'source');
+      return;
+    }
+    if (tab === 'source') {
+      if (input === 'q' || (key.ctrl && input === 'c')) return exit();
+      if (input === 'g' || input === 'p') {
+        const scope: SourceScope = input === 'g' ? 'global' : 'project';
+        try {
+          const next = sourceTakeSnapshot(scope);
+          setSourceScope(scope);
+          setSourceSnapshot(next);
+          setSourceCandidates([]);
+          setSourceCandidateId(undefined);
+          setSourceResourceId(undefined);
+          setSourceMarks(new Set());
+          setQuery('');
+          setFeedback('');
+        } catch (error) {
+          setFeedback((error as Error).message);
+        }
+        return;
+      }
+      if (key.tab) {
+        setSourceSurface((value) => value === 'catalog' ? 'inventory' : 'catalog');
+        return;
+      }
+      if (input === '/') {
+        setSourceSurface('catalog');
+        setQuery('');
+        setSearching(true);
+        return;
+      }
+      if (input === 'r') {
+        try {
+          const result = sharedRefresh(
+            home,
+            sourceScope === 'project' ? exactProjectPath : undefined,
+          );
+          const keep = sourceResource?.id;
+          const next = sourceTakeSnapshot(sourceScope);
+          const validIds = new Set(sourceInventoryRows(next).map(({id}) => id));
+          setSourceSnapshot(next);
+          setSourceResourceId(keep && validIds.has(keep) ? keep : '');
+          setSourceMarks((marks) => new Set([...marks].filter((id) => validIds.has(id))));
+          setFeedback(`Refreshed ${result.entries.length} managed resources`);
+        } catch (error) {
+          setFeedback((error as Error).message);
+        }
+        return;
+      }
+      if (key.downArrow || input === 'j') {
+        if (sourceSurface === 'catalog') {
+          const next = sourceCandidates[Math.min(sourceCandidates.length - 1, sourceCandidateIndex + 1)];
+          if (next) setSourceCandidateId(candidateId(next));
+        } else {
+          const next = sourceInventory[Math.min(sourceInventory.length - 1, sourceResourceIndex + 1)];
+          if (next) setSourceResourceId(next.id);
+        }
+        return;
+      }
+      if (key.upArrow || input === 'k') {
+        if (sourceSurface === 'catalog') {
+          const next = sourceCandidates[Math.max(0, sourceCandidateIndex - 1)];
+          if (next) setSourceCandidateId(candidateId(next));
+        } else {
+          const next = sourceInventory[Math.max(0, sourceResourceIndex - 1)];
+          if (next) setSourceResourceId(next.id);
+        }
+        return;
+      }
+      if (input === ' ' && sourceSurface === 'inventory' && sourceResource) {
+        const marks = new Set(sourceMarks);
+        if (marks.has(sourceResource.id)) marks.delete(sourceResource.id);
+        else marks.add(sourceResource.id);
+        setSourceMarks(marks);
+        return;
+      }
+      if (key.return && (sourceCandidate || sourceResource)) {
+        setSourceDetailOpen(true);
+        return;
+      }
       return;
     }
     if (batch) {
@@ -1566,13 +1925,15 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   });
 
   const columnName =
-    tab === 'target'
-      ? focusColumn === 0
-        ? 'targets'
-        : 'relationships'
-      : focusColumn === 0
-        ? 'skills'
-        : 'targets';
+    tab === 'source'
+      ? sourceSurface
+      : tab === 'target'
+        ? focusColumn === 0
+          ? 'targets'
+          : 'relationships'
+        : focusColumn === 0
+          ? 'skills'
+          : 'targets';
   const actionHint = actionable
     ? inheritedOn(selectedInfo)
       ? ''
@@ -1596,13 +1957,27 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     h(
       Text,
       null,
-      h(Text, {inverse: tab === 'target'}, ' Target '),
+      h(Text, {inverse: tab === 'target'}, ' 1 Target '),
       ' ',
-      h(Text, {inverse: tab === 'skill'}, ' Skill '),
-      snapshot.project ? h(Text, {color: 'cyan'}, `  Project: ${snapshot.project}`) : null,
-      `  Sort: ${sortLabel(sort)}${query ? `  Search: ${query}` : ''}`,
+      h(Text, {inverse: tab === 'skill'}, ' 2 Skill '),
+      ' ',
+      h(Text, {inverse: tab === 'source'}, ' 3 Source '),
+      snapshot.project && tab !== 'source' ? h(Text, {color: 'cyan'}, `  Project: ${snapshot.project}`) : null,
+      tab === 'source'
+        ? `  ${sourceSurface === 'catalog' ? 'Catalog' : 'Inventory'}`
+        : `  Sort: ${sortLabel(sort)}${query ? `  Search: ${query}` : ''}`,
     ),
-    targetInfoOpen && target
+    sourceDetailOpen
+      ? h(
+          Box,
+          {height: bodyHeight, paddingLeft: 2, paddingRight: 2, paddingTop: 1},
+          h(SourceDetail, {
+            title: sourceSurface === 'catalog' ? 'Candidate detail' : 'Resource detail',
+            lines: sourceDetailContent,
+            bordered: true,
+          }),
+        )
+      : targetInfoOpen && target
       ? h(
           Box,
           {height: bodyHeight, paddingLeft: 2, paddingRight: 2, paddingTop: 1},
@@ -1661,6 +2036,22 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
             {height: bodyHeight, paddingLeft: 2, paddingRight: 2, paddingTop: 1},
             h(ConfirmationModal, {confirmation}),
           )
+      : tab === 'source'
+        ? h(SourceWorkspace, {
+            scope: sourceScope,
+            scopePath: sourcePath,
+            surface: sourceSurface,
+            candidates: sourceCandidates,
+            candidateIndex: sourceCandidateIndex,
+            inventory: sourceInventory,
+            inventoryIndex: sourceResourceIndex,
+            marks: sourceMarks,
+            visibility: sourceVisibility,
+            desired: sourceTruth.desired,
+            drift: sourceTruth.drift,
+            width,
+            height: bodyHeight,
+          })
       : tab === 'target'
         ? h(
             Box,
@@ -1730,7 +2121,9 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     h(
       Text,
       {inverse: true, wrap: 'truncate-end'},
-      targetInfoOpen
+      sourceDetailOpen
+        ? ' esc close '
+        : targetInfoOpen
         ? ' esc close '
         : explainModal
           ? ' tab Harness  v visible  h hidden  d diagnosis  ↑↓/j/k scroll  PgUp/PgDn page  esc close '
@@ -1751,8 +2144,10 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         : confirmation
           ? ' y confirm  n/esc cancel '
         : searching
-          ? ` search: ${query || '…'}  enter apply  esc clear `
-          : ` ${feedback}${feedback ? '  ' : ''}${tab}:${columnName}  ←→/hl  ↑↓/jk${actionHint}${updateHint}  enter ${tab === 'target' && focusColumn === 0 ? 'details' : 'SKILL.md'}${selectedRow?.realPath ? '  e explain' : ''}  m manage  / search  s sort:${sortLabel(sort)}  r updates  R refresh  tab  q `,
+          ? ` search: ${query || '…'}  enter ${tab === 'source' ? 'search Source' : 'apply'}  esc clear `
+          : tab === 'source'
+            ? ` ${feedback}${feedback ? '  ' : ''}source:${columnName}  g Global  p exact Project  tab Catalog/Inventory  / search  ↑↓/jk  enter detail  r refresh${sourceSurface === 'inventory' ? `  space mark (${sourceMarks.size})` : ''}  1/2 matrices  q `
+            : ` ${feedback}${feedback ? '  ' : ''}${tab}:${columnName}  ←→/hl  ↑↓/jk${actionHint}${updateHint}  enter ${tab === 'target' && focusColumn === 0 ? 'details' : 'SKILL.md'}${selectedRow?.realPath ? '  e explain' : ''}  m manage  / search  s sort:${sortLabel(sort)}  r updates  R refresh  tab  1/2/3 workspace  q `,
     ),
   );
 }

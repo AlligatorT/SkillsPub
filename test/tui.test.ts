@@ -240,6 +240,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.TUI_NPX_LOG, JSON.stringify({args, cwd: process.cwd()}) + '\\n');
+if (args[2] === 'find') {
+  process.stdout.write(process.env.TUI_NPX_FIND_OUTPUT || '');
+  process.exit(0);
+}
 if (args[2] !== 'update') process.exit(2);
 const names = args.slice(3).filter((arg) => !arg.startsWith('-'));
 const failed = new Set(JSON.parse(process.env.TUI_NPX_FAIL_NAMES || '[]'));
@@ -291,6 +295,138 @@ test('TUI startup reads legacy configuration without creating a Target registry 
   assert.equal(fs.existsSync(path.join(home.configDir, 'targets.json')), false);
   assert.equal(fs.existsSync(path.join(home.configDir, 'runtimes.json')), false);
   assert.equal(fs.existsSync(path.join(home.configDir, 'state.json')), false);
+});
+
+test('Source workspace exposes durable read-only scope, lifecycle, inventory, and truth', async () => {
+  const {home} = setup();
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-source-project-'));
+  const before = fs.readdirSync(home.configDir, {recursive: true}).sort();
+  const t = await renderApp(home, 120, 32, project);
+
+  await t.send('3');
+  let frame = t.stdout.frame();
+  assert.match(frame, /Source/);
+  assert.match(frame, /Scope: exact Project/);
+  assert.match(frame, new RegExp(fs.realpathSync(project).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(frame, /Discover.*Inspect & plan.*Confirm ownership.*Run & maintain.*Verify truth/);
+  assert.match(frame, /Catalog/);
+  assert.match(frame, /Actual:/);
+  assert.match(frame, /Desired:/);
+  assert.match(frame, /Drift:/);
+  assert.match(frame, /Update:/);
+  assert.match(frame, /Relationship:/);
+  assert.match(frame, /Effective Visibility:/);
+
+  await t.send('\t');
+  frame = t.stdout.frame();
+  assert.match(frame, /Inventory/);
+  await t.send('g');
+  assert.match(t.stdout.frame(), /Scope: Global/);
+  await t.send('p');
+  assert.match(t.stdout.frame(), /Scope: exact Project/);
+  t.unmount();
+
+  assert.deepEqual(fs.readdirSync(home.configDir, {recursive: true}).sort(), before);
+  assert.equal(fs.existsSync(path.join(project, '.skillspub')), false);
+});
+
+test('Source Inventory keeps inherited and unknown ownership readable in a narrow terminal', async (context) => {
+  const fixture = setupManagedTui([{name: 'managed', source: 'owner/repo', hash: 'managed-hash'}]);
+  mkSkill(fixture.discovery, 'unknown');
+  useFixtureEnv(context, fixture.env);
+  const t = await renderApp(fixture.home, 52, 32, fixture.project);
+
+  await t.send('3');
+  await t.send('\t');
+  let frame = t.stdout.frame();
+  assert.match(frame, /Scope: exact Project/);
+  assert.match(frame, /Discover/);
+  assert.match(frame, /Verify truth/);
+  assert.match(frame, /Inventory/);
+  assert.match(frame, /managed/);
+  assert.match(frame, /Selected resource/);
+  assert.match(frame, /Provenance: https:\/\/github\.com\/owner\/repo\.git/);
+  assert.match(frame, /Actual:/);
+  assert.match(frame, /Effective Visibility:/);
+
+  await t.send('j');
+  await t.send('\r');
+  frame = t.stdout.frame();
+  assert.match(frame, /Resource detail/);
+  assert.match(frame, /Provenance: Source unknown/);
+  assert.match(frame, /Read-only inherited global/);
+  await t.send('\x1b');
+  assert.match(t.stdout.frame(), /unknown/);
+  t.unmount();
+});
+
+test('Source truth derives Desired and Drift from the selected scope state', async (context) => {
+  const fixture = setupManagedTui([{name: 'managed', source: 'owner/repo', hash: 'managed-hash'}]);
+  fs.writeFileSync(path.join(fixture.home.configDir, 'state.json'), JSON.stringify({
+    baseIntent: {'global:shared\0managed': 'off'},
+  }));
+  useFixtureEnv(context, fixture.env);
+  const t = await renderApp(fixture.home, 100, 30);
+
+  await t.send('3');
+  await t.send('\t');
+  const frame = t.stdout.frame();
+  assert.match(frame, /Actual: ON local/);
+  assert.match(frame, /Desired: OFF/);
+  assert.match(frame, /Drift: observed/);
+  t.unmount();
+});
+
+test('Source Inventory preserves every observed same-slot Relationship', async (context) => {
+  const fixture = setupManagedTui([{name: 'managed', source: 'owner/repo', hash: 'managed-hash'}]);
+  const projectTarget = path.join(fixture.project, '.agents', 'skills');
+  fs.mkdirSync(projectTarget, {recursive: true});
+  fs.symlinkSync(path.join(fixture.discovery, 'managed'), path.join(projectTarget, 'managed'));
+  useFixtureEnv(context, fixture.env);
+  const t = await renderApp(fixture.home, 100, 30, fixture.project);
+
+  await t.send('3');
+  await t.send('\t');
+  assert.match(t.stdout.frame(), /Relationship: 2/);
+  t.unmount();
+});
+
+test('Source Catalog search keeps same-name candidates distinct and traps detail focus', async (context) => {
+  const fixture = setupManagedTui([{name: 'installed', source: 'owner/installed', hash: 'installed-hash'}]);
+  useFixtureEnv(context, {
+    ...fixture.env,
+    TUI_NPX_FIND_OUTPUT: [
+      'owner/one@shared-name  10 installs',
+      '└ https://skills.sh/owner/one/shared-name',
+      'owner/two@shared-name  20 installs',
+      '└ https://skills.sh/owner/two/shared-name',
+    ].join('\n'),
+  });
+  const t = await renderApp(fixture.home, 120, 32, fixture.project);
+
+  await t.send('3');
+  await t.send('/');
+  for (const input of 'shared-name') await t.send(input);
+  await t.send('\r');
+  let frame = t.stdout.frame();
+  assert.match(frame, /owner\/one@shared-name/);
+  assert.match(frame, /owner\/two@shared-name/);
+  assert.match(frame, /Actual: not installed/);
+
+  await t.send('\r');
+  frame = t.stdout.frame();
+  assert.match(frame, /Candidate detail/);
+  assert.match(frame, /https:\/\/skills\.sh\/owner\/one\/shared-name/);
+  await t.send('j');
+  assert.match(t.stdout.frame(), /owner\/one@shared-name/);
+  await t.send('\x1b');
+  assert.doesNotMatch(t.stdout.frame(), /Candidate detail/);
+  t.unmount();
+
+  const calls = fs.readFileSync(fixture.npxLog, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args.slice(0, 3), ['--yes', 'skills@1.5.21', 'find']);
+  assert.equal(calls[0].cwd, fs.realpathSync(fixture.project));
 });
 
 test('TUI shows a detected built-in missing from an older Target registry without writes', async (context) => {
@@ -446,11 +582,13 @@ test('info panel shows bundle, tag, and preset membership of the selected skill'
 
 test('manage modal adds and removes tags for the selected skill', async () => {
   const { home } = setup();
+  mkSkill(path.join(home.configDir, 'a-skills'), 'aardvark');
   const grillingId = fs.realpathSync(path.join(home.configDir, 'a-skills', 'grilling'));
   const t = await renderApp(home);
   await t.send('l');
-  await t.send('j');
-  await t.send('j'); // grilling
+  await t.send('/');
+  for (const input of 'grilling') await t.send(input);
+  await t.send('\r');
   await t.send('m');
 
   let frame = t.stdout.frame();
