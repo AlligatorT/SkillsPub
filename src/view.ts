@@ -81,6 +81,8 @@ export interface SkillInstance {
   sourceLabel: string;
   updateAvailability?: SharedUpdateAvailabilityEntry;
   relationships: SkillRelationship[];
+  /** Every scanned Relationship, before the Project matrix collapses inherited cells. */
+  observedRelationships?: SkillRelationship[];
   targets: Record<string, SkillInfo | undefined>;
 }
 
@@ -190,6 +192,7 @@ export function projectRows(report: InventoryScanReport): Row[] {
 
   if (report.scope === 'project') {
     for (const instance of grouped.values()) {
+      instance.observedRelationships = instance.relationships;
       const byTarget = new Map<string, SkillRelationship[]>();
       for (const relationship of instance.relationships) {
         const list = byTarget.get(relationship.target) ?? [];
