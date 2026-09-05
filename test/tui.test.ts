@@ -582,11 +582,13 @@ test('info panel shows bundle, tag, and preset membership of the selected skill'
 
 test('manage modal adds and removes tags for the selected skill', async () => {
   const { home } = setup();
+  mkSkill(path.join(home.configDir, 'a-skills'), 'aardvark');
   const grillingId = fs.realpathSync(path.join(home.configDir, 'a-skills', 'grilling'));
   const t = await renderApp(home);
   await t.send('l');
-  await t.send('j');
-  await t.send('j'); // grilling
+  await t.send('/');
+  for (const input of 'grilling') await t.send(input);
+  await t.send('\r');
   await t.send('m');
 
   let frame = t.stdout.frame();
