@@ -1,5 +1,11 @@
 import type { Home } from '../core.ts';
-import type { SkillTarget, TargetDefinition, TargetScope } from '../inventory.ts';
+import type {
+  Activation,
+  ResourceForm,
+  SkillTarget,
+  TargetDefinition,
+  TargetScope,
+} from '../inventory.ts';
 
 type SupportLevel = 'managed' | 'discoverable' | 'unsupported';
 type SharedConsumption = 'not-consumed' | 'required' | 'enabled' | 'excluded' | 'unknown';
@@ -39,12 +45,94 @@ export interface HarnessInspection {
   mirror?: { supported: boolean };
 }
 
+export interface HarnessRelationshipEffect {
+  scope: TargetScope;
+  targetId: string;
+  targetKey: string;
+  resourceId: string;
+  name: string;
+  slot: string;
+  form: ResourceForm;
+  activation: Activation;
+  sourcePath: string;
+  targetPath: string;
+  plannedAction: 'unlink' | 'retain';
+  sourcePreserved: true;
+}
+
+export interface HarnessRelationshipGroup {
+  scope: TargetScope;
+  targetId: string;
+  targetKey: string;
+  relationships: readonly HarnessRelationshipEffect[];
+}
+
+export interface HarnessRelationshipImpact {
+  summary: {
+    affectedRelationships: number;
+    unlinkedRelationships: number;
+    retainedRelationships: number;
+    preservedSourceResources: number;
+  };
+  actual: {
+    relationshipCount: number;
+    isolation: HarnessInspection['isolation']['status'];
+  };
+  desired: {
+    relationshipCount: number;
+    isolation: 'managed';
+  };
+  drift: {
+    relationships: readonly HarnessRelationshipEffect[];
+    isolation: boolean;
+  };
+  groups: readonly HarnessRelationshipGroup[];
+  configuration: {
+    path: string;
+    plannedAction: 'write' | 'retain';
+    originalHash: string;
+    backupPath: string;
+  };
+  recovery: {
+    manifestPath: string;
+    instructions: readonly string[];
+  };
+}
+
+export interface HarnessOperationResult {
+  inspection: HarnessInspection;
+  actual: {
+    unlinkedRelationships: number;
+    retainedRelationships: number;
+    preservedSourceResources: number;
+  };
+  desired: {
+    unlinkedRelationships: number;
+    retainedRelationships: number;
+    preservedSourceResources: number;
+  };
+  drift: {
+    relationships: readonly HarnessRelationshipEffect[];
+    isolation: boolean;
+  };
+  isolation: HarnessInspection['isolation'];
+  relationshipEffects: readonly (HarnessRelationshipEffect & {
+    outcome: 'unlinked' | 'retained' | 'drift';
+  })[];
+  recovery: HarnessRelationshipImpact['recovery'] & {
+    configBackupPreserved: boolean;
+    manifestPreserved: boolean;
+  };
+}
+
 export interface HarnessOperationPlan {
   title: string;
   lines: readonly string[];
   recovery?: readonly string[];
+  relationshipImpact?: HarnessRelationshipImpact;
   apply(): void;
   verify(): HarnessInspection;
+  result?(inspection: HarnessInspection): HarnessOperationResult;
 }
 
 export interface HarnessAdapter {

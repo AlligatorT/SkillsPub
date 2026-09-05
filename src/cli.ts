@@ -15,6 +15,11 @@ import {
   inspectHarnesses,
   planHarnessOperation,
 } from './harnesses/registry.ts';
+import type {
+  HarnessInspection,
+  HarnessOperationResult,
+  HarnessRelationshipImpact,
+} from './harnesses/types.ts';
 import {
   applyTargetMigration,
   loadTargets,
@@ -119,6 +124,10 @@ export function shouldRunTui(
 const CELL: Record<string, string> = { on: 'on', off: 'off', deadlink: '!' };
 
 type JsonData = Record<string, unknown>;
+type StableHarnessData = HarnessRelationshipImpact | HarnessOperationResult | {
+  inspection: HarnessInspection;
+  recovery: readonly string[];
+};
 
 class CliError extends Error {
   readonly code: string;
@@ -669,12 +678,25 @@ function cmdHarnesses(
   );
   const stableLine = (line: string): string =>
     line.replace(/\d{10,}-[0-9a-f]{8}-[0-9a-f-]{27}/gi, '<recovery-id>');
+  const stableData = (value: StableHarnessData): JsonData => {
+    try {
+      return JSON.parse(JSON.stringify(
+        value,
+        (_key, entry) => typeof entry === 'string' ? stableLine(entry) : entry,
+      )) as JsonData;
+    } catch (error) {
+      throw new Error('failed to stabilize Harness operation data', { cause: error });
+    }
+  };
   const planData = {
     operation: `harness.${action}`,
     harness,
     ...(selectedProject ? { projectPath: selectedProject } : {}),
     title: plan.title,
     steps: plan.lines.map(stableLine),
+    ...(plan.relationshipImpact
+      ? { relationshipImpact: stableData(plan.relationshipImpact) }
+      : {}),
     ...(plan.recovery?.length ? { recovery: plan.recovery.map(stableLine) } : {}),
   };
   const confirmed = rest.includes('--yes');
@@ -682,6 +704,10 @@ function cmdHarnesses(
   if (!json) {
     console.log(plan.title);
     for (const line of plan.lines) console.log(`  ${line}`);
+    if (plan.recovery?.length) {
+      console.log('Recovery before confirmation:');
+      for (const line of plan.recovery) console.log(`  ${line}`);
+    }
   }
   if (!confirmed) return;
   let inspection: ReturnType<typeof plan.verify>;
@@ -700,10 +726,42 @@ function cmdHarnesses(
       },
     );
   }
+  const result = plan.result?.(inspection) ?? { inspection, recovery: plan.recovery ?? [] };
   if (!json) {
     if (plan.recovery?.length) {
       console.log('Manual recovery:');
       for (const line of plan.recovery) console.log(`  ${line}`);
+    }
+    if ('drift' in result) {
+      console.log(
+        `Actual: ${result.actual.unlinkedRelationships} unlinked, ` +
+        `${result.actual.retainedRelationships} retained, ` +
+        `${result.actual.preservedSourceResources} source resources preserved`,
+      );
+      console.log(
+        `Desired: ${result.desired.unlinkedRelationships} unlinked, ` +
+        `${result.desired.retainedRelationships} retained, ` +
+        `${result.desired.preservedSourceResources} source resources preserved`,
+      );
+      console.log(
+        `Drift: ${result.drift.relationships.length} Relationship effects; ` +
+        `isolation ${result.drift.isolation ? 'yes' : 'no'}`,
+      );
+      console.log(`Isolation: ${result.isolation.status} — ${result.isolation.detail}`);
+      console.log('Relationship effects:');
+      for (const effect of result.relationshipEffects) {
+        console.log(
+          `  ${effect.scope}/${effect.targetKey} (${effect.targetId})\t` +
+          `resource=${effect.resourceId}\tform=${effect.form}\tActivation=${effect.activation}\t` +
+          `source=${effect.sourcePath}\ttarget=${effect.targetPath}\t` +
+          `action=${effect.plannedAction}\toutcome=${effect.outcome}`,
+        );
+      }
+      console.log(
+        `Recovery evidence: config backup ${result.recovery.configBackupPreserved ? 'preserved' : 'missing'}; ` +
+        `affected-Link manifest ${result.recovery.manifestPreserved ? 'preserved' : 'missing'}; ` +
+        `${result.recovery.manifestPath}`,
+      );
     }
     console.log(`${inspection.name} ${action} verified.`);
     return;
@@ -711,8 +769,8 @@ function cmdHarnesses(
   return {
     applied: true,
     plan: planData,
-    result: { inspection, recovery: plan.recovery ?? [] },
-    remainingDrift: [],
+    result: stableData(result),
+    remainingDrift: 'drift' in result ? result.drift.relationships : [],
   };
 }
 
