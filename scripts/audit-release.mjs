@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: root })
@@ -40,6 +40,20 @@ for (const file of tracked) {
 assert.deepEqual(findings, [], `tracked-file privacy/secret audit failed:\n${findings.join('\n')}`);
 
 const manifest = parseJson('package.json');
+const { harnessAdapters } = await import(
+  pathToFileURL(path.join(root, 'dist', 'harnesses', 'registry.js')).href
+);
+assert.deepEqual(
+  harnessAdapters()
+    .map((adapter) => [adapter.key, adapter.targetDefinition().relationship.support])
+    .sort(([left], [right]) => left.localeCompare(right)),
+  [
+    ['claude', 'managed'],
+    ['grok', 'managed'],
+    ['pi', 'discoverable'],
+  ],
+  'v0.1.0 Harness boundary changed',
+);
 const license = fs.readFileSync(path.join(root, 'LICENSE'), 'utf8');
 assert.equal(manifest.license, 'MIT');
 assert.match(license, /^MIT License\n/);
@@ -58,5 +72,5 @@ const licenseProblems = Object.entries(lock.packages)
 assert.deepEqual(licenseProblems, [], `runtime dependency license audit failed:\n${licenseProblems.join('\n')}`);
 
 process.stdout.write(
-  `release audit passed: ${tracked.length} tracked files, runtime dependency licenses checked\n`,
+  `release audit passed: ${tracked.length} tracked files, v0.1.0 Harness boundary and runtime dependency licenses checked\n`,
 );
