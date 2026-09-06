@@ -521,6 +521,10 @@ test('Source remove previews the full cascade and requires separate cascade and 
   assert.match(t.stdout.frame(), /Confirm complete Relationship cascade/);
   await t.send('\r');
   frame = await waitForFrame(t, /Confirm Vercel skills source deletion/);
+  assert.match(frame, /Source outcome: partial/);
+  assert.match(frame, /Actual Relationship:/);
+  assert.match(frame, /Mirror state:/);
+  assert.match(frame, /running Harness not reloaded/);
   assert.equal(fs.existsSync(linked), false);
   assert.ok(fs.existsSync(path.join(fixture.discovery, 'managed', 'SKILL.md')));
   await t.send('\r');
@@ -702,6 +706,13 @@ test('Source Add and explicit Replace run A+C preview, cancellation, confirmatio
     assert.match(frame, /Confirm SkillsPub intent/);
     assert.match(frame, /Scope · identity · Slot · Relationships/);
     assert.match(frame, /Vercel skills owns security audit and final Proceed/);
+    assert.match(frame, /Scope switching and unrelated mutations are disabled/);
+    await t.send(projectScope ? 'g' : 'p');
+    await t.send('d');
+    frame = t.stdout.frame();
+    assert.match(frame, /Confirm SkillsPub intent/);
+    assert.match(frame, new RegExp(projectScope ? 'exact Project' : 'Global'));
+    assert.equal(fs.readFileSync(path.join(source, 'SKILL.md'), 'utf8'), '# same');
     await t.send('\r');
     assert.match(t.stdout.frame(), /Source operation — running|Source operation — Verify truth/);
     frame = await waitForFrame(t, /Source operation — Verify truth/);
@@ -714,6 +725,8 @@ test('Source Add and explicit Replace run A+C preview, cancellation, confirmatio
     assert.match(frame, /Slot: same/);
     assert.match(frame, /Relationships: 3/);
     assert.match(frame, /Drift: .*mirror-sync required/);
+    assert.match(frame, /Source outcome: succeeded/);
+    assert.match(frame, /Mirror state: mirror-sync required/);
     assert.match(frame, /Update availability:/);
     assert.match(frame, /next-load Effective Visibility:/);
     assert.equal(fs.readFileSync(path.join(source, 'SKILL.md'), 'utf8'), '# new/repo\n');
@@ -730,6 +743,20 @@ test('Source Add and explicit Replace run A+C preview, cancellation, confirmatio
     assert.deepEqual(finalPolicy.claims[sharedSlotId], ['preset:work']);
     await t.send('\r');
     assert.doesNotMatch(t.stdout.frame(), /Source operation — Verify truth/);
+    assert.match(t.stdout.frame(), /l latest transcript/);
+    await t.send('l');
+    frame = t.stdout.frame();
+    assert.match(frame, /Latest Source operation transcript/);
+    assert.match(frame, /Source operation — Verify truth/);
+    assert.match(frame, /Actual:/);
+    assert.match(frame, /Desired:/);
+    assert.match(frame, /Drift:/);
+    assert.match(frame, /Provenance:/);
+    assert.match(frame, /Update availability:/);
+    assert.match(frame, /next-load Effective Visibility:/);
+    assert.match(frame, /running Harness not reloaded/);
+    await t.send('\x1b');
+    assert.doesNotMatch(t.stdout.frame(), /Latest Source operation transcript/);
     t.unmount();
   }
 });
@@ -809,6 +836,13 @@ test('Source Add failure stays in Variant C, retries idempotently, and rejects c
     assert.match(frame, /Source intent changed/i);
     assert.match(frame, /New preview required/i);
     assert.equal(fs.readFileSync(path.join(fixture.discovery, 'fresh', 'SKILL.md'), 'utf8'), '# owner/repo\n');
+    await t.send('\x1b');
+    await t.send('l');
+    frame = t.stdout.frame();
+    assert.match(frame, /Latest Source operation transcript/);
+    assert.match(frame, /Source operation — failed/);
+    assert.match(frame, /New preview required/i);
+    await t.send('\x1b');
     t.unmount();
   }
 });
@@ -2067,6 +2101,8 @@ test('Source marked update previews exclusions, reports partial truth, and retri
   assert.ok(fs.existsSync(path.join(fixture.parking, 'b-fail', 'SKILL.md')));
   assert.equal(fs.existsSync(path.join(fixture.discovery, 'b-fail')), false);
   assert.match(frame, /Timeline: plan recheck succeeded/);
+  assert.match(frame, /Source outcome: partial/);
+  assert.match(frame, /Mirror state: none/);
   await t.send('l');
   frame = t.stdout.frame();
   assert.match(frame, /Full operation log \/ evidence/);

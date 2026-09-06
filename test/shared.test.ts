@@ -291,10 +291,18 @@ test('shared read-only commands return structured JSON without stream leakage', 
   assert.equal(fallback.stdout.includes('\x1b'), false);
 });
 
-test('shared add writes only the Global or exact Project Shared Target', () => {
+test('shared add previews before --yes and writes only the Global or exact Project Shared Target', () => {
   const global = setup();
+  const preview = global.run(['shared', 'add', 'owner/repo', '--skill', 'Example']);
+  assert.equal(preview.status, 0, preview.stderr);
+  assert.match(preview.stdout, /Source Add plan:/);
+  assert.match(preview.stdout, /Scope: Global/);
+  assert.match(preview.stdout, /Confirm with --yes/);
+  assert.equal(global.calls().length, 0);
+  assert.equal(fs.existsSync(path.join(global.home, '.agents', 'skills', 'example')), false);
+
   const added = global.run(
-    ['shared', 'add', 'owner/repo', '--skill', 'Example'],
+    ['shared', 'add', 'owner/repo', '--skill', 'Example', '--yes'],
     { XDG_STATE_HOME: path.join(global.root, 'xdg-state') },
   );
   assert.equal(added.status, 0, added.stderr);
@@ -310,8 +318,14 @@ test('shared add writes only the Global or exact Project Shared Target', () => {
   const projectSetup = setup();
   const project = path.join(projectSetup.root, 'project');
   fs.mkdirSync(project);
-  const projectAdded = projectSetup.run([
+  const projectPreview = projectSetup.run([
     'project', project, 'shared', 'add', 'owner/repo', '--skill', 'Example',
+  ]);
+  assert.equal(projectPreview.status, 0, projectPreview.stderr);
+  assert.match(projectPreview.stdout, /Scope: exact Project/);
+  assert.equal(projectSetup.calls().length, 0);
+  const projectAdded = projectSetup.run([
+    'project', project, 'shared', 'add', 'owner/repo', '--skill', 'Example', '--yes',
   ]);
   assert.equal(projectAdded.status, 0, projectAdded.stderr);
   assert.ok(fs.existsSync(path.join(project, '.agents', 'skills', 'example', 'SKILL.md')));
@@ -321,6 +335,19 @@ test('shared add writes only the Global or exact Project Shared Target', () => {
     '--yes', PACKAGE, 'add', 'owner/repo', '--skill', 'Example',
     '--agent', 'codex', '--copy',
   ]);
+});
+
+test('read-only Shared commands reject mutation confirmation flags', () => {
+  const {run} = setup();
+  for (const args of [['shared', 'refresh', '--yes'], ['shared', 'outdated', '--yes']]) {
+    const text = run(args);
+    assert.equal(text.status, 2);
+    assert.match(text.stderr, /usage:/);
+    const json = run([...args, '--json']);
+    assert.equal(json.status, 2);
+    assert.equal(json.stderr, '');
+    assert.equal(JSON.parse(json.stdout).error.code, 'usage_error');
+  }
 });
 
 test('shared describe passes through pinned add --list output', () => {
@@ -343,13 +370,24 @@ test('JSON Shared add previews without invoking npx and applies the same plan wi
   assert.equal(calls().length, 0);
   assert.equal(fs.existsSync(path.join(home, '.agents', 'skills', 'example')), false);
 
-  const applied = run(['shared', 'add', 'owner/repo', '--skill', 'Example', '--yes', '--json']);
+  const applied = run(
+    ['shared', 'add', 'owner/repo', '--skill', 'Example', '--yes', '--json'],
+    {NPX_STDOUT: '\x1b[31mupstream audit\x1b[0m\n', NPX_STDERR: '\x1b[33mProceed?\x1b[0m\n'},
+  );
   assert.equal(applied.status, 0, applied.stderr || applied.stdout);
   assert.equal(applied.stderr, '');
+  assert.equal(applied.stdout.trim().split('\n').length, 1);
+  assert.equal(applied.stdout.includes('\x1b'), false);
   const appliedDocument = JSON.parse(applied.stdout);
   assert.equal(appliedDocument.data.applied, true);
   assert.deepEqual(appliedDocument.data.plan, previewDocument.data.plan);
   assert.deepEqual(appliedDocument.data.remainingDrift, []);
+  assert.equal(appliedDocument.data.finalTruth.source.outcome, 'succeeded');
+  assert.equal(appliedDocument.data.finalTruth.source.provenance, 'https://github.com/owner/repo.git');
+  assert.equal(appliedDocument.data.finalTruth.updateAvailability, 'unknown');
+  assert.deepEqual(appliedDocument.data.finalTruth.relationshipEffects, previewDocument.data.plan.relationshipEffects);
+  assert.equal(appliedDocument.data.finalTruth.nextLoadEffectiveVisibility, 'unknown');
+  assert.equal(appliedDocument.data.finalTruth.runningHarnessReloaded, false);
   assert.equal(calls().length, 1);
   assert.ok(fs.existsSync(path.join(home, '.agents', 'skills', 'example', 'SKILL.md')));
 
@@ -375,7 +413,7 @@ test('JSON Shared add previews without invoking npx and applies the same plan wi
 
 test('JSON Shared update and removal phases are plan-only until confirmed', () => {
   const {home, run, calls} = setup();
-  assert.equal(run(['shared', 'add', 'owner/repo', '--skill', 'Example']).status, 0);
+  assert.equal(run(['shared', 'add', 'owner/repo', '--skill', 'Example', '--yes']).status, 0);
   const sourceUrl = 'https://github.com/owner/repo.git';
   writeLock(path.join(home, '.agents', '.skill-lock.json'), {example: {
     source: 'owner/repo', sourceType: 'github', sourceUrl,
@@ -391,6 +429,9 @@ test('JSON Shared update and removal phases are plan-only until confirmed', () =
   assert.equal(JSON.parse(updatePreview.stdout).data.applied, false);
   const update = run(['shared', 'update', 'example', '--yes', '--json']);
   assert.equal(update.status, 0, update.stderr || update.stdout);
+  const updateDocument = JSON.parse(update.stdout);
+  assert.equal(updateDocument.data.finalTruth.source.outcome, 'succeeded');
+  assert.equal(updateDocument.data.finalTruth.runningHarnessReloaded, false);
 
   const removePreview = run(['shared', 'remove', 'example', '--json']);
   assert.equal(removePreview.status, 0, removePreview.stderr || removePreview.stdout);
@@ -409,7 +450,7 @@ test('JSON Shared update and removal phases are plan-only until confirmed', () =
 
 test('shared add uses the upstream normalized Slot name', () => {
   const { home, run } = setup();
-  const result = run(['shared', 'add', 'owner/repo', '--skill', 'Foo@Bar']);
+  const result = run(['shared', 'add', 'owner/repo', '--skill', 'Foo@Bar', '--yes']);
   assert.equal(result.status, 0, result.stderr);
   assert.ok(fs.existsSync(path.join(home, '.agents', 'skills', 'foo-bar', 'SKILL.md')));
 });
@@ -441,7 +482,7 @@ test('managed lock names use upstream normalization and reject Slot collisions',
 test('shared add accepts direct sources that upstream does not lock', () => {
   const { home, config, run } = setup();
   const result = run(
-    ['shared', 'add', 'https://example.test/skill.md', '--skill', 'direct'],
+    ['shared', 'add', 'https://example.test/skill.md', '--skill', 'direct', '--yes'],
     { NPX_NO_LOCK: '1' },
   );
   assert.equal(result.status, 0, result.stderr);
@@ -454,7 +495,7 @@ test('shared add accepts direct sources that upstream does not lock', () => {
 test('shared add does not enter Verify success when repository provenance is missing', () => {
   const {home, run} = setup();
   const result = run(
-    ['shared', 'add', 'owner/repo', '--skill', 'missing-lock'],
+    ['shared', 'add', 'owner/repo', '--skill', 'missing-lock', '--yes'],
     {NPX_NO_LOCK: '1'},
   );
   assert.equal(result.status, 1);
@@ -471,7 +512,7 @@ test('shared add accepts matching root-level lock provenance without replacement
     same: { source: 'owner/repo', skillPath: 'SKILL.md' },
   });
 
-  const result = run(['shared', 'add', 'owner/repo', '--skill', 'same']);
+  const result = run(['shared', 'add', 'owner/repo', '--skill', 'same', '--yes']);
   assert.equal(result.status, 0, result.stderr);
 });
 
@@ -489,7 +530,7 @@ test('shared add previews a source replacement and requires --replace', () => {
   assert.equal(calls().length, 0);
   assert.equal(fs.readFileSync(path.join(root, 'same', 'SKILL.md'), 'utf8'), '# old');
 
-  const replaced = run(['shared', 'add', 'new/repo', '--skill', 'same', '--replace']);
+  const replaced = run(['shared', 'add', 'new/repo', '--skill', 'same', '--replace', '--yes']);
   assert.equal(replaced.status, 0, replaced.stderr);
   assert.doesNotMatch(JSON.stringify(calls()[0].args), /--replace/);
   assert.equal(calls()[0].args.slice(3).includes('--yes'), false);
@@ -642,7 +683,7 @@ test('failed shared update restores desired OFF entries and releases the operati
     GIT_TREES: JSON.stringify({[sourceUrl]: {'skills/off-skill': 'new-hash'}}),
   }).status, 0);
 
-  const result = run(['shared', 'update', 'off-skill'], { NPX_FAIL: '7' });
+  const result = run(['shared', 'update', 'off-skill', '--yes'], { NPX_FAIL: '7' });
   assert.equal(result.status, 1);
   assert.match(result.stdout, /off-skill: failed \(exit 7\)/);
   assert.match(result.stderr, /skills update failed/);
@@ -685,7 +726,7 @@ test('spawn errors still restore desired OFF entries and report Actual state', (
   fs.chmodSync(path.join(bin, 'npx'), 0o644);
   fs.symlinkSync(process.execPath, path.join(bin, 'node'));
 
-  const result = run(['shared', 'update', 'off-skill'], { PATH: bin });
+  const result = run(['shared', 'update', 'off-skill', '--yes'], { PATH: bin });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /skills update failed/);
   assert.match(result.stderr, /Actual: off-skill=off\/local/);
@@ -714,7 +755,7 @@ test('Project shared update uses the exact directory and reparks OFF entries', (
     GIT_TREES: JSON.stringify({[sourceUrl]: {'skills/off-skill': 'new-hash'}}),
   }).status, 0);
 
-  const result = run(['project', project, 'shared', 'update']);
+  const result = run(['project', project, 'shared', 'update', '--yes']);
   assert.equal(result.status, 0, result.stderr);
   assert.ok(fs.existsSync(path.join(parking, 'off-skill', 'SKILL.md')));
   assert.equal(fs.existsSync(path.join(discovery, 'off-skill')), false);
@@ -784,7 +825,7 @@ test('active Preset claims keep updated skills ON and block remove', () => {
     GIT_TREES: JSON.stringify({[sourceUrl]: {'skills/claimed': 'new-hash'}}),
   }).status, 0);
 
-  const updated = run(['shared', 'update', 'claimed']);
+  const updated = run(['shared', 'update', 'claimed', '--yes']);
   assert.equal(updated.status, 0, updated.stderr);
   assert.ok(fs.existsSync(path.join(discovery, 'claimed', 'SKILL.md')));
   assert.equal(fs.existsSync(path.join(parking, 'claimed')), false);
@@ -816,7 +857,7 @@ test('orphaned Preset lastClaims also keep updated skills ON and block remove', 
     GIT_TREES: JSON.stringify({[sourceUrl]: {'skills/orphaned': 'new-hash'}}),
   }).status, 0);
 
-  const updated = run(['shared', 'update', 'orphaned']);
+  const updated = run(['shared', 'update', 'orphaned', '--yes']);
   assert.equal(updated.status, 0, updated.stderr);
   assert.ok(fs.existsSync(path.join(discovery, 'orphaned', 'SKILL.md')));
   assert.equal(fs.existsSync(path.join(parking, 'orphaned')), false);
@@ -1495,6 +1536,16 @@ test('JSON batch update returns itemized partial effects without claiming atomic
   const document = JSON.parse(result.stdout);
   assert.equal(document.error.code, 'apply_failed');
   assert.equal(document.error.details.partialEffects, 'present');
+  assert.equal(document.error.details.plan.operation, 'shared.update');
+  assert.equal(document.error.details.finalTruth.source.outcome, 'partial');
+  assert.match(document.error.details.finalTruth.source.provenance, /a-success=https:\/\/github\.com\/owner\/repo\.git/);
+  assert.deepEqual(document.error.details.finalTruth.source.items.map(
+    ({name, outcome}: {name: string; outcome: string}) => [name, outcome],
+  ), [['a-success', 'updated'], ['b-fail', 'failed']]);
+  assert.ok(Array.isArray(document.error.details.finalTruth.actualRelationships));
+  assert.equal(document.error.details.finalTruth.mirrorState, 'none');
+  assert.equal(document.error.details.finalTruth.runningHarnessReloaded, false);
+  assert.ok(Array.isArray(document.error.details.finalTruth.relationshipEffects));
   assert.deepEqual(document.error.details.items.map(
     ({name, outcome}: {name: string; outcome: string}) => [name, outcome],
   ), [['a-success', 'updated'], ['b-fail', 'failed']]);
@@ -1591,7 +1642,7 @@ test('shared update refuses an identity-matching upstream-missing observation', 
     skill: hashDirectory(path.join(discovery, 'missing')),
   };
 
-  const refused = run(['shared', 'update', 'missing']);
+  const refused = run(['shared', 'update', 'missing', '--yes']);
   assert.equal(refused.status, 1);
   assert.match(refused.stderr, /cannot update upstream-missing Skill: missing/);
   assert.equal(calls().length, 0);
@@ -1612,7 +1663,7 @@ test('shared update refuses an identity-matching check-failed observation', () =
   const refreshed = run(['shared', 'refresh']);
   assert.equal(refreshed.status, 0, refreshed.stderr);
 
-  const refused = run(['shared', 'update', 'offline']);
+  const refused = run(['shared', 'update', 'offline', '--yes']);
   assert.equal(refused.status, 1);
   assert.match(refused.stderr, /cannot update check-failed Skill: offline/);
   assert.equal(calls().length, 0);

@@ -37,6 +37,8 @@ import {
   filterRows,
   projectRows,
   readViewState,
+  projectTuiSnapshot,
+  tuiSnapshot,
   untagged,
   viewTargets,
   type Row,
@@ -54,9 +56,20 @@ import {
   sharedOutdated,
   sharedUpdate,
   type SharedDescribeResult,
+  type SharedCommandResult,
   type SharedFindResult,
+  type SharedMutationPlan,
+  type SharedRemovalPlan,
   type SharedUpdateAvailabilityResult,
+  type SharedUpdatePlan,
+  type SharedUpdateResult,
 } from './shared.ts';
+import {
+  sourceMirrorState,
+  verifiedSourceTruth,
+  verifiedUpdateTruth,
+  type SourceVerifiedTruth,
+} from './source-truth.ts';
 import {
   addBundleMembers,
   addPresetSelectors,
@@ -488,9 +501,9 @@ function cmdOnOff(
       const intent = target.intent === target.to
         ? ''
         : ` (Base intent ${target.intent}; claimed ${target.to})`;
-      const mirror = target.createForm === 'mirror'
-        ? ' (create Mirror)'
-        : target.syncMirror ? ' (synchronize Mirror)' : '';
+      let mirror = '';
+      if (target.createForm === 'mirror') mirror = ' (create Mirror)';
+      else if (target.syncMirror) mirror = ' (synchronize Mirror)';
       console.log(
         `  ${target.targetId}/${target.slot}\t${target.from} -> ${target.to}${intent}${mirror}`,
       );
@@ -1214,14 +1227,126 @@ function cmdBundle(
   }
 }
 
+function printSharedPlan(plan: SharedMutationPlan | SharedUpdatePlan): void {
+  let label = 'Add';
+  if ('items' in plan) label = 'Update';
+  else if (plan.replacement) label = 'Replace';
+  console.log(`Source ${label} plan:`);
+  console.log(`Scope: ${plan.scope?.kind === 'project' ? 'exact Project' : 'Global'} — ${plan.scope?.path}`);
+  console.log(JSON.stringify(plan, null, 2));
+  console.log('Confirm with --yes after reviewing this immutable plan.');
+}
+
+function sharedFinalTruth(
+  home: ReturnType<typeof defaultHome>,
+  plan: SharedMutationPlan | SharedUpdatePlan | SharedRemovalPlan,
+  result: SharedCommandResult | SharedUpdateResult,
+  projectPath?: string,
+  outcome: 'succeeded' | 'failed' | 'partial' = 'succeeded',
+): JsonData {
+  const scope = plan.scope?.kind ?? 'global';
+  const exactProjectPath = projectPath ?? plan.scope?.path ?? process.cwd();
+  let truth: SourceVerifiedTruth;
+  try {
+    const snapshot = scope === 'project'
+      ? projectTuiSnapshot(home, exactProjectPath)
+      : tuiSnapshot(home);
+    truth = 'items' in plan
+      ? verifiedUpdateTruth(home, snapshot, plan, result as SharedUpdateResult, scope, exactProjectPath)
+      : verifiedSourceTruth(home, snapshot, plan, scope, exactProjectPath);
+  } catch {
+    truth = {
+      resource: 'unknown',
+      provenance: 'Source unknown',
+      slot: 'items' in plan
+        ? plan.items.map(({slot}) => slot).join(', ')
+        : plan.slots.join(', '),
+      relationships: [],
+      actual: result.actual,
+      desired: 'unknown',
+      drift: result.drift.join(', ') || 'rescan unavailable',
+      updateAvailability: 'unknown',
+      effectiveVisibility: 'unknown',
+    };
+  }
+  let relationshipEffects: Array<{plannedAction: string}>;
+  if ('items' in plan)
+    relationshipEffects = plan.items.filter((item) => item.included).flatMap((item) => item.relationshipEffects);
+  else if ('dependencies' in plan) relationshipEffects = plan.dependencies;
+  else relationshipEffects = plan.relationshipEffects ?? [];
+  const source: JsonData = {outcome, provenance: truth.provenance, resource: truth.resource};
+  if ('items' in plan) {
+    const outcomes = new Map((result as SharedUpdateResult).items.map((item) => [item.name, item.outcome]));
+    source.items = plan.items.map((item) => ({
+      name: item.name,
+      outcome: outcomes.get(item.name) ?? 'skipped',
+      provenance: item.expectedFinalTruth.source,
+    }));
+  }
+  const mirrorState = sourceMirrorState(truth);
+  return {
+    actualRelationships: truth.relationships,
+    actual: truth.actual,
+    desired: truth.desired,
+    drift: truth.drift,
+    source,
+    updateAvailability: truth.updateAvailability,
+    relationshipEffects,
+    mirrorState,
+    recovery: plan.recovery,
+    nextLoadEffectiveVisibility: truth.effectiveVisibility,
+    runningHarnessReloaded: false,
+  };
+}
+
+function printSharedFinalTruth(finalTruth: JsonData): void {
+  console.log('Final truth:');
+  console.log(JSON.stringify(finalTruth, null, 2));
+}
+
+function sharedFailureWithPlan(
+  home: ReturnType<typeof defaultHome>,
+  error: unknown,
+  plan: SharedMutationPlan | SharedUpdatePlan | SharedRemovalPlan,
+  projectPath?: string,
+): Error {
+  const failure = error as Error & {details?: JsonData};
+  const details = failure.details ?? {};
+  const actual = typeof details.actual === 'string' ? details.actual : 'rescan unavailable';
+  const drift = Array.isArray(details.remainingDrift) ? details.remainingDrift as string[] : [];
+  const result: SharedCommandResult | SharedUpdateResult = 'items' in plan
+    ? {
+        actual,
+        drift,
+        items: Array.isArray(details.items)
+          ? details.items as SharedUpdateResult['items']
+          : plan.items.map((item) => ({
+              ...item,
+              outcome: item.included ? 'failed' as const : 'skipped' as const,
+              ...(item.included ? {reason: failure.message} : {}),
+            })),
+      }
+    : {actual, drift};
+  const partial = details.partialEffects !== undefined && details.partialEffects !== 'none-detected' ||
+    Array.isArray(details.completedWork) && details.completedWork.length > 0;
+  failure.details = {
+    ...details,
+    plan,
+    finalTruth: sharedFinalTruth(home, plan, result, projectPath, partial ? 'partial' : 'failed'),
+  };
+  return failure;
+}
+
 function cmdShared(
   home: ReturnType<typeof defaultHome>,
   args: string[],
   projectPath?: string,
   json = false,
 ): JsonData | SharedFindResult | SharedDescribeResult | SharedUpdateAvailabilityResult | undefined {
-  const confirmed = json && args.includes('--yes');
-  const [action, ...rest] = json ? args.filter((arg) => arg !== '--yes') : args;
+  const confirmed = args.includes('--yes');
+  const [action, ...rest] = args.filter((arg) => arg !== '--yes');
+  if (confirmed && action !== 'add' && action !== 'update' && action !== 'remove')
+    throw new Error(`usage: skillspub shared ${action ?? 'find|describe|refresh|outdated|add|update|remove'} ...`);
   switch (action) {
     case 'find':
       return sharedFind(home, rest, projectPath, !json);
@@ -1256,7 +1381,7 @@ function cmdShared(
         strict: true,
       });
       if (positionals.length !== 1 || !values.skill)
-        throw new Error('usage: skillspub shared add <source> --skill <name> [--replace]');
+        throw new Error('usage: skillspub shared add <source> --skill <name> [--replace] [--yes]');
       const plan = planSharedAdd(
         home,
         positionals[0],
@@ -1265,35 +1390,58 @@ function cmdShared(
         projectPath,
       );
       if (plan.replacement && !values.replace) {
-        if (!json) console.log(`Replace: ${plan.replacement.from} -> ${plan.replacement.to}`);
-        if (json) throw new CliError(
+        if (!json) {
+          console.log(`Replace: ${plan.replacement.from} -> ${plan.replacement.to}`);
+          throw new Error('source replacement requires --replace');
+        }
+        throw new CliError(
           'preflight_error',
           'source replacement requires --replace',
           1,
           { plan, requiredOption: '--replace' },
         );
       }
-      if (json && !confirmed) return { applied: false, plan };
-      const result = sharedAdd(
-        home,
-        positionals[0],
-        values.skill,
-        Boolean(values.replace),
-        projectPath,
-        plan,
-      );
-      if (json) return { applied: true, plan, result, remainingDrift: result.drift };
+      if (!confirmed) {
+        if (json) return { applied: false, plan };
+        printSharedPlan(plan);
+        break;
+      }
+      let result: SharedCommandResult;
+      try {
+        result = sharedAdd(
+          home,
+          positionals[0],
+          values.skill,
+          Boolean(values.replace),
+          projectPath,
+          plan,
+          json,
+        );
+      } catch (error) {
+        throw sharedFailureWithPlan(home, error, plan, projectPath);
+      }
+      const finalTruth = sharedFinalTruth(home, plan, result, projectPath);
+      if (json) return { applied: true, plan, result, finalTruth, remainingDrift: result.drift };
       console.log(`Actual: ${result.actual}`);
       console.log(`Remaining drift: ${result.drift.join(', ') || 'none'}`);
-      console.log('Running Harnesses must reload/restart to read the final Shared Target state.');
+      printSharedFinalTruth(finalTruth);
       break;
     }
     case 'update': {
       if (rest.some((arg) => arg.startsWith('-')))
-        throw new Error('usage: skillspub shared update [<managed-name>...]');
+        throw new Error('usage: skillspub shared update [<managed-name>...] [--yes]');
       const plan = planSharedUpdate(home, rest, projectPath);
-      if (json && !confirmed) return { applied: false, plan };
-      const result = sharedUpdate(home, rest, projectPath, plan);
+      if (!confirmed) {
+        if (json) return { applied: false, plan };
+        printSharedPlan(plan);
+        break;
+      }
+      let result: SharedUpdateResult;
+      try {
+        result = sharedUpdate(home, rest, projectPath, plan, json);
+      } catch (error) {
+        throw sharedFailureWithPlan(home, error, plan, projectPath);
+      }
       if (!json) for (const item of result.items)
         console.log(`${item.name}: ${item.outcome}${item.reason ? ` (${item.reason})` : ''}`);
       const failed = result.items.filter(({outcome}) => outcome === 'failed');
@@ -1306,17 +1454,31 @@ function cmdShared(
             remainingDrift: result.drift,
             partialEffects: result.items.some(({outcome}) => outcome === 'updated') ? 'present' : 'none-detected',
             stage: 'upstream',
+            plan,
             items: result.items,
+            finalTruth: sharedFinalTruth(
+              home,
+              plan,
+              result,
+              projectPath,
+              result.items.some(({outcome}) => outcome === 'updated') ? 'partial' : 'failed',
+            ),
           },
         },
       );
       if (!json) {
         console.log(`Actual: ${result.actual}`);
         console.log(`Remaining drift: ${result.drift.join(', ') || 'none'}`);
-        console.log('Running Harnesses must reload/restart to read the final Shared Target state.');
+        printSharedFinalTruth(sharedFinalTruth(home, plan, result, projectPath));
         break;
       }
-      return { applied: true, plan, result, remainingDrift: result.drift };
+      return {
+        applied: true,
+        plan,
+        result,
+        finalTruth: sharedFinalTruth(home, plan, result, projectPath),
+        remainingDrift: result.drift,
+      };
     }
     case 'remove': {
       const {values, positionals} = parseArgs({
@@ -1331,7 +1493,7 @@ function cmdShared(
       if (positionals.length !== 1)
         throw new Error('usage: skillspub shared remove <managed-name> [--cascade|--yes]');
       const cascadeRequested = Boolean(values.cascade);
-      const yes = json ? confirmed : Boolean(values.yes);
+      const yes = confirmed;
       const sourceConfirmed = yes && !cascadeRequested;
       const preview = planSharedRemove(home, positionals, projectPath);
       if (!json) {
@@ -1359,30 +1521,50 @@ function cmdShared(
         throw new Error('Relationship cascade requires --cascade --yes');
       }
       if (cascadeRequested) {
-        const result = sharedRemoveCascade(home, positionals, preview, projectPath);
+        let result: SharedCommandResult;
+        try {
+          result = sharedRemoveCascade(home, positionals, preview, projectPath);
+        } catch (error) {
+          throw sharedFailureWithPlan(home, error, preview, projectPath);
+        }
         if (json) return {
           applied: true,
           phase: 'cascade',
           plan: preview,
           result,
+          finalTruth: sharedFinalTruth(home, preview, result, projectPath, 'partial'),
           nextConfirmation: 'source-deletion',
         };
         console.log('Relationship cascade complete.');
         console.log(`Completed work: ${result.completedWork?.join(', ') || 'no dependent Relationships'}`);
         console.log(`Recovery manifest: ${result.recoveryManifest}`);
+        printSharedFinalTruth(sharedFinalTruth(home, preview, result, projectPath, 'partial'));
         console.log(`Confirm source deletion separately with: skillspub shared remove ${preview.source.name} --yes`);
         break;
       }
-      const result = sharedRemove(home, positionals, {
-        sourceConfirmed: true,
-        projectPath,
-        expected: preview,
-      });
-      if (json) return {applied: true, phase: 'source', plan: preview, result, remainingDrift: result.drift};
+      let result: SharedCommandResult;
+      try {
+        result = sharedRemove(home, positionals, {
+          sourceConfirmed: true,
+          projectPath,
+          expected: preview,
+          nonInteractive: json,
+        });
+      } catch (error) {
+        throw sharedFailureWithPlan(home, error, preview, projectPath);
+      }
+      if (json) return {
+        applied: true,
+        phase: 'source',
+        plan: preview,
+        result,
+        finalTruth: sharedFinalTruth(home, preview, result, projectPath),
+        remainingDrift: result.drift,
+      };
       console.log(`Actual: ${result.actual}`);
       console.log(`Completed work: ${result.completedWork?.join(', ')}`);
       console.log(`Remaining drift: ${result.drift.join(', ') || 'none'}`);
-      console.log('Running Harnesses must reload/restart to read the final Shared Target state.');
+      printSharedFinalTruth(sharedFinalTruth(home, preview, result, projectPath));
       break;
     }
     default:
@@ -1401,11 +1583,9 @@ function printDoctor(report: DoctorReport): void {
   console.log('Safe repair plan:');
   if (report.repairs.length === 0) console.log('  none');
   for (const repair of report.repairs) {
-    const action = repair.kind === 'retarget-link'
-      ? 'retarget Link'
-      : repair.kind === 'migrate-legacy-off'
-        ? 'migrate legacy OFF'
-        : 'remove broken link';
+    let action = 'remove broken link';
+    if (repair.kind === 'retarget-link') action = 'retarget Link';
+    else if (repair.kind === 'migrate-legacy-off') action = 'migrate legacy OFF';
     console.log(`  - ${action}: ${repair.path}: ${repair.from}${repair.to ? ` -> ${repair.to}` : ''}`);
   }
 }
@@ -1646,6 +1826,11 @@ async function main(
       process.exitCode = exitCode;
     } else {
       console.error(`skillspub: ${(err as Error).message}`);
+      const details = (err as Error & {details?: JsonData}).details;
+      if (details?.finalTruth) {
+        console.error('Final truth:');
+        console.error(JSON.stringify(details.finalTruth, null, 2));
+      }
       process.exitCode = errorInfo(err, mutation).exitCode;
     }
   }

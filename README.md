@@ -32,7 +32,7 @@ skillspub explain <skill>
 skillspub targets --json
 ```
 
-Run `skillspub` in a terminal to open the TUI. Mutating commands preview their plan and require explicit confirmation where applicable. SkillsPub does not inspect running Harness process memory; Effective visibility describes the next Harness load from local evidence.
+Run `skillspub` in a terminal to open the TUI. Source add, replace, and update commands print an immutable plan first; rerun the same command with `--yes` to apply it. Source removal separately confirms the Relationship cascade and named source deletion. SkillsPub does not inspect running Harness process memory; Effective visibility describes the next Harness load from local evidence.
 
 The bundled [`SKILL.md`](SKILL.md) is the thin router for agents. It requires all Skill Target operations to go through the CLI rather than direct filesystem edits.
 
