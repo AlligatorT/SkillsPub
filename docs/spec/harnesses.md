@@ -135,9 +135,9 @@ Source Adapter 拥有固定上游版本、命令、输出解析、provenance、l
 - 用户之后通过 SkillsPub 为其他 Skill Targets 建立 Relationships；
 - 升级上游版本时同步更新证据、fixtures 和兼容测试，不使用动态 `latest`。
 
-## Pi v0.1 managed repair slice
+## Pi v0.1 repaired Adapter and promotion gate
 
-Pi 在旧验收前曾被标为 `managed`，但 real-machine #109 证明 `!skills/**` 同时匹配 Pi 与 Shared 的 `skills/**`，会把 Pi-specific Target 一起压掉。当前 release support 必须降为 `discoverable`；只有本节修复与新 real-machine acceptance 全部通过后，candidate commit 才能把 Pi 提升为 `managed/excluded`。
+Pi 在旧验收前曾被标为 `managed`，但 real-machine #109 证明 `!skills/**` 同时匹配 Pi 与 Shared 的 `skills/**`，会把 Pi-specific Target 一起压掉。Global/Project Adapter 与 Target repair 已集成，但当前 release support 保持 `discoverable`；只有新 real-machine acceptance 全部通过后，后续 release 才能把 Pi 提升为 `managed/excluded`。
 
 ### Targets, settings, and matcher semantics
 
@@ -167,7 +167,7 @@ Pi promotion 是 release acceptance gate，不是代码完成后的默认 label�
 
 ## Grok Build v0.1 managed slice
 
-Grok Build 是 Pi、Claude Code 之后的第三个 `managed` Harness。Adapter key 是 `grok`，已验证契约固定到 `xai-org/grok-build` revision `19d42e35c07a9c9244f03f6df0c4c353f970d4f9`。该切片只管理 Grok 原生 Global/Project Skill Targets，不接管 Plugin、bundled、server-managed 或命令目录。
+Grok Build 保持 `managed/excluded` release contract；Pi 在新 real-machine acceptance 前仍为 `discoverable`。Adapter key 是 `grok`，已验证契约固定到 `xai-org/grok-build` revision `19d42e35c07a9c9244f03f6df0c4c353f970d4f9`。该切片只管理 Grok 原生 Global/Project Skill Targets，不接管 Plugin、bundled、server-managed 或命令目录。
 
 ### Targets and resource form
 
@@ -225,4 +225,4 @@ Harness 只有在自己的 persistent filesystem/configuration seam 允许 Skill
 | Hermes | 每个 Profile 有独立 `HERMES_HOME` 与 `skills/`；可配置 external dirs | 多 Profile 需求明确前延后 | [Profiles](https://hermes-agent.nousresearch.com/docs/user-guide/profiles), [Skills](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills) |
 | OpenClaw | 多 Target roots 与 per-Agent final allowlists | 多 Agent identity model 明确前延后 | [Skills](https://docs.openclaw.ai/tools/skills), [Skills config](https://docs.openclaw.ai/tools/skills-config) |
 
-现有 implementation 已有 Source Adapter、Relationship/Desired-state、Effective Visibility、Claude 与 Grok 基线，但 v0.1 release 仍受 complete A+C Source workspace、Pi repair、新 Pi real-machine acceptance、Grok/Claude regression、exact-commit CI/package/human acceptance 阻塞。固定 Vercel `skills` 仍是唯一 remote Source lifecycle/lock owner。后续 Harness 只有满足 complete consumed-root/control/recovery evidence 才能让 resolver 给出 release-quality non-`unknown` claim。
+集成 candidate 已包含 complete A+C Source workspace、Pi Global/Project repair、Relationship/Desired-state、Effective Visibility，以及 Claude/Grok contracts。v0.1 publication 仍受新 Pi real-machine acceptance、exact-candidate automated/package evidence 和 human release gates 阻塞。固定 Vercel `skills` 仍是唯一 remote Source lifecycle/lock owner。后续 Harness 只有满足 complete consumed-root/control/recovery evidence 才能让 resolver 给出 release-quality non-`unknown` claim。

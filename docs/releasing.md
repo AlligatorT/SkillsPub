@@ -35,14 +35,17 @@ From a clean checkout of the release commit:
 ```sh
 npm ci
 npm run typecheck
+node --test test/shared.test.ts test/harnesses.test.ts test/cli.test.ts test/tui.test.ts
 npm test
 npm run build
 npm run audit:release
 npm run check:package
 npm pack --ignore-scripts
+npm run check:package -- ./skillspub-0.1.0.tgz
+npm pack --dry-run --ignore-scripts
 ```
 
-Record the commit SHA, tarball filename, SHA-256, and `npm pack --dry-run` file list in the release notes. Confirm the tarball contains only `dist/**`, `SKILL.md`, `README.md`, `LICENSE`, and `package.json`.
+Record the commit SHA, each command and bounded result, tarball filename/SHA-256, and `npm pack --dry-run` file list on the release-candidate ticket before opening the release PR; copy that evidence into the release notes at publication. Confirm the tarball contains only `dist/**`, `SKILL.md`, `README.md`, `LICENSE`, and `package.json`. Keep real-machine acceptance output outside the package.
 
 ## Recoverable cutover
 

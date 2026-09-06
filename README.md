@@ -2,7 +2,7 @@
 
 SkillsPub is an auditable relationship and visibility manager for Agent Skills. Disk records Actual state; SkillsPub records human intent and persistent Preset claims, then explains why a skill will or will not be discovered on the next Harness load.
 
-The v0.1 built-in Harnesses are Pi, Claude Code, and Grok Build.
+The v0.1 built-in Harnesses are Pi (`discoverable` pending real-machine acceptance), Claude Code (`managed`, Shared `not-consumed`), and Grok Build (`managed/excluded`). Codex, OpenCode, Kimi Code, and TraeCode remain `discoverable` compatibility candidates; WorkBuddy remains `unsupported`.
 
 ## Requirements
 
@@ -45,9 +45,12 @@ npm test
 npm run build
 npm run audit:release
 npm run check:package
+npm pack --ignore-scripts
+npm run check:package -- ./skillspub-0.1.0.tgz
+npm pack --dry-run --ignore-scripts
 ```
 
-`check:package` packs twice, verifies byte-for-byte deterministic tarballs and the exact file allowlist, installs one tarball into a clean temporary prefix, then runs the installed CLI and a read-only JSON command.
+`check:package` packs twice, verifies byte-for-byte deterministic tarballs and the exact file allowlist, installs one tarball into a clean temporary prefix, then runs the installed CLI and a read-only JSON command. Pass a candidate tarball path to require a byte-for-byte match with the verified package.
 
 Release prerequisites and the cutover checklist are in [`docs/releasing.md`](docs/releasing.md).
 

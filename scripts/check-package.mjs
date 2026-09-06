@@ -7,6 +7,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
+assert.ok(process.argv.length <= 3, 'usage: node scripts/check-package.mjs [candidate.tgz]');
+const candidate = process.argv[2] ? path.resolve(root, process.argv[2]) : undefined;
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-package-'));
 
 function run(command, args, options = {}) {
@@ -55,13 +57,24 @@ try {
     fs.readFileSync(path.join(root, 'package.json'), 'utf8'),
     'package.json',
   );
+  assert.equal(manifest.version, '0.1.0');
   assert.equal(manifest.bin?.skillspub, 'dist/cli.js');
   assert.equal(manifest.license, 'MIT');
   assert.equal(manifest.repository?.url, 'git+https://github.com/AlligatorT/SkillsPub.git');
   assert.equal(manifest.homepage, 'https://github.com/AlligatorT/SkillsPub');
   assert.equal(manifest.publishConfig?.access, 'public');
+  assert.deepEqual(manifest.engines, { node: '>=22.20.0' });
+  assert.deepEqual(Object.keys(manifest.dependencies).sort(), [
+    'ink',
+    'react',
+    'smol-toml',
+    'wrap-ansi',
+  ]);
+  assert.equal(manifest.devDependencies?.skills, '1.5.21');
 
   run('npm', ['run', 'build']);
+  const entrypoint = path.join(root, manifest.bin.skillspub);
+  assert.match(fs.readFileSync(entrypoint, 'utf8'), /^#!\/usr\/bin\/env node\n/);
   const expected = [
     'LICENSE',
     'README.md',
@@ -80,11 +93,18 @@ try {
   assert.deepEqual(second.files, expected, 'second npm tarball contents changed');
 
   const digest = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-  assert.equal(digest(first.archive), digest(second.archive), 'npm tarball is not deterministic');
+  const verifiedDigest = digest(first.archive);
+  assert.equal(verifiedDigest, digest(second.archive), 'npm tarball is not deterministic');
+  if (candidate) {
+    assert.ok(fs.existsSync(candidate), `candidate tarball does not exist: ${candidate}`);
+    assert.equal(digest(candidate), verifiedDigest, 'candidate tarball differs from verified package');
+  }
 
   const prefix = path.join(temporary, 'install');
   run('npm', ['install', '--prefix', prefix, '--omit=dev', '--ignore-scripts', first.archive]);
   const bin = path.join(prefix, 'node_modules', '.bin', 'skillspub');
+  const installedEntrypoint = path.join(prefix, 'node_modules', 'skillspub', manifest.bin.skillspub);
+  assert.ok(fs.statSync(installedEntrypoint).mode & 0o111, 'installed CLI entrypoint must be executable');
   const isolated = path.join(temporary, 'config');
   const env = { ...process.env, HOME: temporary, SKILLSPUB_CONFIG_DIR: isolated };
   const launched = spawnSync(bin, [], { cwd: temporary, env, encoding: 'utf8' });
@@ -98,7 +118,9 @@ try {
   assert.equal(result.ok, true);
   assert.ok(Array.isArray(result.data));
 
-  process.stdout.write(`package verified: ${expected.length} files, sha256 ${digest(first.archive)}\n`);
+  process.stdout.write(
+    `package verified: ${expected.length} files, sha256 ${verifiedDigest}${candidate ? ', candidate matched' : ''}\n`,
+  );
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });
 }
