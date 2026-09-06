@@ -1172,6 +1172,36 @@ function sourceOperationLines(operation: SourceOperationState): {title: string; 
   };
 }
 
+function sourceEmptyLines(surface: SourceSurface, scope: SourceScope, scopePath: string): string[] {
+  const scopeLines = scope === 'global'
+    ? [' Current scope: Global only — exact Project data is not modified.']
+    : [
+        ' Current scope: exact Project only — Global data is not modified.',
+        ` Canonical path: ${scopePath}`,
+        ' Inherited Global/ancestor entries are explanatory read-only context.',
+      ];
+  const identityLines = [
+    ' Source = Shared remote lifecycle: find/add/replace/update/remove',
+    ' (Target & Skill manage installed Relationships).',
+    ' g/p select one isolated scope — Global/exact Project never combined.',
+  ];
+  if (surface === 'catalog')
+    return [
+      ' No remote candidates loaded.',
+      ' Press / to search with the pinned Vercel skills Source Adapter.',
+      ' Nothing is fetched automatically.',
+      ...identityLines,
+      ...scopeLines,
+    ];
+  return [
+    scope === 'global'
+      ? ' No Shared resources in the Global scope.'
+      : ' No Shared resources in the exact Project scope.',
+    ...identityLines,
+    ...scopeLines,
+  ];
+}
+
 function SourceWorkspace({
   scope,
   scopePath,
@@ -1261,7 +1291,8 @@ function SourceWorkspace({
               windowStart(list.length, selectedIndex, Math.max(1, height - 8)),
               windowStart(list.length, selectedIndex, Math.max(1, height - 8)) + Math.max(1, height - 8),
             )
-          : [h(Text, {key: 'empty', dimColor: true}, surface === 'catalog' ? ' / search the pinned Source' : ' No Shared resources')]),
+          : sourceEmptyLines(surface, scope, scopePath).map((line, index) =>
+              h(Text, {key: `empty-${index}`, dimColor: true, wrap: 'wrap'}, line))),
       ),
       width >= WIDE_MIN
         ? h(Box, {width: Math.max(34, Math.floor(width * 0.42)), paddingX: 1},
@@ -2882,7 +2913,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
           : tab === 'source'
             ? sourceOperation
               ? sourceOperationHint(sourceOperation)
-              : ` ${feedback}${feedback ? '  ' : ''}source:${columnName}${latestSourceOperation ? '  l latest transcript' : ''}  g Global  p exact Project  tab Catalog/Inventory  / search  ↑↓/jk  enter detail${sourceSurface === 'catalog' && sourceCandidate ? '  a add/replace' : ''}  r refresh${sourceSurface === 'inventory' ? `  space mark (${sourceMarks.size})${sourceResource?.updateAvailability?.status === 'available' && mutableSourceRelationship(sourceResource, sourceScope) ? '  u update' : ''}${sourceMarks.size > 0 ? '  b batch update' : ''}${sourceRemovable ? '  d remove' : ''}` : ''}  1/2 matrices  q `
+              : ` ${feedback}${feedback ? '  ' : ''}source:${columnName}${latestSourceOperation ? '  l latest transcript' : ''}  g Global only  p Project only  tab Catalog/Inventory  / search  ↑↓/jk  enter detail${sourceSurface === 'catalog' && sourceCandidate ? '  a add/replace' : ''}  r refresh${sourceSurface === 'inventory' ? `  space mark (${sourceMarks.size})${sourceResource?.updateAvailability?.status === 'available' && mutableSourceRelationship(sourceResource, sourceScope) ? '  u update' : ''}${sourceMarks.size > 0 ? '  b batch update' : ''}${sourceRemovable ? '  d remove' : ''}` : ''}  1/2 matrices  q `
             : ` ${feedback}${feedback ? '  ' : ''}${tab}:${columnName}  ←→/hl  ↑↓/jk${actionHint}  enter ${tab === 'target' && focusColumn === 0 ? 'details' : 'SKILL.md'}${selectedRow?.realPath ? '  e explain' : ''}  m manage  / search  s sort:${sortLabel(sort)}  R refresh  tab  1/2/3 workspace  q `,
     ),
   );
