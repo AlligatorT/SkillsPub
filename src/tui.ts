@@ -68,12 +68,15 @@ import {
   type NpxSkillsCandidate,
 } from './npx-skills.ts';
 import {
+  catalogCandidateTruth,
+  relationshipStatusText,
   sourceDesiredTruth,
   sourceInventoryRows,
   sourceMirrorState,
   sourceRelationships,
   verifiedSourceTruth,
   verifiedUpdateTruth,
+  type CatalogCandidateTruth,
   type SourceScope,
   type SourceVerifiedTruth,
 } from './source-truth.ts';
@@ -1208,6 +1211,7 @@ function SourceWorkspace({
   surface,
   candidates,
   candidateIndex,
+  candidateTruth,
   inventory,
   inventoryIndex,
   marks,
@@ -1223,6 +1227,7 @@ function SourceWorkspace({
   surface: SourceSurface;
   candidates: NpxSkillsCandidate[];
   candidateIndex: number;
+  candidateTruth?: CatalogCandidateTruth;
   inventory: Row[];
   inventoryIndex: number;
   marks: Set<string>;
@@ -1247,19 +1252,18 @@ function SourceWorkspace({
     ? `${activeDetail.title} [${Math.min(operationScroll + 1, activeDetail.lines.length)}/${activeDetail.lines.length}]`
     : surface === 'catalog' ? 'Selected candidate' : 'Selected resource';
   const idleActual = row
-    ? relationships.map(({info}) =>
-        `${info.presence === 'deadlink' ? 'BROKEN' : info.underOff ? 'OFF' : 'ON'} ${info.form}`).join(', ')
-    : candidate ? 'not installed' : 'none selected';
+    ? relationships.map(({info}) => relationshipStatusText(info)).join(', ')
+    : candidateTruth?.actual ?? (candidate ? 'not installed' : 'none selected');
   const idleEffective = row
     ? [...new Set(visibility?.harnesses.map(({effectiveVisibility}) => effectiveVisibility) ?? ['unknown'])].join('/')
-    : 'not applicable';
+    : candidateTruth?.effectiveVisibility ?? 'not applicable';
   const addCurrentTruth = operation?.kind === 'add' ? operation.plan.currentTruth : undefined;
   const actual = operation?.truth?.actual ?? addCurrentTruth?.actual ?? idleActual;
-  const displayedDesired = operation?.truth?.desired ?? addCurrentTruth?.desired ?? desired;
-  const displayedDrift = operation?.truth?.drift ?? addCurrentTruth?.drift ?? drift;
-  const displayedUpdate = operation?.truth?.updateAvailability ?? row?.updateAvailability?.status ?? 'unknown';
+  const displayedDesired = operation?.truth?.desired ?? addCurrentTruth?.desired ?? candidateTruth?.desired ?? desired;
+  const displayedDrift = operation?.truth?.drift ?? addCurrentTruth?.drift ?? candidateTruth?.drift ?? drift;
+  const displayedUpdate = operation?.truth?.updateAvailability ?? row?.updateAvailability?.status ?? candidateTruth?.updateAvailability ?? 'unknown';
   const effective = operation?.truth?.effectiveVisibility ?? idleEffective;
-  const displayedRelationships = operation?.truth?.relationships.length ?? relationships.length;
+  const displayedRelationships = operation?.truth?.relationships.length ?? (row ? relationships.length : candidateTruth?.relationships ?? 0);
   const selectedIndex = surface === 'catalog' ? candidateIndex : inventoryIndex;
   const list = surface === 'catalog'
     ? candidates.map((item, index) => h(RowLine, {
@@ -1580,6 +1584,12 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   const sourceTruth = useMemo(
     () => sourceDesiredTruth(home, activeSourceResource, sourceScope, exactProjectPath),
     [home, activeSourceResource, sourceScope, exactProjectPath, sourceSnapshot],
+  );
+  const sourceCandidateTruth = useMemo(
+    () => sourceSurface === 'catalog'
+      ? catalogCandidateTruth(home, sourceSnapshot, sourceCandidate, sourceScope, exactProjectPath)
+      : undefined,
+    [home, sourceSurface, sourceSnapshot, sourceCandidate, sourceScope, exactProjectPath],
   );
   const sourceTarget = sourceSnapshot.targets.find(({name}) => name === 'shared');
   const sourceRelationship = sourceRelationships(activeSourceResource).find((relationship) =>
@@ -2809,6 +2819,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
             surface: sourceSurface,
             candidates: sourceCandidates,
             candidateIndex: sourceCandidateIndex,
+            candidateTruth: sourceCandidateTruth,
             inventory: sourceInventory,
             inventoryIndex: sourceResourceIndex,
             marks: sourceMarks,

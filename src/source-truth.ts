@@ -3,7 +3,13 @@ import path from 'node:path';
 import type {Home} from './core.ts';
 import {explainVisibility} from './explain.ts';
 import {hashDirectory} from './inventory.ts';
-import {readNpxSkillsLock} from './npx-skills.ts';
+import {
+  normalizeNpxSkillsName,
+  npxSkillsProvenanceLabel,
+  readNpxSkillsLock,
+  sameNpxSkillsSource,
+} from './npx-skills.ts';
+import type {NpxSkillsCandidate} from './npx-skills.ts';
 import type {
   SharedMutationPlan,
   SharedRemovalPlan,
@@ -37,6 +43,10 @@ export function sourceMirrorState(truth: SourceVerifiedTruth): string {
 function sourceRelationshipActual(relationship: SkillRelationship): string {
   if (relationship.info.presence === 'deadlink') return 'broken';
   return relationship.info.underOff ? 'off' : 'on';
+}
+
+export function relationshipStatusText(info: SkillRelationship['info']): string {
+  return `${info.presence === 'deadlink' ? 'BROKEN' : info.underOff ? 'OFF' : 'ON'} ${info.form}`;
 }
 
 export function sourceRelationships(row: Row | undefined): SkillRelationship[] {
@@ -165,6 +175,82 @@ export function verifiedSourceTruth(
       ? `mirror-sync required (${mirrorDrift}); ${driftEvidence.join(', ')}`
       : driftEvidence.join(', ') || 'none observed',
     updateAvailability: row?.updateAvailability?.status ?? 'unknown',
+    effectiveVisibility: sourceVisibility(home, row, scope === 'project' ? projectPath : undefined),
+  };
+}
+
+export type CatalogCandidateState = 'installed' | 'replace' | 'occupied-unknown' | 'not-installed';
+
+export interface CatalogCandidateTruth {
+  state: CatalogCandidateState;
+  actual: string;
+  desired: string;
+  drift: string;
+  updateAvailability: string;
+  relationships: number;
+  effectiveVisibility: string;
+}
+
+/**
+ * Current scope-local truth for a remote Catalog candidate, matched by its
+ * normalized Slot against the latest snapshot. Non-writable (inherited)
+ * relationships never count toward installed matching: an installation in one
+ * isolated scope must not appear installed in the other.
+ */
+export function catalogCandidateTruth(
+  home: Home,
+  snapshot: TuiSnapshot,
+  candidate: NpxSkillsCandidate | undefined,
+  scope: SourceScope,
+  projectPath: string,
+): CatalogCandidateTruth | undefined {
+  if (!candidate) return undefined;
+  const slot = normalizeNpxSkillsName(candidate.name);
+  const match = sourceInventoryRows(snapshot)
+    .map((row) => ({
+      row,
+      relationships: sourceRelationships(row).filter((relationship) =>
+        !relationship.readOnly && relationship.slot === slot),
+    }))
+    .find(({relationships}) => relationships.length > 0);
+  if (!match) return {
+    state: 'not-installed',
+    actual: 'not installed',
+    desired: 'not applicable',
+    drift: 'not applicable',
+    updateAvailability: 'unknown',
+    relationships: 0,
+    effectiveVisibility: 'not applicable',
+  };
+  const {row, relationships} = match;
+  // Desired/Drift stay 'not applicable' for foreign Slots: ownership is not ours to derive.
+  const provenanceKnown = npxSkillsProvenanceLabel(row.provenance) !== 'Source unknown';
+  if (!provenanceKnown) return {
+    state: 'occupied-unknown',
+    actual: 'Slot occupied — Source unknown; no ownership assumed',
+    desired: 'not applicable',
+    drift: 'not applicable',
+    updateAvailability: 'unknown',
+    relationships: sourceRelationships(row).length,
+    effectiveVisibility: 'unknown',
+  };
+  if (!sameNpxSkillsSource(candidate.source, candidate.name, row.provenance)) return {
+    state: 'replace',
+    actual: `occupied by ${row.sourceLabel} — Replace required`,
+    desired: 'not applicable',
+    drift: 'not applicable',
+    updateAvailability: row.updateAvailability?.status ?? 'unknown',
+    relationships: sourceRelationships(row).length,
+    effectiveVisibility: 'unknown',
+  };
+  const desiredTruth = sourceDesiredTruth(home, row, scope, projectPath);
+  return {
+    state: 'installed',
+    actual: relationships.map(({info}) => relationshipStatusText(info)).join(', '),
+    desired: desiredTruth.desired,
+    drift: desiredTruth.drift,
+    updateAvailability: row.updateAvailability?.status ?? 'unknown',
+    relationships: sourceRelationships(row).length,
     effectiveVisibility: sourceVisibility(home, row, scope === 'project' ? projectPath : undefined),
   };
 }
