@@ -959,6 +959,181 @@ test('Source Add failure stays in Variant C, retries idempotently, and rejects c
   }
 });
 
+test('Source Catalog reflects Global Add truth after Verify acknowledgement', async (context) => {
+  const fixture = setupManagedTui([]);
+  useFixtureEnv(context, {
+    ...fixture.env,
+    TUI_NPX_FIND_OUTPUT: [
+      'owner/repo@fresh  1 installs',
+      '└ https://skills.sh/owner/repo/fresh',
+    ].join('\n'),
+  });
+  const t = await renderApp(fixture.home, 124, 36);
+  await t.send('3');
+  await t.send('/');
+  await t.send('f');
+  await t.send('\r');
+  assert.match(t.stdout.frame(), /Actual: not installed/);
+
+  await t.send('a');
+  await t.send('\r');
+  await t.send('\r');
+  let frame = await waitForFrame(t, /Source operation — Verify truth/);
+  assert.match(frame, /succeeded/);
+  await t.send('\r');
+  frame = t.stdout.frame();
+  assert.match(frame, /owner\/repo@fresh/);
+  assert.match(frame, /Actual: ON local/);
+  assert.doesNotMatch(frame, /not installed/);
+  assert.match(frame, /Desired: ON/);
+  assert.match(frame, /Drift: none observed/);
+  assert.match(frame, /Relationship: 1/);
+  t.unmount();
+});
+
+test('Source Catalog reflects exact-Project retry Add truth after Verify acknowledgement', async (context) => {
+  const fixture = setupManagedTui([], true);
+  useFixtureEnv(context, {
+    ...fixture.env,
+    TUI_NPX_FAIL_ONCE: path.join(fixture.project, 'fail-once'),
+    TUI_NPX_FIND_OUTPUT: [
+      'fail-once/repo@fresh  1 installs',
+      '└ https://skills.sh/fail-once/repo/fresh',
+    ].join('\n'),
+  });
+  const t = await renderApp(fixture.home, 124, 36, fixture.project);
+  await t.send('3');
+  await t.send('/');
+  await t.send('f');
+  await t.send('\r');
+  await t.send('a');
+  await t.send('\r');
+  await t.send('\r');
+  let frame = await waitForFrame(t, /Source operation — failed/);
+  assert.match(frame, /t retry/);
+  await t.send('t');
+  frame = await waitForFrame(t, /Source operation — Verify truth/);
+  assert.match(frame, /succeeded/);
+  await t.send('\r');
+  frame = t.stdout.frame();
+  assert.match(frame, /Scope: exact Project/);
+  assert.match(frame, /fail-once\/repo@fresh/);
+  assert.match(frame, /Actual: ON local/);
+  assert.doesNotMatch(frame, /not installed/);
+  t.unmount();
+});
+
+test('Source Catalog shows Replace occupancy and reflects new provenance after Replace', async (context) => {
+  const fixture = setupManagedTui([{name: 'same', source: 'old/repo', hash: 'old-hash'}]);
+  useFixtureEnv(context, {
+    ...fixture.env,
+    TUI_NPX_FIND_OUTPUT: [
+      'new/repo@same  12 installs',
+      '└ https://skills.sh/new/repo/same',
+    ].join('\n'),
+  });
+  const t = await renderApp(fixture.home, 124, 36);
+  await t.send('3');
+  await t.send('/');
+  await t.send('s');
+  await t.send('\r');
+  let frame = t.stdout.frame();
+  assert.match(frame, /occupied by .*old\/repo/);
+  assert.match(frame, /Replace required/);
+  assert.doesNotMatch(frame, /Actual: not installed/);
+
+  await t.send('a');
+  assert.match(t.stdout.frame(), /Source Replace plan/);
+  await t.send('\r');
+  await t.send('\r');
+  frame = await waitForFrame(t, /Source operation — Verify truth/);
+  assert.match(frame, /succeeded/);
+  await t.send('\r');
+  frame = t.stdout.frame();
+  assert.match(frame, /Actual: ON local/);
+  assert.doesNotMatch(frame, /Replace required/);
+  assert.doesNotMatch(frame, /not installed/);
+  t.unmount();
+});
+
+test('Source Catalog reports unknown-provenance Slot occupancy conservatively', async (context) => {
+  const fixture = setupManagedTui([]);
+  mkSkill(fixture.discovery, 'mystery');
+  useFixtureEnv(context, {
+    ...fixture.env,
+    TUI_NPX_FIND_OUTPUT: [
+      'owner/repo@mystery  3 installs',
+      '└ https://skills.sh/owner/repo/mystery',
+    ].join('\n'),
+  });
+  const t = await renderApp(fixture.home, 124, 36);
+  await t.send('3');
+  await t.send('/');
+  await t.send('m');
+  await t.send('\r');
+  const frame = t.stdout.frame();
+  assert.match(frame, /Slot occupied — Source unknown; no ownership assumed/);
+  assert.doesNotMatch(frame, /Actual: not installed/);
+  t.unmount();
+});
+
+test('Source Catalog derives candidate truth from the selected isolated scope', async (context) => {
+  const fixture = setupManagedTui([{name: 'scoped', source: 'owner/repo', hash: 'scoped-hash'}]);
+  useFixtureEnv(context, {
+    ...fixture.env,
+    TUI_NPX_FIND_OUTPUT: [
+      'owner/repo@scoped  5 installs',
+      '└ https://skills.sh/owner/repo/scoped',
+    ].join('\n'),
+  });
+  const t = await renderApp(fixture.home, 124, 36, fixture.project);
+  await t.send('3');
+  await t.send('g');
+  await t.send('/');
+  await t.send('s');
+  await t.send('\r');
+  let frame = t.stdout.frame();
+  assert.match(frame, /Scope: Global/);
+  assert.match(frame, /Actual: ON local/);
+
+  await t.send('p');
+  await t.send('/');
+  await t.send('s');
+  await t.send('\r');
+  frame = t.stdout.frame();
+  assert.match(frame, /Scope: exact Project/);
+  assert.match(frame, /Actual: not installed/);
+  t.unmount();
+});
+
+test('Source Catalog never shows an exact-Project installation in Global scope', async (context) => {
+  const fixture = setupManagedTui([{name: 'scoped', source: 'owner/repo', hash: 'scoped-hash'}], true);
+  useFixtureEnv(context, {
+    ...fixture.env,
+    TUI_NPX_FIND_OUTPUT: [
+      'owner/repo@scoped  5 installs',
+      '└ https://skills.sh/owner/repo/scoped',
+    ].join('\n'),
+  });
+  const t = await renderApp(fixture.home, 124, 36, fixture.project);
+  await t.send('3');
+  await t.send('/');
+  await t.send('s');
+  await t.send('\r');
+  let frame = t.stdout.frame();
+  assert.match(frame, /Scope: exact Project/);
+  assert.match(frame, /Actual: ON local/);
+
+  await t.send('g');
+  await t.send('/');
+  await t.send('s');
+  await t.send('\r');
+  frame = t.stdout.frame();
+  assert.match(frame, /Scope: Global/);
+  assert.match(frame, /Actual: not installed/);
+  t.unmount();
+});
+
 test('TUI shows a detected built-in missing from an older Target registry without writes', async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-tui-forward-targets-'));
   const configDir = path.join(root, 'config');
