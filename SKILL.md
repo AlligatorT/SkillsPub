@@ -16,7 +16,7 @@ Use the terms **Runtime**, **Agent Runtime**, **Shared Runtime**, **Runtime Slot
 3. Treat the CLI's printed `Plan:` target and claim as the only authoritative Desired state. It can differ from a requested manual ON/OFF when an active Preset claim requires ON; do not calculate claims or Drift from state files.
 4. If same-name Variants or a Shared Runtime Slot's source are ambiguous, stop and ask the user to choose. Never choose a name, path, Runtime, or source by guesswork.
 
-After every mutation, rerun the matching `scan` and report the completed CLI operation(s) and final Actual state. For operations with a CLI `Plan:`, report its Desired state; Shared mutations do not emit a Plan, so mark Desired state `not reported`. Report remaining Drift only from the CLI's `Remaining drift:` output; if a command does not emit it, mark it `not reported` rather than deriving it from a scan or repairing automatically.
+After every mutation, rerun the matching `scan` and report the completed CLI operation(s) and final Actual state. Report Desired state and remaining Drift from the CLI's plan and final-truth output rather than deriving either from state files or repairing automatically.
 
 ## Runtime Relationships
 
@@ -54,20 +54,20 @@ Route every Shared operation through its wrapper:
 ```text
 skillspub shared find <query>
 skillspub shared describe <source>
-skillspub shared add <source> --skill <name> [--replace]
-skillspub shared update [<managed-name>...]
-skillspub shared remove <managed-name...>
+skillspub shared add <source> --skill <name> [--replace] [--yes]
+skillspub shared update [<managed-name>...] [--yes]
+skillspub shared remove <managed-name> [--cascade|--yes]
 
 skillspub project <exact-directory> shared find <query>
 skillspub project <exact-directory> shared describe <source>
-skillspub project <exact-directory> shared add <source> --skill <name> [--replace]
-skillspub project <exact-directory> shared update [<managed-name>...]
-skillspub project <exact-directory> shared remove <managed-name...>
+skillspub project <exact-directory> shared add <source> --skill <name> [--replace] [--yes]
+skillspub project <exact-directory> shared update [<managed-name>...] [--yes]
+skillspub project <exact-directory> shared remove <managed-name> [--cascade|--yes]
 ```
 
 The wrapper is the only route to the pinned `skills@1.5.21` integration. Never call a skills.sh API or `npx skills` yourself. Do not redirect or hide its security audit and final `Proceed` prompt.
 
-If `shared add` reports a source replacement, show the old and new sources and ask for confirmation before rerunning with `--replace`. Do not pass `--yes` through to the wrapped installer. For update/remove, use only the exact managed name accepted by the CLI; never use a broad removal command.
+For add, replace, and update, first run without `--yes`, show the immutable plan, obtain confirmation, then rerun the same command with `--yes`. A replacement preview also requires `--replace`. SkillsPub consumes `--yes`; text mode still displays the wrapped installer's security audit and final `Proceed` prompt, while JSON mode stays non-interactive and returns a structured failure if upstream requires input. For removal, confirm the cascade with `--cascade --yes`, then confirm the named source deletion separately with `--yes`. Use only exact managed names; never use a broad removal command.
 
 ## Safety
 

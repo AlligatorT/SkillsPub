@@ -76,6 +76,9 @@ skillspub explain <selector> [--harness H] [--want visible|hidden]
 skillspub targets
 skillspub shared refresh
 skillspub shared outdated
+skillspub shared add <source> --skill <name> [--replace] [--yes]
+skillspub shared update [<managed-name>...] [--yes]
+skillspub shared remove <managed-name> [--cascade|--yes]
 skillspub harnesses [<name> inspect|setup|reconcile [--yes]]
 skillspub migrate targets
 skillspub project <path> <command...>  # 包括 scan/doctor/explain/shared/preset/mirror/harnesses
@@ -185,7 +188,7 @@ npx --yes skills@1.5.21 add <source>
 ```
 
 - 开头的 `npx --yes` 只允许 npx 获取固定 package；不向 `skills add` 传 `--yes`。
-- SkillsPub 先做名称、来源、ON/OFF 和路径冲突预检；npx 展示 security audit 并负责最终 `Proceed` 确认。
+- SkillsPub 先做名称、来源、ON/OFF 和路径冲突预检；text 与 JSON 在没有 `--yes` 时只返回 immutable plan，确认后以同一命令加 `--yes` 执行。SkillsPub 消费该参数，不向 `skills add` 传递。Text 保留 npx 的 security audit 与最终 `Proceed`；JSON 以关闭的 stdin 和捕获的输出运行，永不 prompt 或把 ANSI/upstream output 混入 envelope，upstream 若要求交互则返回结构化失败。
 - 安装后，用户通过 SkillsPub 明确为 Pi、Claude Code 等其他 Targets 建立 Relationships。
 - 既有 Harness-specific Relationships 不会被 add 删除。
 
@@ -278,7 +281,7 @@ Source workspace keyboard contract：
 - `Enter`：browse 时打开 detail、preview 时推进 displayed confirmation、success 后 acknowledge final truth；
 - `a`：preview add/replace；`r`：refresh；`u`：preview selected update；
 - `Space`：mark/unmark Inventory resource；`b`：preview marked batch update；`d`：preview dependency-aware remove；
-- `t`：只在 failed C state retry；`l`：打开 full log/evidence；
+- `t`：只在 failed C state retry；`l`：operation active 时打开 full log/evidence，acknowledge 后重新打开本 TUI session 的 latest transcript；
 - `Esc`：关闭 search/detail/log、取消未 apply preview，或在 acknowledge 后离开 result 并保留 underlying selection。
 
 footer 只显示 context-valid actions。search/detail/log modal 必须 trap focus；passive summary 不是 focus stop。confirmation/execution 期间禁用的 action 要解释原因。narrow layout 只减少 passive presentation，不能移除 actionable workflow、impact review 或 final truth；wide layout 不能让长 status/identity 产生歧义。prototype-only fail-next 控件不进入 production。

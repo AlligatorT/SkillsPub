@@ -1,0 +1,219 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import type {Home} from './core.ts';
+import {explainVisibility} from './explain.ts';
+import {hashDirectory} from './inventory.ts';
+import {readNpxSkillsLock} from './npx-skills.ts';
+import type {
+  SharedMutationPlan,
+  SharedRemovalPlan,
+  SharedUpdatePlan,
+  SharedUpdateResult,
+} from './shared.ts';
+import type {Row, SkillRelationship, TuiSnapshot} from './view.ts';
+
+export type SourceScope = 'global' | 'project';
+
+export interface SourceVerifiedTruth {
+  resource: string;
+  provenance: string;
+  slot: string;
+  relationships: string[];
+  actual: string;
+  desired: string;
+  drift: string;
+  updateAvailability: string;
+  effectiveVisibility: string;
+}
+
+export function sourceMirrorState(truth: SourceVerifiedTruth): string {
+  if (/mirror-diverged|diverged mirror/i.test(truth.drift)) return 'diverged';
+  if (/mirror-sync/i.test(truth.drift)) return 'mirror-sync required';
+  return truth.relationships.some((relationship) => /\smirror\//i.test(relationship))
+    ? 'current'
+    : 'none';
+}
+
+function sourceRelationshipActual(relationship: SkillRelationship): string {
+  if (relationship.info.presence === 'deadlink') return 'broken';
+  return relationship.info.underOff ? 'off' : 'on';
+}
+
+export function sourceRelationships(row: Row | undefined): SkillRelationship[] {
+  return (row?.observedRelationships ?? row?.relationships ?? [])
+    .filter(({target}) => target === 'shared');
+}
+
+export function sourceInventoryRows(snapshot: TuiSnapshot): Row[] {
+  return snapshot.rows.filter((row) => sourceRelationships(row).length > 0);
+}
+
+export function sourceDesiredTruth(
+  home: Home,
+  row: Row | undefined,
+  scope: SourceScope,
+  projectPath: string,
+): {desired: string; drift: string} {
+  if (!row) return {desired: 'not applicable', drift: 'not applicable'};
+  const relationships = sourceRelationships(row);
+  let state: Record<string, unknown> = {};
+  try {
+    const file = scope === 'global'
+      ? path.join(home.configDir, 'state.json')
+      : path.join(projectPath, '.skillspub', 'state.json');
+    if (fs.existsSync(file)) state = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+  } catch {
+    return {desired: 'unknown', drift: 'unknown'};
+  }
+  const baseIntent = state.baseIntent && typeof state.baseIntent === 'object' && !Array.isArray(state.baseIntent)
+    ? state.baseIntent as Record<string, unknown>
+    : {};
+  const claims = state.claims && typeof state.claims === 'object' && !Array.isArray(state.claims)
+    ? state.claims as Record<string, unknown>
+    : {};
+  let observedDrift = false;
+  const desired = relationships.map((relationship) => {
+    const actual = relationship.info.underOff ? 'OFF' : 'ON';
+    if (relationship.info.presence === 'deadlink' || relationship.info.diverged)
+      observedDrift = true;
+    if (relationship.readOnly) return `read-only ${actual}`;
+    const slotId = `${relationship.targetId}\0${relationship.slot}`;
+    let activation = actual;
+    if (Array.isArray(claims[slotId]) && claims[slotId].length > 0) activation = 'ON';
+    else if (baseIntent[slotId] === 'off') activation = 'OFF';
+    else if (baseIntent[slotId] === 'on') activation = 'ON';
+    if (activation !== actual) observedDrift = true;
+    return activation;
+  });
+  return {
+    desired: [...new Set(desired)].join('/') || 'unknown',
+    drift: observedDrift ? 'observed' : 'none observed',
+  };
+}
+
+function sourceVisibility(home: Home, row: Row | undefined, projectPath?: string): string {
+  if (!row?.realPath) return 'unknown';
+  try {
+    const visibility = explainVisibility(home, `skill:${row.id}`, {projectPath});
+    return [...new Set(visibility.harnesses.map(({effectiveVisibility}) => effectiveVisibility))].join('/');
+  } catch {
+    return 'unknown';
+  }
+}
+
+export function verifiedSourceTruth(
+  home: Home,
+  snapshot: TuiSnapshot,
+  plan: SharedMutationPlan | SharedRemovalPlan,
+  scope: SourceScope,
+  projectPath: string,
+): SourceVerifiedTruth {
+  const slot = plan.operation === 'shared.remove'
+    ? plan.source.slot
+    : plan.candidate?.normalizedSlot ?? plan.slots[0] ?? 'unknown';
+  const row = sourceInventoryRows(snapshot).find((candidate) =>
+    sourceRelationships(candidate).some((relationship) =>
+      relationship.targetId === plan.targetId && relationship.slot === slot));
+  const relationships = row?.observedRelationships ?? row?.relationships ?? [];
+  const removalLockRemains = plan.operation === 'shared.remove' &&
+    readNpxSkillsLock(plan.target.lockFile).some(({slot: lockSlot}) => lockSlot === slot);
+  const removalDependenciesRemain = plan.operation === 'shared.remove'
+    ? plan.dependencies.filter(({path: dependencyPath}) => fs.lstatSync(dependencyPath, {throwIfNoEntry: false}))
+    : [];
+  const removalSourceRemains = plan.operation === 'shared.remove' && Boolean(row);
+  const desiredTruth = plan.operation === 'shared.remove'
+    ? {
+        desired: 'removed',
+        drift: removalSourceRemains || removalLockRemains || removalDependenciesRemain.length > 0
+          ? 'observed'
+          : 'none',
+      }
+    : sourceDesiredTruth(home, row, scope, projectPath);
+  const actual = relationships.map((relationship) =>
+    `${relationship.targetId}/${relationship.slot}=${sourceRelationshipActual(relationship)}/${relationship.info.form}`);
+  const driftEvidence = relationships.flatMap(({targetId, slot: relationshipSlot, info}) => {
+    if (info.presence === 'deadlink') return [`${targetId}/${relationshipSlot}: broken`];
+    if (info.diverged) return [`${targetId}/${relationshipSlot}: diverged mirror`];
+    if (info.mirrored && row?.realPath) {
+      try {
+        if (hashDirectory(info.path) !== hashDirectory(row.realPath))
+          return [`${targetId}/${relationshipSlot}: mirror-sync required`];
+      } catch {
+        return [`${targetId}/${relationshipSlot}: mirror truth unreadable`];
+      }
+    }
+    return [];
+  });
+  if (plan.operation === 'shared.remove') {
+    if (removalSourceRemains) driftEvidence.push('Shared source remains');
+    if (removalLockRemains) driftEvidence.push('Vercel skills lock entry remains');
+    for (const dependency of removalDependenciesRemain)
+      driftEvidence.push(`dependent Relationship remains: ${dependency.targetId}/${dependency.slot}`);
+  } else if (desiredTruth.drift === 'observed') driftEvidence.push('Actual differs from Desired');
+  const mirrorDrift = driftEvidence.filter((item) => item.includes('mirror')).length;
+  return {
+    resource: row?.realPath ?? 'missing',
+    provenance: row?.sourceLabel ?? (plan.operation === 'shared.remove'
+      ? plan.source.provenance
+      : 'Source unknown'),
+    slot,
+    relationships: relationships.map(({targetId, slot: relationshipSlot, info}) =>
+      `${targetId}/${relationshipSlot} ${info.form}/${info.underOff ? 'off' : 'on'} ${info.path}`),
+    actual: actual.join(', ') || `${plan.targetId}/${slot}=missing`,
+    desired: desiredTruth.desired,
+    drift: mirrorDrift > 0
+      ? `mirror-sync required (${mirrorDrift}); ${driftEvidence.join(', ')}`
+      : driftEvidence.join(', ') || 'none observed',
+    updateAvailability: row?.updateAvailability?.status ?? 'unknown',
+    effectiveVisibility: sourceVisibility(home, row, scope === 'project' ? projectPath : undefined),
+  };
+}
+
+export function verifiedUpdateTruth(
+  home: Home,
+  snapshot: TuiSnapshot,
+  plan: SharedUpdatePlan,
+  result: SharedUpdateResult,
+  scope: SourceScope,
+  projectPath: string,
+): SourceVerifiedTruth {
+  const rows = result.items.map((item) => ({
+    item,
+    row: sourceInventoryRows(snapshot).find((candidate) =>
+      sourceRelationships(candidate).some(({targetId, slot}) =>
+        targetId === plan.targetId && slot === item.slot)),
+  }));
+  const relationshipRows = rows.flatMap(({row}) =>
+    (row?.observedRelationships ?? row?.relationships ?? []).map((relationship) => ({row, relationship})));
+  const relationships = relationshipRows.map(({relationship}) => relationship);
+  const visibility = rows.map(({item, row}) =>
+    `${item.name}=${sourceVisibility(home, row, scope === 'project' ? projectPath : undefined)}`);
+  const actual = relationships.map((relationship) =>
+    `${relationship.targetId}/${relationship.slot}=${sourceRelationshipActual(relationship)}/${relationship.info.form}`);
+  const observedDrift = relationshipRows.flatMap(({row, relationship: {targetId, slot, info}}) => {
+    if (info.presence === 'deadlink') return [`${targetId}/${slot}: broken`];
+    if (info.diverged) return [`${targetId}/${slot}: mirror-diverged`];
+    if (info.mirrored && row?.realPath) {
+      try {
+        if (hashDirectory(info.path) !== hashDirectory(row.realPath))
+          return [`${targetId}/${slot}: mirror-sync`];
+      } catch {
+        return [`${targetId}/${slot}: mirror truth unreadable`];
+      }
+    }
+    return [];
+  });
+  return {
+    resource: rows.map(({row}) => row?.realPath ?? 'missing').join(', '),
+    provenance: rows.map(({item, row}) => `${item.name}=${row?.sourceLabel ?? 'Source unknown'}`).join(', '),
+    slot: result.items.map(({slot}) => slot).join(', '),
+    relationships: relationships.map(({targetId, slot, info}) =>
+      `${targetId}/${slot} ${info.form}/${info.underOff ? 'off' : 'on'} ${info.path}`),
+    actual: actual.join(', ') || result.actual,
+    desired: plan.items.map(({name, desired}) => `${name}=${desired}`).join(', '),
+    drift: [...new Set([...result.drift, ...observedDrift])].join(', ') || 'none',
+    updateAvailability: rows.map(({item, row}) =>
+      `${item.name}=${row?.updateAvailability?.status ?? 'unknown'}${row?.updateAvailability?.checkedAt ? ` @ ${row.updateAvailability.checkedAt}` : ''}`).join(', '),
+    effectiveVisibility: visibility.join(', '),
+  };
+}

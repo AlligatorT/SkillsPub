@@ -1454,6 +1454,7 @@ export function sharedOutdated(
  *  add/update/remove below are only select/args/check/after over this template. */
 interface SharedOp {
   name: 'add' | 'update' | 'remove';
+  capture?: boolean | 'output';
   select(target: Target): NpxManagedSkill[];
   args(selected: NpxManagedSkill[], global: boolean): string[];
   /** Slots reported by finalActual when the selection is empty (fresh add). */
@@ -1511,7 +1512,7 @@ function guardedSkillsOp(
     try {
       staged = op.before?.(target, selected);
       ensureVisible(target, selected);
-      result = runNpxSkills(args, target.cwd);
+      result = runNpxSkills(args, target.cwd, op.capture);
     } catch (error) {
       failure = error as Error;
     }
@@ -1568,6 +1569,7 @@ export function sharedAdd(
   replace: boolean,
   projectPath?: string,
   expectedPlan?: SharedMutationPlan,
+  nonInteractive = false,
 ): SharedCommandResult {
   validateSource(source);
   const slot = validateName(name);
@@ -1581,6 +1583,7 @@ export function sharedAdd(
   if (blockers.length > 0) throw new Error(blockers.join('\n'));
   return guardedSkillsOp(home, projectPath, {
     name: 'add',
+    capture: nonInteractive,
     select(target) {
       const currentPlan = buildSharedAddPlan(target, source, name, replace);
       if (JSON.stringify(currentPlan) !== JSON.stringify(preview))
@@ -1621,6 +1624,7 @@ export function sharedUpdate(
   names: string[],
   projectPath?: string,
   expectedPlan?: SharedUpdatePlan,
+  nonInteractive = false,
 ): SharedUpdateResult {
   const preview = expectedPlan ?? planSharedUpdate(home, names, projectPath);
   const initial = resolveTarget(home, projectPath);
@@ -1662,7 +1666,7 @@ export function sharedUpdate(
         result = runNpxSkills(
           npxSkillsUpdateArgs([skill.name], !projectPath),
           target.cwd,
-          'output',
+          nonInteractive ? true : 'output',
         );
       } catch (error) {
         failure = error as Error;
@@ -1820,9 +1824,14 @@ export function sharedRemoveCascade(
 export function sharedRemove(
   home: Home,
   names: string[],
-  options: {sourceConfirmed?: boolean; projectPath?: string; expected?: SharedRemovalPlan} = {},
+  options: {
+    sourceConfirmed?: boolean;
+    projectPath?: string;
+    expected?: SharedRemovalPlan;
+    nonInteractive?: boolean;
+  } = {},
 ): SharedCommandResult {
-  const {sourceConfirmed = false, projectPath, expected} = options;
+  const {sourceConfirmed = false, projectPath, expected, nonInteractive = false} = options;
   const preview = planSharedRemove(home, names, projectPath);
   if (!sourceConfirmed) throw new Error('confirm source deletion separately');
   if (!preview.cascadeConfirmed)
@@ -1839,6 +1848,7 @@ export function sharedRemove(
   try {
     const result = guardedSkillsOp(home, projectPath, {
       name: 'remove',
+      capture: nonInteractive,
       restoreOnFailureOnly: true,
       select(target) {
         const selected = managedSelection(target, names);
