@@ -385,6 +385,118 @@ test('Source workspace exposes durable read-only scope, lifecycle, inventory, an
   assert.equal(fs.existsSync(path.join(project, '.skillspub')), false);
 });
 
+test('Source Global empty Catalog explains lifecycle, scope isolation, and explicit search (wide)', async () => {
+  const {home} = setup();
+  const t = await renderApp(home, 120, 32);
+
+  await t.send('3');
+  const frame = t.stdout.frame();
+  assert.match(frame, /Source = Shared remote lifecycle: find\/add\/replace\/update\/remove/);
+  assert.match(frame, /Target & Skill manage installed Relationships/);
+  assert.match(frame, /g\/p select one isolated scope/);
+  assert.match(frame, /never combined\./);
+  assert.match(frame, /No remote candidates loaded/);
+  assert.match(frame, /Press \/ to search with the pinned Vercel skills Source Adapter/);
+  assert.match(frame, /Nothing is fetched automatically/);
+  assert.match(frame, /Current scope: Global only — exact Project data is not modified/);
+  assert.match(frame, /g Global only {2}p Project only/);
+  t.unmount();
+});
+
+test('Source Global empty Catalog stays explanatory in a narrow terminal', async () => {
+  const {home} = setup();
+  const t = await renderApp(home, 52, 32);
+
+  await t.send('3');
+  const frame = t.stdout.frame();
+  assert.match(frame, /No remote candidates loaded/);
+  assert.match(frame, /Press \/ to search with the pinned Vercel/);
+  assert.match(frame, /Nothing is fetched automatically/);
+  assert.match(frame, /Global only/);
+  assert.match(frame, /not modified/);
+  t.unmount();
+});
+
+test('Source exact Project empty Catalog shows canonical path, isolation, and read-only inheritance (wide)', async () => {
+  const {home} = setup();
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-source-project-'));
+  const t = await renderApp(home, 120, 32, project);
+
+  await t.send('3');
+  const frame = t.stdout.frame();
+  assert.match(frame, /No remote candidates loaded/);
+  assert.match(frame, /Press \/ to search with the pinned Vercel skills Source Adapter/);
+  assert.match(frame, /Nothing is fetched automatically/);
+  assert.match(frame, /Current scope: exact Project only — Global data is not modified/);
+  const canonical = fs.realpathSync(project).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // The Catalog column wraps long paths mid-word; join box-wrapped lines before matching.
+  const flat = frame.replace(/│\n│/g, '');
+  assert.match(flat, new RegExp(`Canonical path: ${canonical}`));
+  assert.match(frame, /Inherited Global\/ancestor entries are explanatory read-only context/);
+  t.unmount();
+});
+
+test('Source exact Project empty Catalog stays explanatory in a narrow terminal', async () => {
+  const {home} = setup();
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-source-project-'));
+  const t = await renderApp(home, 52, 32, project);
+
+  await t.send('3');
+  const frame = t.stdout.frame();
+  assert.match(frame, /No remote candidates loaded/);
+  assert.match(frame, /exact Project only/);
+  assert.match(frame, /not modified/);
+  assert.match(frame, /Canonical path:/);
+  assert.match(frame, /Inherited Global\/ancestor entries are/);
+  assert.match(frame, /read-only context/);
+  t.unmount();
+});
+
+test('Source empty Inventory explains the active isolated scope in both scopes', async (context) => {
+  const fixture = setupManagedTui([]);
+  useFixtureEnv(context, fixture.env);
+  const t = await renderApp(fixture.home, 100, 30, fixture.project);
+
+  await t.send('3');
+  await t.send('\t');
+  let frame = t.stdout.frame();
+  assert.match(frame, /No Shared resources in the exact Project scope/);
+  assert.match(frame, /find\/add\/replace\/update\/remove/);
+  assert.match(frame, /exact Project only/);
+  assert.match(frame, /read-only context/);
+
+  await t.send('g');
+  frame = t.stdout.frame();
+  assert.match(frame, /No Shared resources in the Global scope/);
+  assert.match(frame, /Current scope: Global only/);
+  assert.match(frame, /modified\./);
+  t.unmount();
+});
+
+test('Source Catalog search replaces the explanatory empty state with identified candidates (narrow)', async (context) => {
+  const fixture = setupManagedTui([]);
+  useFixtureEnv(context, {
+    ...fixture.env,
+    TUI_NPX_FIND_OUTPUT: [
+      'owner/one@shared-name  10 installs',
+      '└ https://skills.sh/owner/one/shared-name',
+    ].join('\n'),
+  });
+  const t = await renderApp(fixture.home, 52, 32);
+
+  await t.send('3');
+  assert.match(t.stdout.frame(), /No remote candidates loaded/);
+  assert.equal(fs.existsSync(fixture.npxLog), false);
+
+  await t.send('/');
+  for (const input of 'shared-name') await t.send(input);
+  await t.send('\r');
+  const frame = await waitForFrame(t, /owner\/one@shared-name/);
+  assert.doesNotMatch(frame, /No remote candidates loaded/);
+  assert.match(frame, /not installed/);
+  t.unmount();
+});
+
 test('Source Inventory keeps inherited and unknown ownership readable in a narrow terminal', async (context) => {
   const fixture = setupManagedTui([{name: 'managed', source: 'owner/repo', hash: 'managed-hash'}]);
   mkSkill(fixture.discovery, 'unknown');
