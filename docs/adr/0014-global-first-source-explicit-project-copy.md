@@ -1,6 +1,6 @@
 # ADR-0014: Global-first Source 与显式 Project 副本边界
 
-状态: accepted (2026-09-07, issue #143)
+状态: accepted (2026-09-07, issue #143)；TUI Project 副本呈现部分由 ADR-0015（#145）取代，本 ADR 其余内容保持历史记录
 
 ## 背景
 

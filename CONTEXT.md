@@ -72,7 +72,7 @@ _避免_: Source guess、Expected source
 集中维护一个安装来源或传输工具的固定版本、命令、输出解析、provenance 和兼容性，例如 `npx skills`。Source Adapter 不决定最终启用哪些 Harness Targets。
 
 **Project-owned Source copy**:
-exact Project scope 中独立拥有、独立 lock/update/remove 的 Source resource 副本；通过 `p` boundary 显式确认进入，区别于默认推荐的 Global Source lifecycle；与同名 Global resource 永不构成同一条更新流。
+exact Project scope 中独立拥有、独立 lock/update/remove 的 Source resource 副本；仅通过显式 CLI（`skillspub project <path> shared …`）管理，区别于默认推荐的 Global Source lifecycle；v0.1 TUI 不呈现（ADR-0015）；与同名 Global resource 永不构成同一条更新流。
 _避免_: 把 Global 与 Project 副本当作一个共享 update stream、把 Source 当作自动创建 Project Link 的途径
 
 **Update availability**:

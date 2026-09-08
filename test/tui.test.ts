@@ -159,14 +159,6 @@ async function waitForFrame(
   return frame;
 }
 
-/** Enter exact Project Source through the explicit Project-copy boundary:
- *  `p` opens it, `j` focuses the advanced path, Enter acknowledges. */
-async function enterProjectSource(t: {send(input: string): Promise<void>}): Promise<void> {
-  await t.send('p');
-  await t.send('j');
-  await t.send('\r');
-}
-
 test('Harness badge renderer keeps non-managed support explicit', async () => {
   for (const support of ['discoverable', 'unsupported'] as const) {
     const stdout = new FakeStdout(30, 3);
@@ -360,7 +352,7 @@ test('TUI startup reads legacy configuration without creating a Target registry 
   assert.equal(fs.existsSync(path.join(home.configDir, 'state.json')), false);
 });
 
-test('Source workspace opens Global-first and gates exact Project behind an explicit copy boundary', async () => {
+test('Source workspace is Global-only under an exact Project context; p points to the explicit CLI', async () => {
   const {home} = setup();
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-source-project-'));
   const before = fs.readdirSync(home.configDir, {recursive: true}).sort();
@@ -378,54 +370,29 @@ test('Source workspace opens Global-first and gates exact Project behind an expl
   assert.match(frame, /Update:/);
   assert.match(frame, /Relationship:/);
   assert.match(frame, /Effective Visibility:/);
+  // The exact Project context never leaks into the Global-only Source scope.
+  assert.doesNotMatch(frame, /Project-owned copy/);
+  assert.doesNotMatch(frame, /exact Project —/);
 
-  // p opens the Project-copy boundary instead of switching scope.
+  // p never mutates or switches scope; it points concisely to the explicit CLI.
   await t.send('p');
-  frame = t.stdout.frame();
-  assert.match(frame, /Project Source copy — explicit boundary/);
-  assert.match(frame, /Global Source is the default and recommended remote lifecycle/);
-  assert.match(frame, /Use Global resources \(recommended\)/);
-  assert.match(frame, /Project-owned copy \(advanced\)/);
-  assert.match(frame, /Enter exact Project Source:/);
-  assert.match(frame, /esc cancel — Global Source unchanged/);
-
-  // Esc cancels the boundary and leaves Global Source unchanged.
-  await t.send('\x1b');
   frame = t.stdout.frame();
   assert.match(frame, /Scope: Global \(default\/recommended\)/);
+  assert.match(frame, /exact Project Source is explicit CLI-only: skillspub project <path> shared/);
   assert.doesNotMatch(frame, /explicit boundary/);
+  assert.doesNotMatch(frame, /p Project copy/);
 
-  // The recommended path only navigates to Target/Skill Relationship management.
-  await t.send('p');
-  await t.send('\r');
-  frame = t.stdout.frame();
-  assert.doesNotMatch(frame, /explicit boundary/);
-  assert.match(frame, /Recommended: manage Relationships to Global resources in 1 Target \/ 2 Skill/);
-  assert.match(frame, /target:targets/);
-
-  // The advanced path requires explicit acknowledgement and keeps a persistent identity.
-  await t.send('3');
-  await t.send('p');
-  await t.send('j');
-  await t.send('\r');
-  frame = t.stdout.frame();
-  assert.match(frame, /Scope: exact Project — Project-owned copy \(advanced\)/);
-  // The Catalog column wraps long paths mid-word; join box-wrapped lines before matching.
-  const flat = frame.replace(/│\n│/g, '');
-  assert.match(flat, new RegExp(fs.realpathSync(project).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-  await t.send('\t');
-  assert.match(t.stdout.frame(), /Inventory/);
-
-  // g returns to Global Source.
+  // g is gone: there is no scope to return to.
   await t.send('g');
-  assert.match(t.stdout.frame(), /Scope: Global \(default\/recommended\)/);
+  frame = t.stdout.frame();
+  assert.match(frame, /Scope: Global \(default\/recommended\)/);
   t.unmount();
 
   assert.deepEqual(fs.readdirSync(home.configDir, {recursive: true}).sort(), before);
   assert.equal(fs.existsSync(path.join(project, '.skillspub')), false);
 });
 
-test('Source Project-copy boundary stays usable in a narrow terminal', async () => {
+test('Source Global-only entry and p feedback stay readable in a narrow terminal', async () => {
   const {home} = setup();
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-source-project-'));
   const t = await renderApp(home, 52, 32, project);
@@ -434,18 +401,12 @@ test('Source Project-copy boundary stays usable in a narrow terminal', async () 
   assert.match(t.stdout.frame(), /Scope: Global \(default\/recommended\)/);
   await t.send('p');
   const frame = t.stdout.frame();
-  assert.match(frame, /Project Source copy/);
-  assert.match(frame, /explicit boundary/);
-  assert.match(frame, /Global Source is the default/);
-  assert.match(frame, /Use Global resources/);
-  assert.match(frame, /Project-owned copy/);
-  assert.match(frame, /esc cancel/);
-  // Focus moves to the advanced path and Enter acknowledges it.
-  await t.send('j');
-  await t.send('\r');
-  assert.match(t.stdout.frame(), /Scope: exact Project/);
-  assert.match(t.stdout.frame(), /Project-owned copy/);
+  assert.match(frame, /Scope: Global/);
+  assert.match(frame, /CLI-only/);
+  assert.doesNotMatch(frame, /explicit boundary/);
   t.unmount();
+
+  assert.equal(fs.existsSync(path.join(project, '.skillspub')), false);
 });
 
 test('Source Global empty Catalog explains lifecycle, scope isolation, and explicit search (wide)', async () => {
@@ -456,16 +417,11 @@ test('Source Global empty Catalog explains lifecycle, scope isolation, and expli
   const frame = t.stdout.frame();
   assert.match(frame, /Source = Shared remote lifecycle: find\/add\/replace\/update\/remove/);
   assert.match(frame, /Target & Skill manage installed Relationships/);
-  assert.match(frame, /g returns to Global; scopes stay isolated/);
-  assert.match(frame, /never combined\./);
-  assert.match(frame, /No remote candidates loaded/);
-  assert.match(frame, /Press \/ to search with the pinned Vercel skills Source Adapter/);
-  assert.match(frame, /Nothing is fetched automatically/);
-  assert.match(frame, /Current scope: Global \(default\/recommended\)\./);
-  assert.match(frame, /exact Project data is not modified\./);
   assert.match(frame, /Global is the default\/recommended scope/);
-  assert.match(frame, /p opens an explicit Project-owned copy boundary\./);
-  assert.match(frame, /g Global {2}p Project copy…/);
+  assert.match(frame, /exact Project Source copies are explicit CLI-only:/);
+  assert.match(frame, /skillspub project <path> shared/);
+  assert.doesNotMatch(frame, /p Project copy/);
+  assert.doesNotMatch(frame, /g Global/);
   t.unmount();
 });
 
@@ -483,66 +439,19 @@ test('Source Global empty Catalog stays explanatory in a narrow terminal', async
   t.unmount();
 });
 
-test('Source exact Project empty Catalog shows canonical path, isolation, and read-only inheritance (wide)', async () => {
-  const {home} = setup();
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-source-project-'));
-  const t = await renderApp(home, 120, 32, project);
-
-  await t.send('3');
-  await enterProjectSource(t);
-  const frame = t.stdout.frame();
-  assert.match(frame, /No remote candidates loaded/);
-  assert.match(frame, /Press \/ to search with the pinned Vercel skills Source Adapter/);
-  assert.match(frame, /Nothing is fetched automatically/);
-  assert.match(frame, /Current scope: exact Project — Project-owned copy \(advanced\)\./);
-  assert.match(frame, /Global data is not modified\./);
-  const canonical = fs.realpathSync(project).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // The Catalog column wraps long paths mid-word; join box-wrapped lines before matching.
-  const flat = frame.replace(/│\n│/g, '');
-  assert.match(flat, new RegExp(`Canonical path: ${canonical}`));
-  assert.match(frame, /Inherited Global\/ancestor entries are explanatory read-only context/);
-  t.unmount();
-});
-
-test('Source exact Project empty Catalog stays explanatory in a narrow terminal', async () => {
-  const {home} = setup();
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-source-project-'));
-  const t = await renderApp(home, 52, 32, project);
-
-  await t.send('3');
-  await enterProjectSource(t);
-  const frame = t.stdout.frame();
-  assert.match(frame, /No remote candidates loaded/);
-  assert.match(frame, /Project-owned copy/);
-  assert.match(frame, /Canonical path:/);
-  assert.match(frame, /Inherited Global\/ancestor entries are/);
-  assert.match(frame, /read-only context/);
-  t.unmount();
-});
-
-test('Source empty Inventory explains the active isolated scope in both scopes', async (context) => {
+test('Source empty Inventory explains the Global-only scope under an exact Project context', async (context) => {
   const fixture = setupManagedTui([]);
   useFixtureEnv(context, fixture.env);
   const t = await renderApp(fixture.home, 100, 30, fixture.project);
 
   await t.send('3');
   await t.send('\t');
-  let frame = t.stdout.frame();
+  const frame = t.stdout.frame();
   assert.match(frame, /No Shared resources in the Global scope/);
   assert.match(frame, /Current scope: Global \(default\/recommended\)/);
-  assert.match(frame, /modified\./);
-
-  await enterProjectSource(t);
-  frame = t.stdout.frame();
-  assert.match(frame, /No Shared resources in the exact Project scope/);
+  assert.match(frame, /exact Project data is not modified\./);
   assert.match(frame, /find\/add\/replace\/update\/remove/);
-  assert.match(frame, /Project-owned copy/);
-  assert.match(frame, /read-only context/);
-
-  await t.send('g');
-  frame = t.stdout.frame();
-  assert.match(frame, /No Shared resources in the Global scope/);
-  assert.match(frame, /Current scope: Global \(default\/recommended\)/);
+  assert.doesNotMatch(frame, /Project-owned copy/);
   t.unmount();
 });
 
@@ -570,17 +479,16 @@ test('Source Catalog search replaces the explanatory empty state with identified
   t.unmount();
 });
 
-test('Source Inventory keeps inherited and unknown ownership readable in a narrow terminal', async (context) => {
+test('Source Inventory keeps managed and unknown Global ownership readable under an exact Project context (narrow)', async (context) => {
   const fixture = setupManagedTui([{name: 'managed', source: 'owner/repo', hash: 'managed-hash'}]);
   mkSkill(fixture.discovery, 'unknown');
   useFixtureEnv(context, fixture.env);
   const t = await renderApp(fixture.home, 52, 32, fixture.project);
 
   await t.send('3');
-  await enterProjectSource(t);
   await t.send('\t');
   let frame = t.stdout.frame();
-  assert.match(frame, /Scope: exact Project/);
+  assert.match(frame, /Scope: Global/);
   assert.match(frame, /Discover/);
   assert.match(frame, /Verify truth/);
   assert.match(frame, /Inventory/);
@@ -595,13 +503,13 @@ test('Source Inventory keeps inherited and unknown ownership readable in a narro
   frame = t.stdout.frame();
   assert.match(frame, /Resource detail/);
   assert.match(frame, /Provenance: Source unknown/);
-  assert.match(frame, /Read-only inherited global/);
+  assert.match(frame, /local global/);
   await t.send('\x1b');
   assert.match(t.stdout.frame(), /unknown/);
   t.unmount();
 });
 
-test('Source truth derives Desired and Drift from the selected scope state', async (context) => {
+test('Source truth derives Desired and Drift from the Global scope state', async (context) => {
   const fixture = setupManagedTui([{name: 'managed', source: 'owner/repo', hash: 'managed-hash'}]);
   fs.writeFileSync(path.join(fixture.home.configDir, 'state.json'), JSON.stringify({
     baseIntent: {'global:shared\0managed': 'off'},
@@ -618,7 +526,7 @@ test('Source truth derives Desired and Drift from the selected scope state', asy
   t.unmount();
 });
 
-test('Source Inventory preserves every observed same-slot Relationship', async (context) => {
+test('Source Inventory stays Global and ignores exact-Project Relationships', async (context) => {
   const fixture = setupManagedTui([{name: 'managed', source: 'owner/repo', hash: 'managed-hash'}]);
   const projectTarget = path.join(fixture.project, '.agents', 'skills');
   fs.mkdirSync(projectTarget, {recursive: true});
@@ -627,9 +535,10 @@ test('Source Inventory preserves every observed same-slot Relationship', async (
   const t = await renderApp(fixture.home, 100, 30, fixture.project);
 
   await t.send('3');
-  await enterProjectSource(t);
   await t.send('\t');
-  assert.match(t.stdout.frame(), /Relationship: 2/);
+  // Only the Global Shared Relationship is projected; the exact-Project entry
+  // stays the domain of 1 Target / 2 Skill and the explicit CLI.
+  assert.match(t.stdout.frame(), /Relationship: 1/);
   t.unmount();
 });
 
@@ -647,7 +556,6 @@ test('Source Catalog search keeps same-name candidates distinct and traps detail
   const t = await renderApp(fixture.home, 120, 32, fixture.project);
 
   await t.send('3');
-  await enterProjectSource(t);
   await t.send('/');
   for (const input of 'shared-name') await t.send(input);
   await t.send('\r');
@@ -669,7 +577,8 @@ test('Source Catalog search keeps same-name candidates distinct and traps detail
   const calls = fs.readFileSync(fixture.npxLog, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].args.slice(0, 3), ['--yes', 'skills@1.5.21', 'find']);
-  assert.equal(calls[0].cwd, fs.realpathSync(fixture.project));
+  // Global-only Source never runs the Source Adapter inside the exact Project.
+  assert.notEqual(calls[0].cwd, fs.realpathSync(fixture.project));
 });
 
 test('Source remove previews the full cascade and requires separate cascade and source confirmations', async (context) => {
@@ -726,30 +635,6 @@ test('Source remove previews the full cascade and requires separate cascade and 
   t.unmount();
 });
 
-test('Project Source removal stays in the exact Project scope', async (context) => {
-  const fixture = setupManagedTui([
-    {name: 'project-managed', source: 'owner/project', hash: 'managed-hash'},
-  ], true);
-  useFixtureEnv(context, fixture.env);
-  const t = await renderApp(fixture.home, 120, 34, fixture.project);
-  await t.send('3');
-  await enterProjectSource(t);
-  await t.send('\t');
-  await t.send('d');
-  assert.match(t.stdout.frame(), /Scope: exact Project/);
-  await t.send('\r');
-  await t.send('\r');
-  await waitForFrame(t, /Confirm Vercel skills source deletion/);
-  await t.send('\r');
-  const frame = await waitForFrame(t, /Source operation — Verify truth/);
-  assert.match(frame, /Desired: removed/);
-  const call = JSON.parse(fs.readFileSync(fixture.npxLog, 'utf8').trim());
-  assert.equal(call.cwd, fs.realpathSync(fixture.project));
-  assert.equal(call.args.includes('--global'), false);
-  assert.equal(fs.existsSync(path.join(fixture.discovery, 'project-managed')), false);
-  t.unmount();
-});
-
 test('failed Source deletion keeps cascade evidence and retries only the source step', async (context) => {
   const fixture = setupManagedTui([
     {name: 'retry-remove', source: 'owner/retry', hash: 'managed-hash'},
@@ -784,7 +669,7 @@ test('failed Source deletion keeps cascade evidence and retries only the source 
   t.unmount();
 });
 
-test('Source Add and explicit Replace run A+C preview, cancellation, confirmation, and Verify truth in both scopes', async (context) => {
+test('Source Add and explicit Replace run A+C preview, cancellation, confirmation, and Verify truth in the Global scope', async (context) => {
   const environmentKeys = ['HOME', 'PATH', 'TUI_GIT_LOG', 'TUI_NPX_LOG', 'TUI_NPX_FIND_OUTPUT'];
   const previousEnv = Object.fromEntries(environmentKeys.map((key) => [key, process.env[key]]));
   context.after(() => {
@@ -793,7 +678,7 @@ test('Source Add and explicit Replace run A+C preview, cancellation, confirmatio
       else process.env[key] = value;
     }
   });
-  for (const projectScope of [false, true]) {
+  for (const projectScope of [false]) {
     const fixture = setupManagedTui([{name: 'same', source: 'old/repo', hash: 'old-hash'}], projectScope);
     const source = path.join(fixture.discovery, 'same');
     const globalConsumerRoot = path.join(fixture.env.HOME, '.consumer', 'skills');
@@ -865,7 +750,6 @@ test('Source Add and explicit Replace run A+C preview, cancellation, confirmatio
     });
     const t = await renderApp(fixture.home, 132, 38, projectScope ? fixture.project : undefined);
     await t.send('3');
-    if (projectScope) await enterProjectSource(t);
     await t.send('/');
     await t.send('s');
     await t.send('\r');
@@ -880,17 +764,9 @@ test('Source Add and explicit Replace run A+C preview, cancellation, confirmatio
     assert.match(frame, /consume-replacement/);
     assert.match(frame, /mirror-sync/);
     assert.match(frame, /queued/);
-    if (projectScope) {
-      // The Project-owned copy disclosure pushes intent preservation below the fold.
-      assert.match(frame, /Project-owned copy \(advanced\):/);
-      assert.match(frame, /never one shared update stream\./);
-      for (let scroll = 0; scroll < 5; scroll++) await t.send('j');
-      frame = t.stdout.frame();
-    }
     assert.match(frame, /Tags: reviewed/);
     assert.match(frame, /Bundles: tools/);
     assert.match(frame, /Preset claims: preset:work/);
-    if (projectScope) for (let scroll = 0; scroll < 5; scroll++) await t.send('k');
     await t.send('j');
     assert.match(t.stdout.frame(), /Source Replace plan \[2\//);
     await t.send('k');
@@ -959,7 +835,7 @@ test('Source Add and explicit Replace run A+C preview, cancellation, confirmatio
   }
 });
 
-test('Source Add failure stays in Variant C, retries idempotently, and rejects concurrent plan changes in both scopes', async (context) => {
+test('Source Add failure stays in Variant C, retries idempotently, and rejects concurrent plan changes in the Global scope', async (context) => {
   const environmentKeys = [
     'HOME', 'PATH', 'TUI_GIT_LOG', 'TUI_NPX_LOG', 'TUI_NPX_FAIL_ONCE', 'TUI_NPX_FIND_OUTPUT',
   ];
@@ -971,7 +847,7 @@ test('Source Add failure stays in Variant C, retries idempotently, and rejects c
     }
   });
 
-  for (const projectScope of [false, true]) {
+  for (const projectScope of [false]) {
     const fixture = setupManagedTui([], projectScope);
     const failMarker = path.join(fixture.project, `fail-once-${projectScope}`);
     Object.assign(process.env, {
@@ -989,7 +865,6 @@ test('Source Add failure stays in Variant C, retries idempotently, and rejects c
       projectScope ? fixture.project : undefined,
     );
     await t.send('3');
-    if (projectScope) await enterProjectSource(t);
     await t.send('/');
     await t.send('f');
     await t.send('\r');
@@ -1078,39 +953,6 @@ test('Source Catalog reflects Global Add truth after Verify acknowledgement', as
   t.unmount();
 });
 
-test('Source Catalog reflects exact-Project retry Add truth after Verify acknowledgement', async (context) => {
-  const fixture = setupManagedTui([], true);
-  useFixtureEnv(context, {
-    ...fixture.env,
-    TUI_NPX_FAIL_ONCE: path.join(fixture.project, 'fail-once'),
-    TUI_NPX_FIND_OUTPUT: [
-      'fail-once/repo@fresh  1 installs',
-      '└ https://skills.sh/fail-once/repo/fresh',
-    ].join('\n'),
-  });
-  const t = await renderApp(fixture.home, 124, 36, fixture.project);
-  await t.send('3');
-  await enterProjectSource(t);
-  await t.send('/');
-  await t.send('f');
-  await t.send('\r');
-  await t.send('a');
-  await t.send('\r');
-  await t.send('\r');
-  let frame = await waitForFrame(t, /Source operation — failed/);
-  assert.match(frame, /t retry/);
-  await t.send('t');
-  frame = await waitForFrame(t, /Source operation — Verify truth/);
-  assert.match(frame, /succeeded/);
-  await t.send('\r');
-  frame = t.stdout.frame();
-  assert.match(frame, /Scope: exact Project/);
-  assert.match(frame, /fail-once\/repo@fresh/);
-  assert.match(frame, /Actual: ON local/);
-  assert.doesNotMatch(frame, /not installed/);
-  t.unmount();
-});
-
 test('Source Catalog shows Replace occupancy and reflects new provenance after Replace', async (context) => {
   const fixture = setupManagedTui([{name: 'same', source: 'old/repo', hash: 'old-hash'}]);
   useFixtureEnv(context, {
@@ -1165,7 +1007,7 @@ test('Source Catalog reports unknown-provenance Slot occupancy conservatively', 
   t.unmount();
 });
 
-test('Source Catalog derives candidate truth from the selected isolated scope', async (context) => {
+test('Source Catalog candidate truth stays Global under an exact Project context', async (context) => {
   const fixture = setupManagedTui([{name: 'scoped', source: 'owner/repo', hash: 'scoped-hash'}]);
   useFixtureEnv(context, {
     ...fixture.env,
@@ -1176,25 +1018,16 @@ test('Source Catalog derives candidate truth from the selected isolated scope', 
   });
   const t = await renderApp(fixture.home, 124, 36, fixture.project);
   await t.send('3');
-  await t.send('g');
   await t.send('/');
   await t.send('s');
   await t.send('\r');
-  let frame = t.stdout.frame();
+  const frame = t.stdout.frame();
   assert.match(frame, /Scope: Global \(default\/recommended\)/);
   assert.match(frame, /Actual: ON local/);
-
-  await enterProjectSource(t);
-  await t.send('/');
-  await t.send('s');
-  await t.send('\r');
-  frame = t.stdout.frame();
-  assert.match(frame, /Scope: exact Project/);
-  assert.match(frame, /Actual: not installed/);
   t.unmount();
 });
 
-test('Source Catalog never shows an exact-Project installation in Global scope', async (context) => {
+test('Source Catalog never shows an exact-Project installation in the Global-only TUI', async (context) => {
   const fixture = setupManagedTui([{name: 'scoped', source: 'owner/repo', hash: 'scoped-hash'}], true);
   useFixtureEnv(context, {
     ...fixture.env,
@@ -1208,52 +1041,10 @@ test('Source Catalog never shows an exact-Project installation in Global scope',
   await t.send('/');
   await t.send('s');
   await t.send('\r');
-  let frame = t.stdout.frame();
+  const frame = t.stdout.frame();
+  // The exact-Project lock/install stays invisible: TUI Source is Global-only.
   assert.match(frame, /Scope: Global \(default\/recommended\)/);
   assert.match(frame, /Actual: not installed/);
-
-  await enterProjectSource(t);
-  await t.send('/');
-  await t.send('s');
-  await t.send('\r');
-  frame = t.stdout.frame();
-  assert.match(frame, /Scope: exact Project/);
-  assert.match(frame, /Actual: ON local/);
-  t.unmount();
-});
-
-test('Project Source Add preview discloses the Project-owned copy and same-name Global conflict', async (context) => {
-  const fixture = setupManagedTui([{name: 'same', source: 'owner/repo', hash: 'same-hash'}]);
-  useFixtureEnv(context, {
-    ...fixture.env,
-    TUI_NPX_FIND_OUTPUT: [
-      'new/repo@same  12 installs',
-      '└ https://skills.sh/new/repo/same',
-    ].join('\n'),
-  });
-  const t = await renderApp(fixture.home, 132, 38, fixture.project);
-  await t.send('3');
-  await enterProjectSource(t);
-  await t.send('/');
-  await t.send('s');
-  await t.send('\r');
-  // Global owns the Slot; the exact Project Catalog stays a separate stream.
-  assert.match(t.stdout.frame(), /Actual: not installed/);
-
-  await t.send('a');
-  const frame = t.stdout.frame();
-  assert.match(frame, /Source Add plan/);
-  assert.match(frame, /Scope: exact Project/);
-  assert.match(frame, /Project-owned copy \(advanced\):/);
-  assert.match(frame, /creates\/changes a separate Project-owned/);
-  assert.match(frame, /may conflict/);
-  assert.match(frame, /never one shared update stream\./);
-  assert.match(frame, /Same-name Global resource: https:\/\/github\.com\/own/);
-  assert.match(frame, /Copies are independent;/);
-  assert.match(frame, /update\/remove stay independent per scope\./);
-  assert.match(frame, /Harness precedence follows verified Adapter/);
-  assert.match(frame, /Source does not guess the winner\./);
-  await t.send('\x1b');
   t.unmount();
 });
 
@@ -2601,66 +2392,4 @@ test('Relationship views keep Source update separate from unlink actions', async
   t.unmount();
 });
 
-test('Project Source batch keeps inherited same-name identities read-only', async (context) => {
-  const fixture = setupManagedTui([
-    {name: 'same', source: 'owner/project', hash: 'project-old'},
-  ], true);
-  useFixtureEnv(context, fixture.env);
-  const globalDiscovery = path.join(fixture.env.HOME, '.agents', 'skills');
-  const globalLock = path.join(fixture.env.HOME, '.agents', '.skill-lock.json');
-  mkSkill(globalDiscovery, 'same', '# global variant');
-  fs.mkdirSync(path.dirname(globalLock), {recursive: true});
-  fs.writeFileSync(globalLock, JSON.stringify({version: 3, skills: {same: {
-    source: 'owner/global', sourceType: 'github',
-    sourceUrl: 'https://github.com/owner/global.git',
-    skillPath: 'skills/same/SKILL.md', skillFolderHash: 'global-old',
-  }}}));
-  process.env.TUI_GIT_TREES = JSON.stringify({
-    'https://github.com/owner/project.git': {'skills/same': 'project-new'},
-  });
-  sharedRefresh(fixture.home, fixture.project);
-  const t = await renderApp(fixture.home, 140, 34, fixture.project);
-  await t.send('3');
-  await enterProjectSource(t);
-  await t.send('\t');
-  await t.send(' ');
-  await t.send('j');
-  await t.send(' ');
-  await t.send('b');
-  const frame = t.stdout.frame();
-  assert.match(frame, /Source Update plan — 1 included, 1/);
-  assert.match(frame, /excluded \[1\//);
-  assert.match(frame, /same: excluded \(inherited read-only\)/);
-  assert.equal(fs.existsSync(fixture.npxLog), false);
-  await t.send('\r');
-  await t.send('\r');
-  await waitForFrame(t, /same: updated/);
-  const calls = fs.readFileSync(fixture.npxLog, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].cwd, fs.realpathSync(fixture.project));
-  assert.equal(calls[0].args.includes('--global'), false);
-  t.unmount();
-});
 
-test('Project TUI update uses the exact project scope', async (context) => {
-  const fixture = setupManagedTui([
-    {name: 'project-skill', source: 'owner/project', hash: 'old-hash'},
-  ], true);
-  useFixtureEnv(context, fixture.env);
-  process.env.TUI_GIT_TREES = JSON.stringify({
-    'https://github.com/owner/project.git': {'skills/project-skill': 'new-hash'},
-  });
-  sharedRefresh(fixture.home, fixture.project);
-  const t = await renderApp(fixture.home, 120, 30, fixture.project);
-  await t.send('3');
-  await enterProjectSource(t);
-  await t.send('\t');
-  await t.send('u');
-  await t.send('\r');
-  await t.send('\r');
-  await waitForFrame(t, /project-skill: updated/);
-  const call = JSON.parse(fs.readFileSync(fixture.npxLog, 'utf8').trim());
-  assert.equal(call.cwd, fs.realpathSync(fixture.project));
-  assert.equal(call.args.includes('--global'), false);
-  t.unmount();
-});

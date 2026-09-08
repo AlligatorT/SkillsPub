@@ -77,7 +77,6 @@ import {
   verifiedSourceTruth,
   verifiedUpdateTruth,
   type CatalogCandidateTruth,
-  type SourceScope,
   type SourceVerifiedTruth,
 } from './source-truth.ts';
 
@@ -149,7 +148,6 @@ type SourceOperationState = SourceOperationBase & (
       kind: 'add';
       plan: SharedMutationPlan;
       candidate: NpxSkillsCandidate;
-      globalConflict?: string[];
       result?: SharedCommandResult;
     }
   | {
@@ -746,10 +744,9 @@ function DetailModal({
 
 function mutableSourceRelationship(
   row: Row | undefined,
-  scope: SourceScope,
 ): SkillRelationship | undefined {
   return sourceRelationships(row).find(({info}) =>
-    info.form === 'local' && !info.readOnly && info.scope === scope);
+    info.form === 'local' && !info.readOnly && info.scope === 'global');
 }
 
 function sameSourceIntent(original: SharedMutationPlan, fresh: SharedMutationPlan): boolean {
@@ -1094,14 +1091,6 @@ function sourceOperationLines(operation: SourceOperationState): {title: string; 
       states,
       timeline,
       `Scope: ${scope} — ${plan.scope?.path}`,
-      ...(plan.scope?.kind === 'project' ? [
-        'Project-owned copy (advanced):',
-        'creates/changes a separate Project-owned',
-        'resource and Project lock; may conflict',
-        'with a same-name Global resource —',
-        'never one shared update stream.',
-        ...(operation.globalConflict ?? []),
-      ] : []),
       `Candidate: ${operation.candidate.source}@${operation.candidate.name}`,
       `Provenance: ${operation.candidate.source}`,
       `Shared Slot: ${plan.candidate?.normalizedSlot}`,
@@ -1184,24 +1173,13 @@ function sourceOperationLines(operation: SourceOperationState): {title: string; 
   };
 }
 
-function sourceEmptyLines(surface: SourceSurface, scope: SourceScope, scopePath: string): string[] {
-  const scopeLines = scope === 'global'
-    ? [
-        ' Current scope: Global (default/recommended).',
-        ' exact Project data is not modified.',
-      ]
-    : [
-        ' Current scope: exact Project — Project-owned copy (advanced).',
-        ' Global data is not modified.',
-        ` Canonical path: ${scopePath}`,
-        ' Inherited Global/ancestor entries are explanatory read-only context.',
-      ];
+function sourceEmptyLines(surface: SourceSurface): string[] {
   const identityLines = [
     ' Source = Shared remote lifecycle: find/add/replace/update/remove',
     ' (Target & Skill manage installed Relationships).',
-    ' Global is the default/recommended scope;',
-    ' p opens an explicit Project-owned copy boundary.',
-    ' g returns to Global; scopes stay isolated, never combined.',
+    ' Global is the default/recommended scope.',
+    ' exact Project Source copies are explicit CLI-only:',
+    ' skillspub project <path> shared …',
   ];
   if (surface === 'catalog')
     return [
@@ -1209,19 +1187,18 @@ function sourceEmptyLines(surface: SourceSurface, scope: SourceScope, scopePath:
       ' Press / to search with the pinned Vercel skills Source Adapter.',
       ' Nothing is fetched automatically.',
       ...identityLines,
-      ...scopeLines,
+      ' Current scope: Global (default/recommended).',
+      ' exact Project data is not modified.',
     ];
   return [
-    scope === 'global'
-      ? ' No Shared resources in the Global scope.'
-      : ' No Shared resources in the exact Project scope.',
+    ' No Shared resources in the Global scope.',
     ...identityLines,
-    ...scopeLines,
+    ' Current scope: Global (default/recommended).',
+    ' exact Project data is not modified.',
   ];
 }
 
 function SourceWorkspace({
-  scope,
   scopePath,
   surface,
   candidates,
@@ -1237,7 +1214,6 @@ function SourceWorkspace({
   width,
   height,
 }: {
-  scope: SourceScope;
   scopePath: string;
   surface: SourceSurface;
   candidates: NpxSkillsCandidate[];
@@ -1299,7 +1275,7 @@ function SourceWorkspace({
   return h(
     Box,
     {height, flexDirection: 'column'},
-    h(Text, {wrap: 'wrap'}, `Scope: ${scope === 'global' ? 'Global (default/recommended)' : 'exact Project — Project-owned copy (advanced)'}  Path: ${scopePath}`),
+    h(Text, {wrap: 'wrap'}, `Scope: Global (default/recommended)  Path: ${scopePath}`),
     h(Text, {color: 'cyan', wrap: 'wrap'}, 'Discover → Inspect & plan → Confirm ownership → Run & maintain → Verify truth'),
     h(
       Box,
@@ -1310,7 +1286,7 @@ function SourceWorkspace({
               windowStart(list.length, selectedIndex, Math.max(1, height - 8)),
               windowStart(list.length, selectedIndex, Math.max(1, height - 8)) + Math.max(1, height - 8),
             )
-          : sourceEmptyLines(surface, scope, scopePath).map((line, index) =>
+          : sourceEmptyLines(surface).map((line, index) =>
               h(Text, {key: `empty-${index}`, dimColor: true, wrap: 'wrap'}, line))),
       ),
       width >= WIDE_MIN
@@ -1326,34 +1302,6 @@ function SourceWorkspace({
       : null,
     h(Text, {wrap: 'wrap'}, `Selected: ${idleDetail[0] ?? 'none'}  Actual: ${actual}  Desired: ${displayedDesired}`),
     h(Text, {wrap: 'wrap'}, `Drift: ${displayedDrift}  Update: ${displayedUpdate}  Relationship: ${displayedRelationships}  Effective Visibility: ${effective}`),
-  );
-}
-
-/** Project Source copy boundary: explains the recommended Global-resource
- *  Relationship path and the advanced Project-owned copy before entering. */
-function ProjectSourceBoundary({
-  focus,
-  projectPath,
-  height,
-}: {
-  focus: 0 | 1;
-  projectPath: string;
-  height: number;
-}): ReactNode {
-  return h(
-    Box,
-    {height, flexDirection: 'column', paddingLeft: 2, paddingRight: 2, paddingTop: 1},
-    h(Text, {bold: true, wrap: 'wrap'}, 'Project Source copy — explicit boundary'),
-    h(Text, {wrap: 'wrap'}, 'Global Source is the default and recommended remote lifecycle.'),
-    h(Text, null, ' '),
-    h(Text, {inverse: focus === 0, wrap: 'wrap'}, ' Use Global resources (recommended) '),
-    h(Text, {dimColor: true, wrap: 'wrap'},
-      '  Manage Relationships to Global resources in 1 Target / 2 Skill. No Link, install, lock write, or network request happens here.'),
-    h(Text, null, ' '),
-    h(Text, {inverse: focus === 1, wrap: 'wrap'}, ' Project-owned copy (advanced) '),
-    h(Text, {dimColor: true, wrap: 'wrap'}, `  Enter exact Project Source: ${projectPath}`),
-    h(Text, {dimColor: true, wrap: 'wrap'},
-      '  A separate Project-owned resource and lock with independent update/remove and same-name Global conflict consequences. Inherited Global entries stay read-only.'),
   );
 }
 
@@ -1473,16 +1421,12 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   const takeSnapshot = () =>
     projectPath ? projectTuiSnapshot(home, projectPath) : tuiSnapshot(home);
   const [snapshot, setSnapshot] = useState<TuiSnapshot>(takeSnapshot);
-  const exactProjectPath = projectPath ?? process.cwd();
-  // Global-first: Source always opens in the default/recommended Global scope,
-  // even when the TUI has an exact Project context (issue #143).
-  const sourceTakeSnapshot = (scope: SourceScope) =>
-    scope === 'project' ? projectTuiSnapshot(home, exactProjectPath) : tuiSnapshot(home);
-  const [sourceScope, setSourceScope] = useState<SourceScope>('global');
-  const [sourceSnapshot, setSourceSnapshot] = useState<TuiSnapshot>(snapshot);
+  // Global-only: Source operates exclusively on the Global Shared Target,
+  // even when the TUI has an exact Project context (issue #145). exact
+  // Project Source copies remain available through the explicit CLI only.
+  const sourceTakeSnapshot = () => tuiSnapshot(home);
+  const [sourceSnapshot, setSourceSnapshot] = useState<TuiSnapshot>(() => tuiSnapshot(home));
   const [sourceSurface, setSourceSurface] = useState<SourceSurface>('catalog');
-  // Project Source copy boundary: shown by `p` from idle Global scope.
-  const [sourceProjectBoundary, setSourceProjectBoundary] = useState<{focus: 0 | 1}>();
   const [sourceCandidates, setSourceCandidates] = useState<NpxSkillsCandidate[]>([]);
   const [sourceCandidateId, setSourceCandidateId] = useState<string>();
   const [sourceResourceId, setSourceResourceId] = useState<string>();
@@ -1516,25 +1460,6 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   const [batchConfirm, setBatchConfirm] = useState<BatchConfirm | null>(null);
   const [batchTag, setBatchTag] = useState<{ action: 'add' | 'rm'; value: string } | null>(null);
   const [feedback, setFeedback] = useState('');
-
-  /** One isolated Source scope transition: fresh snapshot, cleared Project-only
-   *  candidate selection, marks, plans, and cache context. */
-  const enterSourceScope = (scope: SourceScope): void => {
-    try {
-      const next = sourceTakeSnapshot(scope);
-      setSourceScope(scope);
-      setSourceSnapshot(next);
-      setSourceCandidates([]);
-      setSourceCandidateId(undefined);
-      setSourceResourceId(undefined);
-      setSourceMarks(new Set());
-      setSourceOperation(undefined);
-      setQuery('');
-      setFeedback('');
-    } catch (error) {
-      setFeedback((error as Error).message);
-    }
-  };
 
   const targets = snapshot.targets;
   const target = targets[Math.min(targetIndex, Math.max(0, targets.length - 1))];
@@ -1639,22 +1564,18 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   );
   const activeSourceResource = sourceSurface === 'inventory' ? sourceResource : undefined;
   const sourceVisibility = useMemo(
-    () => resolveVisibility(
-      home,
-      activeSourceResource,
-      sourceScope === 'project' ? exactProjectPath : undefined,
-    ),
-    [home, exactProjectPath, activeSourceResource, sourceScope, sourceSnapshot],
+    () => resolveVisibility(home, activeSourceResource),
+    [home, activeSourceResource, sourceSnapshot],
   );
   const sourceTruth = useMemo(
-    () => sourceDesiredTruth(home, activeSourceResource, sourceScope, exactProjectPath),
-    [home, activeSourceResource, sourceScope, exactProjectPath, sourceSnapshot],
+    () => sourceDesiredTruth(home, activeSourceResource, 'global', ''),
+    [home, activeSourceResource, sourceSnapshot],
   );
   const sourceCandidateTruth = useMemo(
     () => sourceSurface === 'catalog'
-      ? catalogCandidateTruth(home, sourceSnapshot, sourceCandidate, sourceScope, exactProjectPath)
+      ? catalogCandidateTruth(home, sourceSnapshot, sourceCandidate, 'global', '')
       : undefined,
-    [home, sourceSurface, sourceSnapshot, sourceCandidate, sourceScope, exactProjectPath],
+    [home, sourceSurface, sourceSnapshot, sourceCandidate],
   );
   const sourceTarget = sourceSnapshot.targets.find(({name}) => name === 'shared');
   const sourceRelationship = sourceRelationships(activeSourceResource).find((relationship) =>
@@ -1662,7 +1583,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   const sourceRemovable = Boolean(
     activeSourceResource && sourceRelationship && activeSourceResource.sourceLabel !== 'Source unknown',
   );
-  const sourcePath = sourceTarget?.dir ?? (sourceSnapshot.project ?? home.configDir);
+  const sourcePath = sourceTarget?.dir ?? home.configDir;
   const explained = useMemo(
     () => resolveVisibility(
       home,
@@ -1752,19 +1673,17 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   };
 
   const applySourceOperation = (operation: SourceOperationState): void => {
-    const project = sourceScope === 'project' ? exactProjectPath : undefined;
     try {
       if (operation.kind === 'remove') {
         const plan = operation.plan;
         const result = operation.runStep === 'source'
           ? sharedRemove(home, [plan.source.name], {
               sourceConfirmed: true,
-              projectPath: project,
               expected: plan,
             })
-          : sharedRemoveCascade(home, [plan.source.name], plan, project);
-        const finalSnapshot = sourceTakeSnapshot(sourceScope);
-        const truth = verifiedSourceTruth(home, finalSnapshot, plan, sourceScope, exactProjectPath);
+          : sharedRemoveCascade(home, [plan.source.name], plan);
+        const finalSnapshot = sourceTakeSnapshot();
+        const truth = verifiedSourceTruth(home, finalSnapshot, plan, 'global', '');
         setSourceSnapshot(finalSnapshot);
         if (operation.runStep !== 'source') {
           const steps = sourceSteps(plan.operation);
@@ -1799,7 +1718,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         const retryNames = operation.retry && operation.result
           ? operation.result.items.filter(({outcome}) => outcome === 'failed').map(({name}) => name)
           : operation.plan.items.filter(({reason}) => reason !== 'unmarked').map(({name}) => name);
-        const applyPlan = operation.retry ? planSharedUpdate(home, retryNames, project) : operation.plan;
+        const applyPlan = operation.retry ? planSharedUpdate(home, retryNames) : operation.plan;
         if (operation.retry) {
           const original = new Map(operation.plan.items.map((item) => [item.name, item]));
           const changed = applyPlan.items.some((item) => {
@@ -1808,7 +1727,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
           });
           if (changed) throw new Error('Source update intent changed; new preview required.');
         }
-        const attempt = sharedUpdate(home, retryNames, project, applyPlan);
+        const attempt = sharedUpdate(home, retryNames, undefined, applyPlan);
         const result: SharedUpdateResult = operation.retry && operation.result
           ? {
               actual: attempt.actual,
@@ -1819,17 +1738,10 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
               ],
             }
           : attempt;
-        const finalSnapshot = sourceTakeSnapshot(sourceScope);
+        const finalSnapshot = sourceTakeSnapshot();
         setSourceSnapshot(finalSnapshot);
         const failed = result.items.filter(({outcome}) => outcome === 'failed');
-        const truth = verifiedUpdateTruth(
-          home,
-          finalSnapshot,
-          operation.plan,
-          result,
-          sourceScope,
-          exactProjectPath,
-        );
+        const truth = verifiedUpdateTruth(home, finalSnapshot, operation.plan, result, 'global', '');
         let outcome: SourceOperationBase['outcome'] = 'succeeded';
         if (failed.length > 0)
           outcome = result.items.some((item) => item.outcome === 'updated') ? 'partial' : 'failed';
@@ -1871,7 +1783,6 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
           operation.candidate.source,
           operation.candidate.name,
           Boolean(operation.plan.replacement),
-          project,
         );
         if (!sameSourceIntent(operation.plan, fresh))
           throw new Error('Source intent changed; new preview required.');
@@ -1882,11 +1793,11 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         operation.candidate.source,
         operation.candidate.name,
         Boolean(plan.replace),
-        project,
+        undefined,
         plan,
       );
-      const finalSnapshot = sourceTakeSnapshot(sourceScope);
-      const truth = verifiedSourceTruth(home, finalSnapshot, plan, sourceScope, exactProjectPath);
+      const finalSnapshot = sourceTakeSnapshot();
+      const truth = verifiedSourceTruth(home, finalSnapshot, plan, 'global', '');
       setSourceSnapshot(finalSnapshot);
       setSourceOperation({
         ...operation,
@@ -1915,7 +1826,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       const failureStage = preflightFailure ? 'preflight' : failure.details?.stage ?? 'preflight';
       let finalSnapshot: TuiSnapshot | undefined;
       try {
-        finalSnapshot = sourceTakeSnapshot(sourceScope);
+        finalSnapshot = sourceTakeSnapshot();
         setSourceSnapshot(finalSnapshot);
       } catch {
         // The operation error remains primary; failure truth reports the unavailable rescan.
@@ -1936,7 +1847,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
           })),
         };
         const truth = finalSnapshot
-          ? verifiedUpdateTruth(home, finalSnapshot, operation.plan, result, sourceScope, exactProjectPath)
+          ? verifiedUpdateTruth(home, finalSnapshot, operation.plan, result, 'global', '')
           : undefined;
         setSourceOperation({
           ...operation,
@@ -1954,7 +1865,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       }
       const plan = operation.plan;
       const truth = finalSnapshot
-        ? verifiedSourceTruth(home, finalSnapshot, plan, sourceScope, exactProjectPath)
+        ? verifiedSourceTruth(home, finalSnapshot, plan, 'global', '')
         : undefined;
       const steps = sourceSteps(plan.operation);
       if (operation.kind === 'remove') {
@@ -2019,7 +1930,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       return;
     }
     const mutable = considered.filter((row) =>
-      row.updateAvailability && mutableSourceRelationship(row, sourceScope));
+      row.updateAvailability && mutableSourceRelationship(row));
     const selectedIds = new Set(candidates.map(({id}) => id));
     const selected = mutable.filter(({id}) => selectedIds.has(id));
     const selectionExclusions = considered.flatMap((row) => {
@@ -2035,11 +1946,10 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       return;
     }
     try {
-      const project = sourceScope === 'project' ? exactProjectPath : undefined;
       const plan = planSharedUpdate(
         home,
         selected.map((row) => row.updateAvailability!.slot),
-        project,
+        undefined,
         mutable.map((row) => row.updateAvailability!.slot),
       );
       if (!plan.items.some(({included}) => included)) {
@@ -2047,7 +1957,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         return;
       }
       const visibilityConsequences = selected.map((row) => {
-        const states = resolveVisibility(home, row, project)?.harnesses.map((harness) =>
+        const states = resolveVisibility(home, row)?.harnesses.map((harness) =>
           `${harness.name}=${harness.effectiveVisibility}`) ?? ['unknown'];
         return `${row.name}: Relationships remain in place; ${states.join(', ')} on next load; Mirror content may require explicit reconcile.`;
       });
@@ -2074,25 +1984,6 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         setSourceLogScroll((value) => Math.min(Math.max(0, sourceLogLines.length - 1), value + 1));
       } else if (key.upArrow || input === 'k') {
         setSourceLogScroll((value) => Math.max(0, value - 1));
-      }
-      return;
-    }
-    if (sourceProjectBoundary) {
-      // The boundary traps input: it is a choice, not a browsing state.
-      if (key.escape) return setSourceProjectBoundary(undefined);
-      if (key.downArrow || input === 'j' || key.upArrow || input === 'k' || key.tab)
-        return setSourceProjectBoundary({focus: sourceProjectBoundary.focus === 0 ? 1 : 0});
-      if (key.return) {
-        setSourceProjectBoundary(undefined);
-        if (sourceProjectBoundary.focus === 0) {
-          // Recommended path: navigation only — no Link, install, lock write,
-          // network request, or other mutation.
-          setTab('target');
-          setFeedback('Recommended: manage Relationships to Global resources in 1 Target / 2 Skill.');
-          return;
-        }
-        // Advanced path: explicit acknowledgement enters exact Project Source.
-        enterSourceScope('project');
       }
       return;
     }
@@ -2141,7 +2032,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       }
       if (sourceOperation.phase === 'source-confirm') {
         if (key.escape) {
-          setSourceSnapshot(sourceTakeSnapshot(sourceScope));
+          setSourceSnapshot(sourceTakeSnapshot());
           setFeedback('Source preserved; Relationship cascade remains complete.');
           setSourceOperation(undefined);
         } else if (key.return) setSourceOperation({
@@ -2322,7 +2213,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
             const result = sharedFind(
               home,
               query.trim().split(/\s+/).filter(Boolean),
-              sourceScope === 'project' ? exactProjectPath : undefined,
+              undefined,
               false,
             );
             setSourceCandidates(result.candidates);
@@ -2438,15 +2329,11 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       setBatch(null);
       setQuery('');
       if (input === '3') {
-        // Opening Source from another workspace always starts Global (issue #143);
-        // re-pressing 3 inside Source only refreshes the current scope.
-        if (tab !== 'source' && sourceScope !== 'global') enterSourceScope('global');
-        else {
-          try {
-            setSourceSnapshot(sourceTakeSnapshot(sourceScope));
-          } catch (error) {
-            setFeedback((error as Error).message);
-          }
+        // Source is Global-only (issue #145); pressing 3 refreshes the Global snapshot.
+        try {
+          setSourceSnapshot(sourceTakeSnapshot());
+        } catch (error) {
+          setFeedback((error as Error).message);
         }
       }
       setTab(input === '1' ? 'target' : input === '2' ? 'skill' : 'source');
@@ -2459,14 +2346,10 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         setSourceLogScroll(0);
         return;
       }
-      if (input === 'g') {
-        enterSourceScope('global');
-        return;
-      }
       if (input === 'p') {
-        // Global-first: `p` never switches directly; it opens the explicit
-        // Project Source copy boundary (advanced path requires acknowledgement).
-        if (sourceScope === 'global') setSourceProjectBoundary({focus: 0});
+        // Global-only: `p` never switches scope or mutates; it points to the
+        // explicit exact-Project Source CLI (issue #145).
+        setFeedback('exact Project Source is explicit CLI-only: skillspub project <path> shared …');
         return;
       }
       if (key.tab) {
@@ -2481,43 +2364,20 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       }
       if (input === 'a' && sourceSurface === 'catalog' && sourceCandidate) {
         try {
-          const project = sourceScope === 'project' ? exactProjectPath : undefined;
           const initial = planSharedAdd(
             home,
             sourceCandidate.source,
             sourceCandidate.name,
             false,
-            project,
           );
           const plan = initial.replacement
-            ? planSharedAdd(home, sourceCandidate.source, sourceCandidate.name, true, project)
+            ? planSharedAdd(home, sourceCandidate.source, sourceCandidate.name, true)
             : initial;
-          // Same normalized name in Global: disclose the separate-copy conflict
-          // before a Project add/replace; never one shared update stream.
-          let globalConflict: string[] | undefined;
-          if (sourceScope === 'project') {
-            const slot = normalizeNpxSkillsName(sourceCandidate.name);
-            const clash = sourceInventory.find((row) =>
-              sourceRelationships(row).some((rel) => rel.readOnly && rel.slot === slot));
-            const inherited = clash
-              ? sourceRelationships(clash).find((rel) => rel.readOnly && rel.slot === slot)
-              : undefined;
-            if (clash && inherited)
-              globalConflict = [
-                `Same-name Global resource: ${clash.sourceLabel}`,
-                `  at ${inherited.info.path}`,
-                'Copies are independent;',
-                'update/remove stay independent per scope.',
-                'Harness precedence follows verified Adapter',
-                'evidence; Source does not guess the winner.',
-              ];
-          }
           setSourceOperation({
             kind: 'add',
             phase: 'preview',
             plan,
             candidate: sourceCandidate,
-            globalConflict,
             steps: sourceSteps(plan.operation),
             scroll: 0,
           });
@@ -2528,12 +2388,9 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       }
       if (input === 'r') {
         try {
-          const result = sharedRefresh(
-            home,
-            sourceScope === 'project' ? exactProjectPath : undefined,
-          );
+          const result = sharedRefresh(home);
           const keep = sourceResource?.id;
-          const next = sourceTakeSnapshot(sourceScope);
+          const next = sourceTakeSnapshot();
           const validIds = new Set(sourceInventoryRows(next).map(({id}) => id));
           setSourceSnapshot(next);
           setSourceResourceId(keep && validIds.has(keep) ? keep : '');
@@ -2546,7 +2403,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       }
       if (input === 'u' && sourceSurface === 'inventory' &&
           sourceResource?.updateAvailability?.status === 'available' &&
-          mutableSourceRelationship(sourceResource, sourceScope)) {
+          mutableSourceRelationship(sourceResource)) {
         beginSourceUpdate([sourceResource]);
         return;
       }
@@ -2578,8 +2435,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         if (!sourceRemovable)
           return setFeedback('Remove unavailable: select a proven Vercel-managed local Shared source');
         try {
-          const project = sourceScope === 'project' ? exactProjectPath : undefined;
-          const plan = planSharedRemove(home, [sourceResource.name], project);
+          const plan = planSharedRemove(home, [sourceResource.name]);
           setSourceOperation({
             kind: 'remove',
             phase: 'preview',
@@ -2908,12 +2764,6 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
             {height: bodyHeight, paddingLeft: 2, paddingRight: 2, paddingTop: 1},
             h(BatchActivationModal, {confirm: batchConfirm}),
           )
-      : sourceProjectBoundary
-        ? h(ProjectSourceBoundary, {
-            focus: sourceProjectBoundary.focus,
-            projectPath: exactProjectPath,
-            height: bodyHeight,
-          })
       : confirmation
         ? h(
             Box,
@@ -2922,7 +2772,6 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
           )
       : tab === 'source'
         ? h(SourceWorkspace, {
-            scope: sourceScope,
             scopePath: sourcePath,
             surface: sourceSurface,
             candidates: sourceCandidates,
@@ -3021,8 +2870,6 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
           ? ` ${feedback}${feedback ? '  ' : ''}j/k move  tab section  space toggle  a add  x rm tag  esc close `
         : batchConfirm
           ? ' y confirm  n/esc cancel '
-        : sourceProjectBoundary
-          ? ' ↑↓/jk choose  enter select  esc cancel — Global Source unchanged '
         : batchTag
           ? ` tag ${batchTag.action === 'add' ? 'add' : 'rm'}: ${batchTag.value}`
         : batch
@@ -3034,7 +2881,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
           : tab === 'source'
             ? sourceOperation
               ? sourceOperationHint(sourceOperation)
-              : ` ${feedback}${feedback ? '  ' : ''}source:${columnName}${latestSourceOperation ? '  l latest transcript' : ''}  g Global${sourceScope === 'global' ? '  p Project copy…' : ''}  tab Catalog/Inventory  / search  ↑↓/jk  enter detail${sourceSurface === 'catalog' && sourceCandidate ? '  a add/replace' : ''}  r refresh${sourceSurface === 'inventory' ? `  space mark (${sourceMarks.size})${sourceResource?.updateAvailability?.status === 'available' && mutableSourceRelationship(sourceResource, sourceScope) ? '  u update' : ''}${sourceMarks.size > 0 ? '  b batch update' : ''}${sourceRemovable ? '  d remove' : ''}` : ''}  1/2 matrices  q `
+              : ` ${feedback}${feedback ? '  ' : ''}source:${columnName}${latestSourceOperation ? '  l latest transcript' : ''}  tab Catalog/Inventory  / search  ↑↓/jk  enter detail${sourceSurface === 'catalog' && sourceCandidate ? '  a add/replace' : ''}  r refresh${sourceSurface === 'inventory' ? `  space mark (${sourceMarks.size})${sourceResource?.updateAvailability?.status === 'available' && mutableSourceRelationship(sourceResource) ? '  u update' : ''}${sourceMarks.size > 0 ? '  b batch update' : ''}${sourceRemovable ? '  d remove' : ''}` : ''}  1/2 matrices  q `
             : ` ${feedback}${feedback ? '  ' : ''}${tab}:${columnName}  ←→/hl  ↑↓/jk${actionHint}  enter ${tab === 'target' && focusColumn === 0 ? 'details' : 'SKILL.md'}${selectedRow?.realPath ? '  e explain' : ''}  m manage  / search  s sort:${sortLabel(sort)}  R refresh  tab  1/2/3 workspace  q `,
     ),
   );
