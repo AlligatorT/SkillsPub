@@ -1249,8 +1249,10 @@ test('Project Source Add preview discloses the Project-owned copy and same-name 
   assert.match(frame, /may conflict/);
   assert.match(frame, /never one shared update stream\./);
   assert.match(frame, /Same-name Global resource: https:\/\/github\.com\/own/);
-  assert.match(frame, /Project copy is separate and takes precedence;/);
+  assert.match(frame, /Copies are independent;/);
   assert.match(frame, /update\/remove stay independent per scope\./);
+  assert.match(frame, /Harness precedence follows verified Adapter/);
+  assert.match(frame, /Source does not guess the winner\./);
   await t.send('\x1b');
   t.unmount();
 });

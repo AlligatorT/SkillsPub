@@ -245,7 +245,7 @@ Source workspace 采用 #111 批准的 A+C 组合。Variant A 是持久结构：
 
 Catalog candidate 以 `source + skill path/name` 识别，不按 name 去重。detail 显示 exact source、skill path/name、description、可用的 installs/detail URL 与 normalized destination Slot。installed resource 以 canonical `realPath` 识别，可靠 provenance 只来自当前 scope 的 Vercel `skills` lock；无法证明时显示 `Source unknown` 与 `realPath`，不得提供伪装成 Vercel-owned 的 update/remove。
 
-按 #143 修订，Project Catalog 的 add/replace preview 必须明确说明：该操作创建或修改一个独立的 Project-owned resource 与 Project lock，可能与同名 Global resource 冲突。当同一 normalized Slot 在 Global 已存在时，preview 必须点名该 Global resource 的 source/path，说明 Project 副本是独立 resource、在该 Project 内优先，且两个 scope 的 update/remove 各自独立——永不构成同一条共享更新流。
+按 #143 修订，Project Catalog 的 add/replace preview 必须明确说明：该操作创建或修改一个独立的 Project-owned resource 与 Project lock，可能与同名 Global resource 冲突。当同一 normalized Slot 在 Global 已存在时，preview 必须点名该 Global resource 的 source/path，说明两个副本相互独立、update/remove 各自独立，且同名共存时各 Harness 依已验证 Adapter evidence 决定可见性或报告 conflict——Source 不猜测赢家，两个 scope 永不构成同一条共享更新流。
 
 若 normalized Shared Slot 已被不同 source 占用，add 变成 explicit Replace。preview 列出 old/new provenance，以及继续指向该 Slot、因此会消费新内容的所有已知 Relationships；Slot intent、Tags、Bundles 与有效 Preset claims 保留，不静默覆盖。
 

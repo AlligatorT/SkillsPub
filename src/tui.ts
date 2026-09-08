@@ -2506,8 +2506,10 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
               globalConflict = [
                 `Same-name Global resource: ${clash.sourceLabel}`,
                 `  at ${inherited.info.path}`,
-                'Project copy is separate and takes precedence;',
+                'Copies are independent;',
                 'update/remove stay independent per scope.',
+                'Harness precedence follows verified Adapter',
+                'evidence; Source does not guess the winner.',
               ];
           }
           setSourceOperation({

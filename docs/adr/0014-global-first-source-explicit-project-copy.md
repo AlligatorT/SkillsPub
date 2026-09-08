@@ -21,4 +21,4 @@ Human acceptance #126 暴露出 #111 批准、#116 落地的对称 Global/exact-
 
 - 不变边界继续成立：pinned Vercel `skills` 拥有 remote lifecycle/lock/security audit；TUI 启动与普通只读查询不联网；Source 操作不自动创建 Harness Relationship；不建立中央 Project registry；no-launcher 边界不受影响。
 - exact Project Source 能力完整保留，用于 reproducibility、fork 与 project-specific version 场景，但它是显式 advanced 路径，不再与 Global 对称呈现。
-- Project 副本与同名 Global resource 各自独立 lock/update/remove；同一 Project 内 Project 副本优先，但不回写或影响 Global。
+- Project 副本与同名 Global resource 各自独立 lock/update/remove；同名共存时，各 Harness 依已验证 Adapter evidence 决定可见性或报告 conflict，Source 不猜测赢家（与 Effective Visibility 的 unknown/conflicted 规则一致），也不回写或影响 Global。
