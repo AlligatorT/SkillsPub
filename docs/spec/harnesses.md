@@ -126,7 +126,7 @@ SkillsPub 管理落在已管理 Skill Target 中的自包含 `SKILL.md` 目录�
 
 ## Source Adapters
 
-Source Adapter 拥有固定上游版本、命令、输出解析、provenance、lock 语义与兼容 fixtures，不拥有 Harness 配置。
+Source Adapter 拥有固定上游版本、命令、输出解析、provenance、lock 语义与兼容 fixtures，不拥有 Harness 配置。按 #143 修订，Source lifecycle 是 global-first（Global 默认/推荐），exact-Project Source 是显式的 advanced Project-owned 副本路径，经 TUI `p` 边界确认进入；既有的 scope/lock/Relationship 隔离保证不变。
 
 `npx skills` Adapter 固定使用一个经过发布验证的版本，并且只安装到 Shared Target：
 

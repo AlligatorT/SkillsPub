@@ -239,9 +239,13 @@ Source workspace 采用 #111 批准的 A+C 组合。Variant A 是持久结构：
 - success 停在 Verify truth，直到用户 acknowledge；failure 保持 C state，直到 retry、fresh preview，或 acknowledge remaining Drift 后离开；
 - 每个 success、failure、partial result 都必须重新扫描 filesystem，再显示 final truth。
 
-Global 只操作 Global Shared Target、Global Vercel lock 和 scope-local update cache。exact Project 是 TUI startup `cwd` 的 canonical `realpath`，只操作该目录的 Project Shared Target、`<project>/skills-lock.json`、Project state 与 Project update cache；不用 Git 或 `package.json` 改写 root，也不建立中央 Project registry。Project Inventory 可显示 Global/ancestor inheritance 解释 effective state，但 inherited entries read-only，必须标明 source directory。selection、batch marks、plan 与 cache 按 candidate/resource identity 和 scope 隔离；sort/refresh 只在 identity 仍有效时保留，scope change 全部清除。
+按 #143 修订，Source workspace 始终以 Global scope 打开，即使 TUI 带 exact Project 上下文；Global 标注 `Scope: Global (default/recommended)`，是默认/推荐的 Source lifecycle。Global 只操作 Global Shared Target、Global Vercel lock 和 scope-local update cache。exact Project 是 TUI startup `cwd` 的 canonical `realpath`，只操作该目录的 Project Shared Target、`<project>/skills-lock.json`、Project state 与 Project update cache；不用 Git 或 `package.json` 改写 root，也不建立中央 Project registry。Project Inventory 可显示 Global/ancestor inheritance 解释 effective state，但 inherited entries read-only，必须标明 source directory。selection、batch marks、plan 与 cache 按 candidate/resource identity 和 scope 隔离；sort/refresh 只在 identity 仍有效时保留，scope change 全部清除。
+
+按 #143 修订，`p` 不再直接切换到 exact Project，而是打开键盘可达的 Project Source 副本边界，解释两个选择：`Use Global resources (recommended)` 转向现有 `1 Target` / `2 Skill` Relationship 管理消费 Global resources——纯导航，不执行自动 Link、Source install、lock 写入、network request 或其他 mutation；`Project-owned copy (advanced)` 经显式确认后进入 exact Project Source，持久显示 `Scope: exact Project — Project-owned copy (advanced)` 与 canonical Project path。`Esc` 取消边界，Global Source 保持不变。
 
 Catalog candidate 以 `source + skill path/name` 识别，不按 name 去重。detail 显示 exact source、skill path/name、description、可用的 installs/detail URL 与 normalized destination Slot。installed resource 以 canonical `realPath` 识别，可靠 provenance 只来自当前 scope 的 Vercel `skills` lock；无法证明时显示 `Source unknown` 与 `realPath`，不得提供伪装成 Vercel-owned 的 update/remove。
+
+按 #143 修订，Project Catalog 的 add/replace preview 必须明确说明：该操作创建或修改一个独立的 Project-owned resource 与 Project lock，可能与同名 Global resource 冲突。当同一 normalized Slot 在 Global 已存在时，preview 必须点名该 Global resource 的 source/path，说明两个副本相互独立、update/remove 各自独立，且同名共存时各 Harness 依已验证 Adapter evidence 决定可见性或报告 conflict——Source 不猜测赢家，两个 scope 永不构成同一条共享更新流。
 
 若 normalized Shared Slot 已被不同 source 占用，add 变成 explicit Replace。preview 列出 old/new provenance，以及继续指向该 Slot、因此会消费新内容的所有已知 Relationships；Slot intent、Tags、Bundles 与有效 Preset claims 保留，不静默覆盖。
 
@@ -276,7 +280,7 @@ Verify truth 分栏显示 filesystem Actual Relationships/Activation/forms、pre
 
 Source workspace keyboard contract：
 
-- `g` / `p`：idle 时选择 Global / exact Project；`Tab`：Catalog / Inventory；
+- `g`：Global（default），行为不变——返回 Global 并清除 Project-only selection/marks/plans/cache；`p`：只在 idle Global scope 打开 Project 副本边界，边界内 ↑↓/jk 选择、Enter 确认、Esc 取消；`Tab`：Catalog / Inventory；
 - `/`：按 name、description、provenance 搜索，并保留 manual source input；`j` / `k`：移动 selection；
 - `Enter`：browse 时打开 detail、preview 时推进 displayed confirmation、success 后 acknowledge final truth；
 - `a`：preview add/replace；`r`：refresh；`u`：preview selected update；

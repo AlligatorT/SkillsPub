@@ -159,6 +159,14 @@ async function waitForFrame(
   return frame;
 }
 
+/** Enter exact Project Source through the explicit Project-copy boundary:
+ *  `p` opens it, `j` focuses the advanced path, Enter acknowledges. */
+async function enterProjectSource(t: {send(input: string): Promise<void>}): Promise<void> {
+  await t.send('p');
+  await t.send('j');
+  await t.send('\r');
+}
+
 test('Harness badge renderer keeps non-managed support explicit', async () => {
   for (const support of ['discoverable', 'unsupported'] as const) {
     const stdout = new FakeStdout(30, 3);
@@ -352,7 +360,7 @@ test('TUI startup reads legacy configuration without creating a Target registry 
   assert.equal(fs.existsSync(path.join(home.configDir, 'state.json')), false);
 });
 
-test('Source workspace exposes durable read-only scope, lifecycle, inventory, and truth', async () => {
+test('Source workspace opens Global-first and gates exact Project behind an explicit copy boundary', async () => {
   const {home} = setup();
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-source-project-'));
   const before = fs.readdirSync(home.configDir, {recursive: true}).sort();
@@ -361,8 +369,7 @@ test('Source workspace exposes durable read-only scope, lifecycle, inventory, an
   await t.send('3');
   let frame = t.stdout.frame();
   assert.match(frame, /Source/);
-  assert.match(frame, /Scope: exact Project/);
-  assert.match(frame, new RegExp(fs.realpathSync(project).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(frame, /Scope: Global \(default\/recommended\)/);
   assert.match(frame, /Discover.*Inspect & plan.*Confirm ownership.*Run & maintain.*Verify truth/);
   assert.match(frame, /Catalog/);
   assert.match(frame, /Actual:/);
@@ -372,17 +379,73 @@ test('Source workspace exposes durable read-only scope, lifecycle, inventory, an
   assert.match(frame, /Relationship:/);
   assert.match(frame, /Effective Visibility:/);
 
-  await t.send('\t');
-  frame = t.stdout.frame();
-  assert.match(frame, /Inventory/);
-  await t.send('g');
-  assert.match(t.stdout.frame(), /Scope: Global/);
+  // p opens the Project-copy boundary instead of switching scope.
   await t.send('p');
-  assert.match(t.stdout.frame(), /Scope: exact Project/);
+  frame = t.stdout.frame();
+  assert.match(frame, /Project Source copy — explicit boundary/);
+  assert.match(frame, /Global Source is the default and recommended remote lifecycle/);
+  assert.match(frame, /Use Global resources \(recommended\)/);
+  assert.match(frame, /Project-owned copy \(advanced\)/);
+  assert.match(frame, /Enter exact Project Source:/);
+  assert.match(frame, /esc cancel — Global Source unchanged/);
+
+  // Esc cancels the boundary and leaves Global Source unchanged.
+  await t.send('\x1b');
+  frame = t.stdout.frame();
+  assert.match(frame, /Scope: Global \(default\/recommended\)/);
+  assert.doesNotMatch(frame, /explicit boundary/);
+
+  // The recommended path only navigates to Target/Skill Relationship management.
+  await t.send('p');
+  await t.send('\r');
+  frame = t.stdout.frame();
+  assert.doesNotMatch(frame, /explicit boundary/);
+  assert.match(frame, /Recommended: manage Relationships to Global resources in 1 Target \/ 2 Skill/);
+  assert.match(frame, /target:targets/);
+
+  // The advanced path requires explicit acknowledgement and keeps a persistent identity.
+  await t.send('3');
+  await t.send('p');
+  await t.send('j');
+  await t.send('\r');
+  frame = t.stdout.frame();
+  assert.match(frame, /Scope: exact Project — Project-owned copy \(advanced\)/);
+  // The Catalog column wraps long paths mid-word; join box-wrapped lines before matching.
+  const flat = frame.replace(/│\n│/g, '');
+  assert.match(flat, new RegExp(fs.realpathSync(project).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  await t.send('\t');
+  assert.match(t.stdout.frame(), /Inventory/);
+
+  // g returns to Global Source.
+  await t.send('g');
+  assert.match(t.stdout.frame(), /Scope: Global \(default\/recommended\)/);
   t.unmount();
 
   assert.deepEqual(fs.readdirSync(home.configDir, {recursive: true}).sort(), before);
   assert.equal(fs.existsSync(path.join(project, '.skillspub')), false);
+});
+
+test('Source Project-copy boundary stays usable in a narrow terminal', async () => {
+  const {home} = setup();
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-source-project-'));
+  const t = await renderApp(home, 52, 32, project);
+
+  await t.send('3');
+  assert.match(t.stdout.frame(), /Scope: Global \(default\/recommended\)/);
+  await t.send('p');
+  const frame = t.stdout.frame();
+  assert.match(frame, /Project Source copy/);
+  assert.match(frame, /explicit boundary/);
+  assert.match(frame, /Global Source is the default/);
+  assert.match(frame, /Use Global resources/);
+  assert.match(frame, /Project-owned copy/);
+  assert.match(frame, /esc cancel/);
+  // Focus moves to the advanced path and Enter acknowledges it.
+  await t.send('j');
+  await t.send('\r');
+  assert.match(t.stdout.frame(), /Scope: exact Project/);
+  assert.match(t.stdout.frame(), /Project-owned copy/);
+  t.unmount();
 });
 
 test('Source Global empty Catalog explains lifecycle, scope isolation, and explicit search (wide)', async () => {
@@ -393,13 +456,16 @@ test('Source Global empty Catalog explains lifecycle, scope isolation, and expli
   const frame = t.stdout.frame();
   assert.match(frame, /Source = Shared remote lifecycle: find\/add\/replace\/update\/remove/);
   assert.match(frame, /Target & Skill manage installed Relationships/);
-  assert.match(frame, /g\/p select one isolated scope/);
+  assert.match(frame, /g returns to Global; scopes stay isolated/);
   assert.match(frame, /never combined\./);
   assert.match(frame, /No remote candidates loaded/);
   assert.match(frame, /Press \/ to search with the pinned Vercel skills Source Adapter/);
   assert.match(frame, /Nothing is fetched automatically/);
-  assert.match(frame, /Current scope: Global only — exact Project data is not modified/);
-  assert.match(frame, /g Global only {2}p Project only/);
+  assert.match(frame, /Current scope: Global \(default\/recommended\)\./);
+  assert.match(frame, /exact Project data is not modified\./);
+  assert.match(frame, /Global is the default\/recommended scope/);
+  assert.match(frame, /p opens an explicit Project-owned copy boundary\./);
+  assert.match(frame, /g Global {2}p Project copy…/);
   t.unmount();
 });
 
@@ -412,7 +478,7 @@ test('Source Global empty Catalog stays explanatory in a narrow terminal', async
   assert.match(frame, /No remote candidates loaded/);
   assert.match(frame, /Press \/ to search with the pinned Vercel/);
   assert.match(frame, /Nothing is fetched automatically/);
-  assert.match(frame, /Global only/);
+  assert.match(frame, /Global \(default/);
   assert.match(frame, /not modified/);
   t.unmount();
 });
@@ -423,11 +489,13 @@ test('Source exact Project empty Catalog shows canonical path, isolation, and re
   const t = await renderApp(home, 120, 32, project);
 
   await t.send('3');
+  await enterProjectSource(t);
   const frame = t.stdout.frame();
   assert.match(frame, /No remote candidates loaded/);
   assert.match(frame, /Press \/ to search with the pinned Vercel skills Source Adapter/);
   assert.match(frame, /Nothing is fetched automatically/);
-  assert.match(frame, /Current scope: exact Project only — Global data is not modified/);
+  assert.match(frame, /Current scope: exact Project — Project-owned copy \(advanced\)\./);
+  assert.match(frame, /Global data is not modified\./);
   const canonical = fs.realpathSync(project).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   // The Catalog column wraps long paths mid-word; join box-wrapped lines before matching.
   const flat = frame.replace(/│\n│/g, '');
@@ -442,10 +510,10 @@ test('Source exact Project empty Catalog stays explanatory in a narrow terminal'
   const t = await renderApp(home, 52, 32, project);
 
   await t.send('3');
+  await enterProjectSource(t);
   const frame = t.stdout.frame();
   assert.match(frame, /No remote candidates loaded/);
-  assert.match(frame, /exact Project only/);
-  assert.match(frame, /not modified/);
+  assert.match(frame, /Project-owned copy/);
   assert.match(frame, /Canonical path:/);
   assert.match(frame, /Inherited Global\/ancestor entries are/);
   assert.match(frame, /read-only context/);
@@ -460,16 +528,21 @@ test('Source empty Inventory explains the active isolated scope in both scopes',
   await t.send('3');
   await t.send('\t');
   let frame = t.stdout.frame();
+  assert.match(frame, /No Shared resources in the Global scope/);
+  assert.match(frame, /Current scope: Global \(default\/recommended\)/);
+  assert.match(frame, /modified\./);
+
+  await enterProjectSource(t);
+  frame = t.stdout.frame();
   assert.match(frame, /No Shared resources in the exact Project scope/);
   assert.match(frame, /find\/add\/replace\/update\/remove/);
-  assert.match(frame, /exact Project only/);
+  assert.match(frame, /Project-owned copy/);
   assert.match(frame, /read-only context/);
 
   await t.send('g');
   frame = t.stdout.frame();
   assert.match(frame, /No Shared resources in the Global scope/);
-  assert.match(frame, /Current scope: Global only/);
-  assert.match(frame, /modified\./);
+  assert.match(frame, /Current scope: Global \(default\/recommended\)/);
   t.unmount();
 });
 
@@ -504,6 +577,7 @@ test('Source Inventory keeps inherited and unknown ownership readable in a narro
   const t = await renderApp(fixture.home, 52, 32, fixture.project);
 
   await t.send('3');
+  await enterProjectSource(t);
   await t.send('\t');
   let frame = t.stdout.frame();
   assert.match(frame, /Scope: exact Project/);
@@ -553,6 +627,7 @@ test('Source Inventory preserves every observed same-slot Relationship', async (
   const t = await renderApp(fixture.home, 100, 30, fixture.project);
 
   await t.send('3');
+  await enterProjectSource(t);
   await t.send('\t');
   assert.match(t.stdout.frame(), /Relationship: 2/);
   t.unmount();
@@ -572,6 +647,7 @@ test('Source Catalog search keeps same-name candidates distinct and traps detail
   const t = await renderApp(fixture.home, 120, 32, fixture.project);
 
   await t.send('3');
+  await enterProjectSource(t);
   await t.send('/');
   for (const input of 'shared-name') await t.send(input);
   await t.send('\r');
@@ -657,6 +733,7 @@ test('Project Source removal stays in the exact Project scope', async (context) 
   useFixtureEnv(context, fixture.env);
   const t = await renderApp(fixture.home, 120, 34, fixture.project);
   await t.send('3');
+  await enterProjectSource(t);
   await t.send('\t');
   await t.send('d');
   assert.match(t.stdout.frame(), /Scope: exact Project/);
@@ -788,6 +865,7 @@ test('Source Add and explicit Replace run A+C preview, cancellation, confirmatio
     });
     const t = await renderApp(fixture.home, 132, 38, projectScope ? fixture.project : undefined);
     await t.send('3');
+    if (projectScope) await enterProjectSource(t);
     await t.send('/');
     await t.send('s');
     await t.send('\r');
@@ -801,10 +879,18 @@ test('Source Add and explicit Replace run A+C preview, cancellation, confirmatio
     assert.match(frame, /old\/repo.*new\/repo/);
     assert.match(frame, /consume-replacement/);
     assert.match(frame, /mirror-sync/);
+    assert.match(frame, /queued/);
+    if (projectScope) {
+      // The Project-owned copy disclosure pushes intent preservation below the fold.
+      assert.match(frame, /Project-owned copy \(advanced\):/);
+      assert.match(frame, /never one shared update stream\./);
+      for (let scroll = 0; scroll < 5; scroll++) await t.send('j');
+      frame = t.stdout.frame();
+    }
     assert.match(frame, /Tags: reviewed/);
     assert.match(frame, /Bundles: tools/);
     assert.match(frame, /Preset claims: preset:work/);
-    assert.match(frame, /queued/);
+    if (projectScope) for (let scroll = 0; scroll < 5; scroll++) await t.send('k');
     await t.send('j');
     assert.match(t.stdout.frame(), /Source Replace plan \[2\//);
     await t.send('k');
@@ -903,6 +989,7 @@ test('Source Add failure stays in Variant C, retries idempotently, and rejects c
       projectScope ? fixture.project : undefined,
     );
     await t.send('3');
+    if (projectScope) await enterProjectSource(t);
     await t.send('/');
     await t.send('f');
     await t.send('\r');
@@ -1003,6 +1090,7 @@ test('Source Catalog reflects exact-Project retry Add truth after Verify acknowl
   });
   const t = await renderApp(fixture.home, 124, 36, fixture.project);
   await t.send('3');
+  await enterProjectSource(t);
   await t.send('/');
   await t.send('f');
   await t.send('\r');
@@ -1093,10 +1181,10 @@ test('Source Catalog derives candidate truth from the selected isolated scope', 
   await t.send('s');
   await t.send('\r');
   let frame = t.stdout.frame();
-  assert.match(frame, /Scope: Global/);
+  assert.match(frame, /Scope: Global \(default\/recommended\)/);
   assert.match(frame, /Actual: ON local/);
 
-  await t.send('p');
+  await enterProjectSource(t);
   await t.send('/');
   await t.send('s');
   await t.send('\r');
@@ -1121,16 +1209,51 @@ test('Source Catalog never shows an exact-Project installation in Global scope',
   await t.send('s');
   await t.send('\r');
   let frame = t.stdout.frame();
-  assert.match(frame, /Scope: exact Project/);
-  assert.match(frame, /Actual: ON local/);
+  assert.match(frame, /Scope: Global \(default\/recommended\)/);
+  assert.match(frame, /Actual: not installed/);
 
-  await t.send('g');
+  await enterProjectSource(t);
   await t.send('/');
   await t.send('s');
   await t.send('\r');
   frame = t.stdout.frame();
-  assert.match(frame, /Scope: Global/);
-  assert.match(frame, /Actual: not installed/);
+  assert.match(frame, /Scope: exact Project/);
+  assert.match(frame, /Actual: ON local/);
+  t.unmount();
+});
+
+test('Project Source Add preview discloses the Project-owned copy and same-name Global conflict', async (context) => {
+  const fixture = setupManagedTui([{name: 'same', source: 'owner/repo', hash: 'same-hash'}]);
+  useFixtureEnv(context, {
+    ...fixture.env,
+    TUI_NPX_FIND_OUTPUT: [
+      'new/repo@same  12 installs',
+      '└ https://skills.sh/new/repo/same',
+    ].join('\n'),
+  });
+  const t = await renderApp(fixture.home, 132, 38, fixture.project);
+  await t.send('3');
+  await enterProjectSource(t);
+  await t.send('/');
+  await t.send('s');
+  await t.send('\r');
+  // Global owns the Slot; the exact Project Catalog stays a separate stream.
+  assert.match(t.stdout.frame(), /Actual: not installed/);
+
+  await t.send('a');
+  const frame = t.stdout.frame();
+  assert.match(frame, /Source Add plan/);
+  assert.match(frame, /Scope: exact Project/);
+  assert.match(frame, /Project-owned copy \(advanced\):/);
+  assert.match(frame, /creates\/changes a separate Project-owned/);
+  assert.match(frame, /may conflict/);
+  assert.match(frame, /never one shared update stream\./);
+  assert.match(frame, /Same-name Global resource: https:\/\/github\.com\/own/);
+  assert.match(frame, /Copies are independent;/);
+  assert.match(frame, /update\/remove stay independent per scope\./);
+  assert.match(frame, /Harness precedence follows verified Adapter/);
+  assert.match(frame, /Source does not guess the winner\./);
+  await t.send('\x1b');
   t.unmount();
 });
 
@@ -2498,6 +2621,7 @@ test('Project Source batch keeps inherited same-name identities read-only', asyn
   sharedRefresh(fixture.home, fixture.project);
   const t = await renderApp(fixture.home, 140, 34, fixture.project);
   await t.send('3');
+  await enterProjectSource(t);
   await t.send('\t');
   await t.send(' ');
   await t.send('j');
@@ -2529,6 +2653,7 @@ test('Project TUI update uses the exact project scope', async (context) => {
   sharedRefresh(fixture.home, fixture.project);
   const t = await renderApp(fixture.home, 120, 30, fixture.project);
   await t.send('3');
+  await enterProjectSource(t);
   await t.send('\t');
   await t.send('u');
   await t.send('\r');

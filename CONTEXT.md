@@ -71,6 +71,10 @@ _避免_: Source guess、Expected source
 **Source Adapter**:
 集中维护一个安装来源或传输工具的固定版本、命令、输出解析、provenance 和兼容性，例如 `npx skills`。Source Adapter 不决定最终启用哪些 Harness Targets。
 
+**Project-owned Source copy**:
+exact Project scope 中独立拥有、独立 lock/update/remove 的 Source resource 副本；通过 `p` boundary 显式确认进入，区别于默认推荐的 Global Source lifecycle；与同名 Global resource 永不构成同一条更新流。
+_避免_: 把 Global 与 Project 副本当作一个共享 update stream、把 Source 当作自动创建 Project Link 的途径
+
 **Update availability**:
 Source Adapter 对受管 Skill 当前 provenance 与上游内容的缓存比较结果：`current`、`available`、`upstream-missing` 或 `check-failed`，并带 `checkedAt`。它是可过期观察，不属于 Actual state、Desired state 或 Drift。
 _避免_: Upstream drift、自动更新状态
