@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { inspectHarnesses, planHarnessOperation } from '../src/harnesses/registry.ts';
 import { grokAdapter } from '../src/harnesses/grok.ts';
+import { piAdapter } from '../src/harnesses/pi.ts';
 import type { Home } from '../src/core.ts';
 import type { SkillTarget } from '../src/inventory.ts';
 
@@ -70,9 +71,10 @@ test('Harness registry keeps an undetected Pi in setup and does not write state'
 
   assert.deepEqual(report.detected, []);
   const pi = report.available.find(({ key }) => key === 'pi');
-  assert.equal(pi?.support, 'discoverable');
+  assert.equal(pi?.support, 'managed');
   assert.equal(pi?.sharedConsumption.status, 'enabled');
   assert.equal(pi?.link.supported, true);
+  assert.deepEqual(piAdapter.targetDefinition().relationship, { support: 'managed', link: 'supported' });
   assert.equal(pi?.targets[0]?.discoveryRoot, path.join(piHome, 'agent', 'skills'));
   assert.equal(pi?.targets.some(({ discoveryRoot }) => discoveryRoot === shared), false);
   assert.deepEqual(fs.readdirSync(home.configDir).sort(), before);

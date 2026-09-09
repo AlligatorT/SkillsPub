@@ -2,7 +2,7 @@
 
 SkillsPub is an auditable relationship and visibility manager for Agent Skills. Disk records Actual state; SkillsPub records human intent and persistent Preset claims, then explains why a skill will or will not be discovered on the next Harness load.
 
-The v0.1 built-in Harnesses are Pi (`discoverable` pending real-machine acceptance), Claude Code (`managed`, Shared `not-consumed`), and Grok Build (`managed/excluded`). Codex, OpenCode, Kimi Code, and TraeCode remain `discoverable` compatibility candidates; WorkBuddy remains `unsupported`.
+The v0.1 built-in Harnesses are Pi (`managed`, with Global/exact-Project Shared isolation), Claude Code (`managed`, Shared `not-consumed`), and Grok Build (`managed/excluded`). Codex, OpenCode, Kimi Code, and TraeCode remain `discoverable` compatibility candidates; WorkBuddy remains `unsupported`.
 
 ## Requirements
 

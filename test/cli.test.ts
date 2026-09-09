@@ -787,8 +787,8 @@ test('harnesses reports detected Pi support and Shared consumption without write
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Detected Harnesses:/);
-  assert.match(result.stdout, /pi\s+discoverable\s+Shared enabled\s+Isolation unmanaged\s+Link supported/);
-  assert.match(result.stdout, /evidence\s+v0\.54\.0/);
+  assert.match(result.stdout, /pi\s+managed\s+Shared enabled\s+Isolation unmanaged\s+Link supported/);
+  assert.match(result.stdout, /evidence\s+v0\.85\.1/);
   assert.match(result.stdout, /Available Harnesses:\nclaude\s+managed\s+Shared not-consumed\s+Isolation not-required\s+Link supported/);
   assert.deepEqual(fs.readdirSync(configDir).sort(), before);
 });
@@ -875,7 +875,7 @@ test('Pi setup previews, confirms, and explicitly reconciles its managed Shared 
   assert.equal(reconciledDocument.data.applied, true);
   assert.deepEqual(reconciledDocument.data.plan, reconcilePreviewDocument.data.plan);
   assert.equal(reconciledDocument.data.result.inspection.isolation.status, 'managed');
-  assert.equal(reconciledDocument.data.result.inspection.support, 'discoverable');
+  assert.equal(reconciledDocument.data.result.inspection.support, 'managed');
   assert.equal(reconciledDocument.data.result.actual.retainedRelationships, 1);
   assert.equal(reconciledDocument.data.result.sharedConsumption.status, 'excluded');
   assert.equal(reconciledDocument.data.result.effectiveVisibility.status, 'unknown');

@@ -87,19 +87,19 @@ type PiSharedIsolationDraft = Omit<PiSharedIsolationPlan, 'relationshipImpact'>;
 
 const EVIDENCE = [
   {
-    url: 'https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/skills.md',
-    verifiedVersion: '0.54.0',
+    url: 'https://github.com/earendil-works/pi/blob/v0.85.1/packages/coding-agent/docs/skills.md',
+    verifiedVersion: '0.85.1',
     detail: 'Pi discovers global, project, and Shared Agent Skills directories.',
   },
   {
-    url: 'https://github.com/earendil-works/pi/releases/tag/v0.54.0',
-    verifiedVersion: '0.54.0',
-    detail: 'Verified release baseline for this adapter.',
+    url: 'https://github.com/earendil-works/pi/releases/tag/v0.85.1',
+    verifiedVersion: '0.85.1',
+    detail: 'Real-machine release baseline accepted by SkillsPub issue #127.',
   },
   {
-    url: 'https://github.com/earendil-works/pi/commit/39cbf47e42433ce301dabcec398cac6fe5f0fa22',
-    verifiedVersion: '0.54.0',
-    detail: 'Shared Agent Skills discovery and settings matcher semantics.',
+    url: 'https://github.com/earendil-works/pi/commit/d981de1229ef899957bbe968bc8dcda02a21f477',
+    verifiedVersion: '0.85.1',
+    detail: 'Release source revalidated with root-specific Shared exclusions.',
   },
 ] as const satisfies readonly HarnessEvidence[];
 
@@ -1453,7 +1453,7 @@ export const piAdapter: HarnessAdapter = {
       discoveryRoot: path.join(home, '.pi', 'agent', 'skills'),
       parkingRoot: path.join(home, '.pi', 'agent', '.skillspub-off', 'skills'),
       projectPath: '.pi/skills',
-      relationship: { support: 'discoverable', link: 'supported' },
+      relationship: { support: 'managed', link: 'supported' },
     };
   },
   inspect(home, targets, projectPath) {
@@ -1481,7 +1481,7 @@ export const piAdapter: HarnessAdapter = {
       key: 'pi',
       name: 'Pi',
       detected,
-      support: 'discoverable',
+      support: 'managed',
       evidence: EVIDENCE,
       targets: [
         { scope: 'global', discoveryRoot: path.resolve(piTarget.discoveryRoot) },

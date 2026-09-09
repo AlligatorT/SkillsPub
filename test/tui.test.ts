@@ -1937,19 +1937,18 @@ test('TUI separates Harness capability from current state in the target list and
   const t = await renderApp({ configDir });
   let frame = t.stdout.frame();
   assert.doesNotMatch(frame, /Detected Harnesses|Skill Targets/);
-  assert.match(frame, /pi\s+\[discoverable\]/);
-  assert.doesNotMatch(frame, /pi\s+\[managed\]/);
+  assert.match(frame, /pi\s+\[manageable\]/);
+  assert.doesNotMatch(frame, /pi\s+\[discoverable\]/);
 
   await t.send('j'); // pi
   frame = t.stdout.frame();
   assert.match(frame, /Harness:\s*Pi/);
   assert.match(frame, /Detected:\s*yes/);
-  assert.match(frame, /Adapter support:/);
-  assert.match(frame, /discoverable/);
+  assert.match(frame, /Adapter support:\s*managed/);
   assert.match(frame, /Shared consumption:/);
   assert.match(frame, /enabled/);
   assert.match(frame, /Isolation:\s*unmanaged/);
-  assert.doesNotMatch(frame, /Managed support: verified|Adapter can control and/);
+  assert.match(frame, /Managed support: verified|Adapter can control and/);
   assert.match(frame, /Link:\s*supported/);
 
   const settingsFile = path.join(piHome, 'agent', 'settings.json');
@@ -1959,8 +1958,8 @@ test('TUI separates Harness capability from current state in the target list and
   }));
   await t.send('R');
   frame = t.stdout.frame();
-  assert.match(frame, /pi\s+\[discoverable\]/);
-  assert.doesNotMatch(frame, /pi\s+\[managed\]/);
+  assert.match(frame, /pi\s+\[drift\]/);
+  assert.doesNotMatch(frame, /pi\s+\[manageable\]/);
   assert.match(frame, /Isolation:\s*drift/);
   t.unmount();
 });
@@ -2031,8 +2030,8 @@ test('TUI keeps undetected Harnesses in a compact Available section', async () =
     const harness = lines.find((line) => line.includes('Pi'));
     assert.equal(heading?.indexOf('Available'), 2);
     assert.equal(harness?.indexOf('Pi'), 3);
-    assert.match(t.stdout.frame(), /\[discover(?:able)?\]/);
-    assert.doesNotMatch(t.stdout.frame(), /Pi \[managed\]/);
+    assert.match(t.stdout.frame(), /Pi \[manageable\]/);
+    assert.doesNotMatch(t.stdout.frame(), /Pi \[discoverable\]/);
     assert.doesNotMatch(t.stdout.frame(), /Shared enabled|Isolation unmanaged/);
     t.unmount();
   }
@@ -2088,7 +2087,7 @@ test('Skill detail shows every built-in Effective Visibility result and not-dete
   assert.match(frame, /Effective Visibility/);
   assert.match(frame, /Claude Code: not-visible/);
   assert.match(frame, /Grok Build: unknown/);
-  assert.match(frame, /Pi: unknown/);
+  assert.match(frame, /Pi: visible/);
   assert.match(frame, /e explain/);
   t.unmount();
 
@@ -2144,8 +2143,8 @@ test('Explain modal projects evidence and read-only visible/hidden plans for eac
   await t.send('\t');
   frame = t.stdout.frame();
   assert.match(frame, /Explain — demo — Pi \[3\/3\]/);
-  assert.match(frame, /Result: unknown/);
-  assert.match(frame, /Adapter support: discoverable/);
+  assert.match(frame, /Result: visible/);
+  assert.match(frame, /Adapter support: managed/);
   assert.match(frame, /Shared consumption: excluded/);
   assert.match(frame, /on link selected/);
   assert.deepEqual(fs.readdirSync(home.configDir, {recursive: true}).sort(), before);
@@ -2179,16 +2178,18 @@ test('Explain modal shows Variant conflicts and a consumed Shared bypass', async
   await b.send('\t');
   await b.send('\t');
   let frame = b.stdout.frame();
-  assert.match(frame, /Result: unknown/);
-  assert.match(frame, /Adapter support: discoverable/);
+  assert.match(frame, /Result: visible/);
+  assert.match(frame, /Adapter support: managed/);
   assert.match(frame, /consumed global\/shared/);
   assert.match(frame, /off link selected/);
   for (let i = 0; i < 12; i++) await b.send('j');
   frame = b.stdout.frame();
   assert.match(frame, /on local selected/);
   await b.send('h');
-  assert.match(b.stdout.frame(), /blocker: Pi support is not managed/);
-  assert.match(b.stdout.frame(), /Effective visibility is unknown/);
+  assert.doesNotMatch(b.stdout.frame(), /blocker: Pi support is not managed/);
+  assert.match(b.stdout.frame(), /Wanted: hidden/);
+  assert.match(b.stdout.frame(), /Executable: no/);
+  assert.match(b.stdout.frame(), /would affect other consumers of this shared root/);
   b.unmount();
 });
 
