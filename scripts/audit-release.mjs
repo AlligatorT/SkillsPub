@@ -50,7 +50,7 @@ assert.deepEqual(
   [
     ['claude', 'managed'],
     ['grok', 'managed'],
-    ['pi', 'discoverable'],
+    ['pi', 'managed'],
   ],
   'v0.1.0 Harness boundary changed',
 );

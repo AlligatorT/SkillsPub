@@ -137,7 +137,7 @@ Source Adapter 拥有固定上游版本、命令、输出解析、provenance、l
 
 ## Pi v0.1 repaired Adapter and promotion gate
 
-Pi 在旧验收前曾被标为 `managed`，但 real-machine #109 证明 `!skills/**` 同时匹配 Pi 与 Shared 的 `skills/**`，会把 Pi-specific Target 一起压掉。Global/Project Adapter 与 Target repair 已集成，但当前 release support 保持 `discoverable`；只有新 real-machine acceptance 全部通过后，后续 release 才能把 Pi 提升为 `managed/excluded`。
+Pi 在旧验收前曾被标为 `managed`，但 real-machine #109 证明 `!skills/**` 同时匹配 Pi 与 Shared 的 `skills/**`，会把 Pi-specific Target 一起压掉。#127 已在 Pi 0.85.1 上完成 repaired Global/exact-Project Adapter、canonical Target migration、fresh-process canary 与 recovery 验收，因此 v0.1 release support 恢复为 `managed`；当前 Shared consumption 仍按每个 scope 的实际配置显示 `enabled` 或 `excluded`。
 
 ### Targets, settings, and matcher semantics
 
@@ -163,11 +163,11 @@ Pi promotion 是 release acceptance gate，不是代码完成后的默认 label�
 4. 验证 `.pi/agent/skills` → `.pi/skills` migration 或无迁移条件；
 5. 实际执行 recovery，并对 settings/state/content/manifest 做 hash 检查。
 
-任一项未通过，Pi 在 v0.1 仍为 `discoverable`，Shared consumption/Effective Visibility 按证据返回 `enabled`、`excluded` 或 `unknown`，不得保留 release-quality Managed claim。
+任一项未通过，Pi 在 v0.1 仍须保持 `discoverable`，Shared consumption/Effective Visibility 按证据返回 `enabled`、`excluded` 或 `unknown`，不得保留 release-quality Managed claim。#127 已在候选 `e17a9829a489ea2df0ab65c4e574e1f38b3bbe70` 与 Pi 0.85.1 上通过上述五项：Global 136 个与 exact-Project 13 个 Pi Relationships 全部保留，Shared-only canaries 被排除，完整 recovery chain 恢复了 baseline hashes 与可见性。
 
 ## Grok Build v0.1 managed slice
 
-Grok Build 保持 `managed/excluded` release contract；Pi 在新 real-machine acceptance 前仍为 `discoverable`。Adapter key 是 `grok`，已验证契约固定到 `xai-org/grok-build` revision `19d42e35c07a9c9244f03f6df0c4c353f970d4f9`。该切片只管理 Grok 原生 Global/Project Skill Targets，不接管 Plugin、bundled、server-managed 或命令目录。
+Grok Build 保持 `managed/excluded` release contract；Pi 已依据 #127 恢复 `managed` support。Adapter key 是 `grok`，已验证契约固定到 `xai-org/grok-build` revision `19d42e35c07a9c9244f03f6df0c4c353f970d4f9`。该切片只管理 Grok 原生 Global/Project Skill Targets，不接管 Plugin、bundled、server-managed 或命令目录。
 
 ### Targets and resource form
 
@@ -213,7 +213,7 @@ Harness 只有在自己的 persistent filesystem/configuration seam 允许 Skill
 
 | Harness | 已确认的官方/本机行为 | v0.1 状态/计划 | 证据 |
 | --- | --- | --- | --- |
-| Pi | Pi roots 与 `.agents/skills` 共用 matcher；root-specific absolute exclusions 可在 canonical dedupe 前只排除 Shared alias | 当前降为 `discoverable`；完成 Adapter/Target/recovery repair 与新 tools-enabled real-machine acceptance 后才能 promotion 为 `managed/excluded` | [#109 failed machine chain](https://github.com/AlligatorT/SkillsPub/issues/109#issuecomment-5532175662), [#115 decision](https://github.com/AlligatorT/SkillsPub/issues/115#issuecomment-5543708195), [pinned research](https://github.com/AlligatorT/SkillsPub/blob/4f6ae8d62bf1c4182ec70682b4ff755435dcfab5/docs/research/pi-shared-skill-root-isolation-0.84.4.md), [Pi skills docs](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/skills.md) |
+| Pi | Pi roots 与 `.agents/skills` 共用 matcher；root-specific absolute exclusions 可在 canonical dedupe 前只排除 Shared alias | `managed`；Global/exact-Project isolation 可独立为 `enabled` 或 `excluded`，并保留 Pi Target Relationships | [#109 failed machine chain](https://github.com/AlligatorT/SkillsPub/issues/109#issuecomment-5532175662), [#115 decision](https://github.com/AlligatorT/SkillsPub/issues/115#issuecomment-5543708195), [#127 Pi 0.85.1 real-machine acceptance](https://github.com/AlligatorT/SkillsPub/issues/127), [pinned research](https://github.com/AlligatorT/SkillsPub/blob/4f6ae8d62bf1c4182ec70682b4ff755435dcfab5/docs/research/pi-shared-skill-root-isolation-0.84.4.md), [Pi 0.85.1 skills docs](https://github.com/earendil-works/pi/blob/v0.85.1/packages/coding-agent/docs/skills.md) |
 | Claude Code | Personal/Project `.claude/skills` 支持 symlink；accepted Adapter contract 不消费 Shared | `managed`；Shared `not-consumed`、isolation `not-required`，不增加配置写入；只解释 next load | [Skills](https://docs.anthropic.com/en/docs/claude-code/skills), [Settings](https://docs.anthropic.com/en/docs/claude-code/settings), [#112 contract](https://github.com/AlligatorT/SkillsPub/issues/112#issuecomment-5547687525) |
 | Grok Build | `$GROK_HOME/skills`、Project/ancestor `.grok/skills`、Shared 与 Claude/Cursor compatible roots；canonical ignore 可隔离 Shared | 保持 `managed/excluded`；Global/Project setup/reconcile 必须完整显示 Relationship impact 与 recovery | [settings](https://docs.x.ai/build/settings/reference), [skills](https://docs.x.ai/build/features/skills-plugins-marketplaces), [pinned source](https://github.com/xai-org/grok-build/blob/19d42e35c07a9c9244f03f6df0c4c353f970d4f9/crates/codegen/xai-grok-agent/src/prompt/skills.rs), [#109 machine evidence](https://github.com/AlligatorT/SkillsPub/issues/109#issuecomment-5532175662) |
 | OpenCode | Native/Shared/vendor roots 强；完整 isolation 依赖 actual process 的 environment flag | `discoverable` roadmap candidate；v0.1 无 Adapter，no-launcher boundary 下不 promotion | [research resolution](https://github.com/AlligatorT/SkillsPub/issues/104#issuecomment-5470909113), [launch evidence](https://github.com/AlligatorT/SkillsPub/issues/113#issuecomment-5531242966) |
@@ -225,4 +225,4 @@ Harness 只有在自己的 persistent filesystem/configuration seam 允许 Skill
 | Hermes | 每个 Profile 有独立 `HERMES_HOME` 与 `skills/`；可配置 external dirs | 多 Profile 需求明确前延后 | [Profiles](https://hermes-agent.nousresearch.com/docs/user-guide/profiles), [Skills](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills) |
 | OpenClaw | 多 Target roots 与 per-Agent final allowlists | 多 Agent identity model 明确前延后 | [Skills](https://docs.openclaw.ai/tools/skills), [Skills config](https://docs.openclaw.ai/tools/skills-config) |
 
-集成 candidate 已包含 complete A+C Source workspace、Pi Global/Project repair、Relationship/Desired-state、Effective Visibility，以及 Claude/Grok contracts。v0.1 publication 仍受新 Pi real-machine acceptance、exact-candidate automated/package evidence 和 human release gates 阻塞。固定 Vercel `skills` 仍是唯一 remote Source lifecycle/lock owner。后续 Harness 只有满足 complete consumed-root/control/recovery evidence 才能让 resolver 给出 release-quality non-`unknown` claim。
+集成 candidate 已包含 complete A+C Source workspace、通过 #127 的 Pi Global/Project repair 与 promotion、Relationship/Desired-state、Effective Visibility，以及 Claude/Grok contracts。v0.1 publication 仍受 #128 exact-candidate Grok/Claude revalidation、#129 automated/package handoff 和 human release gates 阻塞。固定 Vercel `skills` 仍是唯一 remote Source lifecycle/lock owner。后续 Harness 只有满足 complete consumed-root/control/recovery evidence 才能让 resolver 给出 release-quality non-`unknown` claim。

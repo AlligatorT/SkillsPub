@@ -65,7 +65,7 @@ test('explain resolves one installed resource for every built-in Harness without
     'pi',
   ]);
   assert.equal(document.data.harnesses.find((harness: { key: string }) => harness.key === 'pi')
-    .effectiveVisibility, 'unknown');
+    .effectiveVisibility, 'visible');
   assert.equal(document.data.harnesses.find((harness: { key: string }) => harness.key === 'claude')
     .effectiveVisibility, 'not-visible');
   assert.equal(document.data.harnesses.find((harness: { key: string }) => harness.key === 'grok')
@@ -117,7 +117,7 @@ test('project explain uses the canonical exact Project, applicable ancestors, an
   assert.equal(fs.existsSync(path.join(roots.grok, 'demo')), false);
 });
 
-test('managed wants return safe plans while discoverable Pi remains blocked without applying them', () => {
+test('managed wants return safe plans for Claude and Pi without applying them', () => {
   const { configDir, roots, resource, run } = setup();
   fs.mkdirSync(path.dirname(roots.claude), { recursive: true });
   const visible = run(['explain', `skill:${resource}`, '--harness', 'claude', '--want', 'visible', '--json']);
@@ -152,15 +152,28 @@ test('managed wants return safe plans while discoverable Pi remains blocked with
   const hidden = run(['explain', `skill:${resource}`, '--harness', 'pi', '--want', 'hidden', '--json']);
   assert.equal(hidden.status, 0, hidden.stderr || hidden.stdout);
   const plan = json(hidden).data.harnesses[0].plan;
-  assert.equal(plan.executable, false);
-  assert.deepEqual(plan.steps, []);
-  assert.ok(plan.blockers.some((blocker: { code: string }) => blocker.code === 'support_incomplete'));
-  assert.ok(plan.blockers.some((blocker: { code: string }) => blocker.code === 'visibility_unknown'));
+  assert.equal(plan.executable, true);
+  assert.deepEqual(plan.blockers, []);
+  assert.deepEqual(plan.steps, [{
+    operation: 'deactivate',
+    targetId: 'global:pi',
+    targetKey: 'pi',
+    slot: 'demo',
+    from: 'on',
+    to: 'off',
+    form: 'link',
+    path: path.join(roots.pi, 'demo'),
+    preconditions: [
+      { code: 'resource_identity', message: `Resource must remain ${resource}.` },
+      { code: 'target_slot_state', message: 'global:pi/demo must remain on.' },
+      { code: 'preset_claims_absent', message: 'global:pi/demo must remain free of Preset claims.' },
+    ],
+  }]);
   assert.ok(fs.existsSync(path.join(roots.pi, 'demo')));
   assert.equal(fs.existsSync(path.join(configDir, 'state.json')), false);
 });
 
-test('discoverable Pi hidden wants remain blocked before Shared or Preset mutations', () => {
+test('managed Pi hidden wants remain blocked by Shared side effects or Preset claims', () => {
   const { configDir, roots, resource, run } = setup();
   fs.mkdirSync(path.dirname(roots.pi), { recursive: true });
   const shared = run(['explain', `skill:${resource}`, '--harness', 'pi', '--want', 'hidden', '--json']);
@@ -169,7 +182,7 @@ test('discoverable Pi hidden wants remain blocked before Shared or Preset mutati
   assert.equal(sharedPlan.executable, false);
   assert.deepEqual(sharedPlan.steps, []);
   assert.ok(sharedPlan.blockers.some((blocker: { code: string }) =>
-    blocker.code === 'support_incomplete'));
+    blocker.code === 'cross_harness_side_effect'));
 
   fs.mkdirSync(roots.pi, { recursive: true });
   fs.symlinkSync(resource, path.join(roots.pi, 'demo'));
@@ -185,7 +198,7 @@ test('discoverable Pi hidden wants remain blocked before Shared or Preset mutati
   const claimedPlan = json(claimed).data.harnesses[0].plan;
   assert.equal(claimedPlan.executable, false);
   assert.ok(claimedPlan.blockers.some((blocker: { code: string }) =>
-    blocker.code === 'support_incomplete'));
+    blocker.code === 'active_preset_claim'));
   assert.ok(fs.existsSync(path.join(roots.pi, 'demo')));
 });
 
@@ -219,7 +232,7 @@ test('per-root Pi evidence distinguishes excluded Global Shared from consumed Pr
   const result = run(['project', project, 'explain', `skill:${resource}`, '--harness', 'pi', '--json']);
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const pi = json(result).data.harnesses[0];
-  assert.equal(pi.effectiveVisibility, 'unknown');
+  assert.equal(pi.effectiveVisibility, 'not-visible');
   assert.ok(pi.roots.some((root: { scope: string; kind: string; consumption: string }) =>
     root.scope === 'global' && root.kind === 'shared' && root.consumption === 'excluded'));
   assert.ok(pi.roots.some((root: { scope: string; kind: string; consumption: string }) =>
@@ -240,7 +253,7 @@ test('unknown Harness configuration stays successful unknown data with a blocker
   assert.ok(pi.warnings.some((warning: { code: string }) => warning.code === 'local_version_unknown'));
 });
 
-test('discoverable Pi blocks hidden plans before guessing from malformed Preset state', () => {
+test('managed Pi blocks hidden plans before guessing from malformed Preset state', () => {
   const { configDir, roots, resource, run } = setup();
   fs.mkdirSync(roots.pi, { recursive: true });
   fs.symlinkSync(resource, path.join(roots.pi, 'demo'));
@@ -253,7 +266,7 @@ test('discoverable Pi blocks hidden plans before guessing from malformed Preset 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const plan = json(result).data.harnesses[0].plan;
   assert.equal(plan.executable, false);
-  assert.ok(plan.blockers.some((blocker: { code: string }) => blocker.code === 'support_incomplete'));
+  assert.ok(plan.blockers.some((blocker: { code: string }) => blocker.code === 'unknown_preset_claims'));
   assert.ok(fs.existsSync(path.join(roots.pi, 'demo')));
 });
 
@@ -369,7 +382,7 @@ test('a consumed Shared Relationship bypasses a Harness-specific OFF Relationshi
   const result = run(['explain', `skill:${resource}`, '--harness', 'pi', '--json']);
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const pi = json(result).data.harnesses[0];
-  assert.equal(pi.effectiveVisibility, 'unknown');
+  assert.equal(pi.effectiveVisibility, 'visible');
   assert.ok(pi.roots.some((root: { kind: string; consumption: string; relationships: Array<{ selected: boolean; activation: string }> }) =>
     root.kind === 'shared' && root.consumption === 'consumed' &&
     root.relationships.some((relationship) => relationship.selected && relationship.activation === 'on')));
