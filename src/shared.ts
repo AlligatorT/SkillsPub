@@ -371,14 +371,22 @@ function concurrentModification(message: string): Error {
   return Object.assign(new Error(message), { code: 'concurrent_modification' });
 }
 
+function operationLock(target: Target): string {
+  return `${target.lockFile}.skillspub-operation-lock`;
+}
+
+export function sharedOperationLockPath(home: Home, projectPath?: string): string {
+  return operationLock(resolveTarget(home, projectPath));
+}
+
 function assertNoOperationLock(target: Target): void {
-  const lock = `${target.lockFile}.skillspub-operation-lock`;
+  const lock = operationLock(target);
   if (fs.existsSync(lock))
     throw concurrentModification(`Shared Target operation already in progress: ${lock}`);
 }
 
 function withOperationLock<T>(target: Target, operation: () => T): T {
-  const lock = `${target.lockFile}.skillspub-operation-lock`;
+  const lock = operationLock(target);
   fs.mkdirSync(path.dirname(lock), { recursive: true });
   let descriptor: number;
   try {
