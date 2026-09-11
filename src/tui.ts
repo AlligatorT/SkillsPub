@@ -1,5 +1,8 @@
-import {createElement as h, useEffect, useMemo, useState} from 'react';
+import {createElement as h, useEffect, useMemo, useRef, useState} from 'react';
 import type {ReactNode} from 'react';
+import {spawn} from 'node:child_process';
+import fs from 'node:fs';
+import {fileURLToPath} from 'node:url';
 import path from 'node:path';
 import {Box, Text, render, useApp, useInput, useStdout} from 'ink';
 import wrapAnsi from 'wrap-ansi';
@@ -56,10 +59,12 @@ import {
   sharedRemove,
   sharedRemoveCascade,
   sharedRefresh,
+  sharedOperationLockPath,
   sharedUpdate,
   type SharedCommandResult,
   type SharedMutationPlan,
   type SharedRemovalPlan,
+  type SharedUpdateAvailabilityResult,
   type SharedUpdatePlan,
   type SharedUpdateResult,
 } from './shared.ts';
@@ -83,6 +88,78 @@ import {
 /** Below this width the passive summary column is hidden. */
 const WIDE_MIN = 80;
 const MANAGED_SUPPORT_EXPLANATION = 'Managed support: verified Adapter can control and explain this Harness; it does not mean optional setup/reconcile was applied.';
+const SOURCE_REFRESH_CHILD = '--skillspub-source-refresh-child';
+
+interface SourceRefreshResult {
+  availability: SharedUpdateAvailabilityResult;
+  snapshot: TuiSnapshot;
+}
+
+interface SourceRefreshResponse {
+  result?: SourceRefreshResult;
+  error?: string;
+}
+
+if (process.argv[2] === SOURCE_REFRESH_CHILD) {
+  let response: SourceRefreshResponse;
+  try {
+    const home = JSON.parse(process.argv[3] ?? '') as Home;
+    response = {result: {availability: sharedRefresh(home), snapshot: tuiSnapshot(home)}};
+  } catch (error) {
+    response = {error: (error as Error).message};
+    process.exitCode = 1;
+  }
+  process.stdout.write(JSON.stringify(response));
+}
+
+interface ActiveSourceRefresh {
+  child: ReturnType<typeof spawn>;
+  childPid: number;
+  result: Promise<SourceRefreshResult>;
+  operationLock: string;
+}
+
+function removeOwnedOperationLock(lock: string, pid: number): void {
+  try {
+    if (fs.readFileSync(lock, 'utf8') === `${pid}\n`) fs.rmSync(lock, {force: true});
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+      process.emitWarning(`Could not remove Source refresh lock: ${(error as Error).message}`);
+  }
+}
+
+function startSourceRefresh(home: Home): ActiveSourceRefresh {
+  const operationLock = sharedOperationLockPath(home);
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(process.execPath, [
+      fileURLToPath(import.meta.url),
+      SOURCE_REFRESH_CHILD,
+      JSON.stringify(home),
+    ], {stdio: ['ignore', 'pipe', 'pipe']});
+  } catch (error) {
+    throw new Error(`Source refresh failed to start: ${(error as Error).message}`);
+  }
+  if (!child.pid) throw new Error('Source refresh failed to start');
+  const childPid = child.pid;
+  const result = new Promise<SourceRefreshResult>((resolve, reject) => {
+    let stdout = '';
+    let stderr = '';
+    child.stdout?.setEncoding('utf8').on('data', (chunk: string) => { stdout += chunk; });
+    child.stderr?.setEncoding('utf8').on('data', (chunk: string) => { stderr += chunk; });
+    child.once('error', reject);
+    child.once('close', (code) => {
+      try {
+        const response = JSON.parse(stdout) as SourceRefreshResponse;
+        if (response.result) resolve(response.result);
+        else reject(new Error((response.error ?? stderr.trim()) || `Source refresh exited with code ${code}`));
+      } catch (error) {
+        reject(new Error(stderr.trim() || (error as Error).message));
+      }
+    });
+  });
+  return {child, childPid, result, operationLock};
+}
 
 type Tab = 'target' | 'skill' | 'source';
 type SourceSurface = 'catalog' | 'inventory';
@@ -1436,8 +1513,23 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   const [sourceLogScroll, setSourceLogScroll] = useState(0);
   const [sourceOperation, setSourceOperation] = useState<SourceOperationState>();
   const [latestSourceOperation, setLatestSourceOperation] = useState<SourceOperationState>();
+  const activeSourceRefresh = useRef<ActiveSourceRefresh | undefined>(undefined);
+  const mounted = useRef(true);
+  useEffect(() => () => {
+    mounted.current = false;
+    const refresh = activeSourceRefresh.current;
+    if (refresh) {
+      const cleanup = () => removeOwnedOperationLock(refresh.operationLock, refresh.childPid);
+      refresh.child.once('close', cleanup);
+      if (!refresh.child.kill()) cleanup();
+    }
+  }, []);
   const planScope: PresetScope = projectPath ? { projectPath } : {};
+  const assertSourceRefreshIdle = () => {
+    if (activeSourceRefresh.current) throw new Error('Source refresh in progress; mutations are disabled');
+  };
   const prepareMutation = () => {
+    assertSourceRefreshIdle();
     if (projectPath) scanProjectInventory(home, projectPath);
     else scanGlobalInventory(home);
   };
@@ -1674,6 +1766,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
 
   const applySourceOperation = (operation: SourceOperationState): void => {
     try {
+      assertSourceRefreshIdle();
       if (operation.kind === 'remove') {
         const plan = operation.plan;
         const result = operation.runStep === 'source'
@@ -2234,6 +2327,12 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     }
     if (batchConfirm) {
       if (input === 'y') {
+        try {
+          prepareMutation();
+        } catch (err) {
+          setFeedback((err as Error).message);
+          return setBatchConfirm(null);
+        }
         let applied = 0;
         const failures: string[] = [];
         for (const plan of batchConfirm.plans) {
@@ -2301,6 +2400,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
           ? entries[relationshipIndex + 1] ?? entries[relationshipIndex - 1]
           : undefined;
         try {
+          prepareMutation();
           if (confirmation.kind === 'link' || confirmation.kind === 'mirror-create') {
             applyActivationPlan(home, planLink(home, confirmation.row.id, confirmation.target.name, planScope));
           } else if (confirmation.kind === 'unlink') {
@@ -2387,18 +2487,36 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         return;
       }
       if (input === 'r') {
+        if (activeSourceRefresh.current) {
+          setFeedback('Source refresh already in progress');
+          return;
+        }
+        const resourceIdAtRefreshStart = sourceResource?.id;
+        let refresh: ReturnType<typeof startSourceRefresh>;
         try {
-          const result = sharedRefresh(home);
-          const keep = sourceResource?.id;
-          const next = sourceTakeSnapshot();
-          const validIds = new Set(sourceInventoryRows(next).map(({id}) => id));
-          setSourceSnapshot(next);
-          setSourceResourceId(keep && validIds.has(keep) ? keep : '');
-          setSourceMarks((marks) => new Set([...marks].filter((id) => validIds.has(id))));
-          setFeedback(`Refreshed ${result.entries.length} managed resources`);
+          refresh = startSourceRefresh(home);
         } catch (error) {
           setFeedback((error as Error).message);
+          return;
         }
+        activeSourceRefresh.current = refresh;
+        setFeedback('Refreshing Source update availability…');
+        void refresh.result
+          .then(({availability, snapshot: next}) => {
+            if (!mounted.current) return;
+            const validIds = new Set(sourceInventoryRows(next).map(({id}) => id));
+            setSourceSnapshot(next);
+            setSourceResourceId((current) =>
+              [current, resourceIdAtRefreshStart].find((id) => id && validIds.has(id)) ?? '');
+            setSourceMarks((marks) => new Set([...marks].filter((id) => validIds.has(id))));
+            setFeedback(`Refreshed ${availability.entries.length} managed resources`);
+          })
+          .catch((error) => {
+            if (mounted.current) setFeedback((error as Error).message);
+          })
+          .finally(() => {
+            if (activeSourceRefresh.current === refresh) activeSourceRefresh.current = undefined;
+          });
         return;
       }
       if (input === 'u' && sourceSurface === 'inventory' &&
@@ -2568,6 +2686,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       if (!selectedRow.realPath && !selectedInfo)
         return setFeedback('cannot enable a broken relationship');
       try {
+        prepareMutation();
         if (selectedInfo && !selectedInfo.readOnly && selectedRel) {
           applyActivationPlan(home, planToggle(home, selectedRel.targetId, selectedRel.slot, planScope));
           refresh({targetId: selectedRel.targetId, slot: selectedRel.slot, rowId: selectedRow.id});

@@ -233,6 +233,8 @@ const args = process.argv.slice(2);
 fs.appendFileSync(process.env.TUI_GIT_LOG, JSON.stringify(args) + '\\n');
 const trees = JSON.parse(process.env.TUI_GIT_TREES || '{}');
 if (args[0] === 'clone') {
+  const delay = Number(process.env.TUI_GIT_DELAY_MS || 0);
+  if (delay > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
   const source = args.at(-2);
   const destination = args.at(-1);
   if (!trees[source]) process.exit(1);
@@ -2347,12 +2349,101 @@ test('r refreshes Global availability by source and preserves selection through 
   assert.match(t.stdout.frame(), /Update availability: unknown/);
 
   await t.send('r');
-  const frame = t.stdout.frame();
-  assert.match(frame, /Refreshed 4 managed resources/);
+  const frame = await waitForFrame(t, /Refreshed 4 managed resources/);
   assert.match(frame, /› current/);
   assert.match(frame, /Update availability: current/);
   assert.equal((fs.readFileSync(fixture.gitLog, 'utf8').match(/"clone"/g) ?? []).length, 2);
   t.unmount();
+});
+
+test('Source refresh keeps search and workspace navigation responsive during remote checks', async (context) => {
+  const fixture = setupManagedTui([
+    {name: 'available-a', source: 'owner/one', hash: 'available-a-old'},
+    {name: 'available-b', source: 'owner/one', hash: 'available-b-old'},
+  ]);
+  useFixtureEnv(context, {
+    ...fixture.env,
+    TUI_GIT_DELAY_MS: '800',
+  });
+  process.env.TUI_GIT_TREES = JSON.stringify({
+    'https://github.com/owner/one.git': {
+      'skills/available-a': 'available-a-new',
+      'skills/available-b': 'available-b-new',
+    },
+  });
+  const t = await renderApp(fixture.home, 120, 34);
+  await t.send('3');
+  await t.send('\t');
+
+  t.stdin.write('r');
+  await t.flush();
+  assert.match(t.stdout.frame(), /Refreshing Source update availability/);
+
+  t.stdin.write('r');
+  await t.flush();
+  assert.match(t.stdout.frame(), /Source refresh already in progress/);
+
+  t.stdin.write('/');
+  await t.flush();
+  assert.match(t.stdout.frame(), /search: …/);
+  await t.send('\x1b');
+  await t.send('\t');
+  await t.send('j');
+  assert.match(t.stdout.frame(), /› available-b/);
+
+  await t.send('2');
+  assert.match(t.stdout.frame(), /skill:skills/);
+  await t.send('1');
+  assert.match(t.stdout.frame(), /target:targets/);
+  await t.send('l');
+  await t.send(' ');
+  assert.match(t.stdout.frame(), /Source refresh in progress; mutations are disabled/);
+  assert.ok(fs.existsSync(path.join(fixture.discovery, 'available-a')));
+  assert.equal(fs.existsSync(path.join(fixture.parking, 'available-a')), false);
+
+  await t.send('3');
+  assert.match(t.stdout.frame(), /› available-b/);
+
+  await new Promise((resolve) => setTimeout(resolve, 850));
+  await t.flush();
+  const frame = await waitForFrame(t, /Refreshed 2 managed resources/);
+  assert.match(frame, /› available-b/);
+  assert.match(frame, /Update availability: available/);
+  t.unmount();
+});
+
+test('quitting during Source refresh removes its operation lock and prevents a later state write', async (context) => {
+  const fixture = setupManagedTui([
+    {name: 'available', source: 'owner/one', hash: 'available-old'},
+  ]);
+  useFixtureEnv(context, {
+    ...fixture.env,
+    TUI_GIT_DELAY_MS: '800',
+  });
+  process.env.TUI_GIT_TREES = JSON.stringify({
+    'https://github.com/owner/one.git': {'skills/available': 'available-new'},
+  });
+  const stateFile = path.join(fixture.home.configDir, 'state.json');
+  const before = fs.existsSync(stateFile) ? fs.readFileSync(stateFile, 'utf8') : undefined;
+  const t = await renderApp(fixture.home, 120, 34);
+  await t.send('3');
+  t.stdin.write('r');
+  await t.flush();
+  assert.match(t.stdout.frame(), /Refreshing Source update availability/);
+
+  const operationLock = path.join(
+    path.dirname(fixture.discovery),
+    '.skill-lock.json.skillspub-operation-lock',
+  );
+  for (let attempt = 0; attempt < 50 && !fs.existsSync(operationLock); attempt += 1)
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.ok(fs.existsSync(operationLock));
+
+  await t.send('q');
+  await new Promise((resolve) => setTimeout(resolve, 900));
+  const after = fs.existsSync(stateFile) ? fs.readFileSync(stateFile, 'utf8') : undefined;
+  assert.equal(after, before);
+  assert.equal(fs.existsSync(operationLock), false);
 });
 
 test('Relationship views keep Source update separate from unlink actions', async (context) => {
