@@ -82,10 +82,9 @@ import {
   sourceInventoryRows,
   sourceMirrorState,
   sourceRelationships,
-  verifiedSourceTruth,
-  verifiedUpdateTruth,
+  verifySourceMutation,
   type CatalogCandidateTruth,
-  type SourceVerifiedTruth,
+  type SourceVerification,
 } from './source-verification.ts';
 
 /** Below this width the passive summary column is hidden. */
@@ -218,7 +217,7 @@ interface SourceOperationBase {
   scroll: number;
   retry?: boolean;
   outcome?: 'succeeded' | 'failed' | 'partial';
-  truth?: SourceVerifiedTruth;
+  truth?: SourceVerification;
   error?: string;
   log?: string;
 }
@@ -1806,7 +1805,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
             })
           : sharedRemoveCascade(home, [plan.source.name], plan);
         const finalSnapshot = sourceTakeSnapshot();
-        const truth = verifiedSourceTruth(home, finalSnapshot, plan, 'global', '');
+        const truth = verifySourceMutation(home, plan, result);
         setSourceSnapshot(finalSnapshot);
         if (operation.runStep !== 'source') {
           const steps = sourceSteps(plan.operation);
@@ -1864,7 +1863,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         const finalSnapshot = sourceTakeSnapshot();
         setSourceSnapshot(finalSnapshot);
         const failed = result.items.filter(({outcome}) => outcome === 'failed');
-        const truth = verifiedUpdateTruth(home, finalSnapshot, operation.plan, result, 'global', '');
+        const truth = verifySourceMutation(home, operation.plan, result);
         let outcome: SourceOperationBase['outcome'] = 'succeeded';
         if (failed.length > 0)
           outcome = result.items.some((item) => item.outcome === 'updated') ? 'partial' : 'failed';
@@ -1920,7 +1919,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         plan,
       );
       const finalSnapshot = sourceTakeSnapshot();
-      const truth = verifiedSourceTruth(home, finalSnapshot, plan, 'global', '');
+      const truth = verifySourceMutation(home, plan, result);
       setSourceSnapshot(finalSnapshot);
       setSourceOperation({
         ...operation,
@@ -1970,7 +1969,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
           })),
         };
         const truth = finalSnapshot
-          ? verifiedUpdateTruth(home, finalSnapshot, operation.plan, result, 'global', '')
+          ? verifySourceMutation(home, operation.plan, result)
           : undefined;
         setSourceOperation({
           ...operation,
@@ -1988,7 +1987,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       }
       const plan = operation.plan;
       const truth = finalSnapshot
-        ? verifiedSourceTruth(home, finalSnapshot, plan, 'global', '')
+        ? verifySourceMutation(home, plan, {actual: 'rescan unavailable', drift: []})
         : undefined;
       const steps = sourceSteps(plan.operation);
       if (operation.kind === 'remove') {
