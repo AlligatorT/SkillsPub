@@ -37,8 +37,6 @@ import {
   filterRows,
   projectRows,
   readViewState,
-  projectTuiSnapshot,
-  tuiSnapshot,
   untagged,
   viewTargets,
   type Row,
@@ -66,10 +64,8 @@ import {
 } from './shared.ts';
 import {
   sourceMirrorState,
-  verifiedSourceTruth,
-  verifiedUpdateTruth,
-  type SourceVerifiedTruth,
-} from './source-truth.ts';
+  verifySourceMutation,
+} from './source-verification.ts';
 import {
   addBundleMembers,
   addPresetSelectors,
@@ -1237,38 +1233,14 @@ function printSharedPlan(plan: SharedMutationPlan | SharedUpdatePlan): void {
   console.log('Confirm with --yes after reviewing this immutable plan.');
 }
 
-function sharedFinalTruth(
+function sharedSourceVerification(
   home: ReturnType<typeof defaultHome>,
   plan: SharedMutationPlan | SharedUpdatePlan | SharedRemovalPlan,
   result: SharedCommandResult | SharedUpdateResult,
   projectPath?: string,
   outcome: 'succeeded' | 'failed' | 'partial' = 'succeeded',
 ): JsonData {
-  const scope = plan.scope?.kind ?? 'global';
-  const exactProjectPath = projectPath ?? plan.scope?.path ?? process.cwd();
-  let truth: SourceVerifiedTruth;
-  try {
-    const snapshot = scope === 'project'
-      ? projectTuiSnapshot(home, exactProjectPath)
-      : tuiSnapshot(home);
-    truth = 'items' in plan
-      ? verifiedUpdateTruth(home, snapshot, plan, result as SharedUpdateResult, scope, exactProjectPath)
-      : verifiedSourceTruth(home, snapshot, plan, scope, exactProjectPath);
-  } catch {
-    truth = {
-      resource: 'unknown',
-      provenance: 'Source unknown',
-      slot: 'items' in plan
-        ? plan.items.map(({slot}) => slot).join(', ')
-        : plan.slots.join(', '),
-      relationships: [],
-      actual: result.actual,
-      desired: 'unknown',
-      drift: result.drift.join(', ') || 'rescan unavailable',
-      updateAvailability: 'unknown',
-      effectiveVisibility: 'unknown',
-    };
-  }
+  const truth = verifySourceMutation(home, plan, result, projectPath);
   let relationshipEffects: Array<{plannedAction: string}>;
   if ('items' in plan)
     relationshipEffects = plan.items.filter((item) => item.included).flatMap((item) => item.relationshipEffects);
@@ -1299,7 +1271,7 @@ function sharedFinalTruth(
   };
 }
 
-function printSharedFinalTruth(finalTruth: JsonData): void {
+function printSourceVerification(finalTruth: JsonData): void {
   console.log('Final truth:');
   console.log(JSON.stringify(finalTruth, null, 2));
 }
@@ -1332,7 +1304,7 @@ function sharedFailureWithPlan(
   failure.details = {
     ...details,
     plan,
-    finalTruth: sharedFinalTruth(home, plan, result, projectPath, partial ? 'partial' : 'failed'),
+    finalTruth: sharedSourceVerification(home, plan, result, projectPath, partial ? 'partial' : 'failed'),
   };
   return failure;
 }
@@ -1420,11 +1392,11 @@ function cmdShared(
       } catch (error) {
         throw sharedFailureWithPlan(home, error, plan, projectPath);
       }
-      const finalTruth = sharedFinalTruth(home, plan, result, projectPath);
+      const finalTruth = sharedSourceVerification(home, plan, result, projectPath);
       if (json) return { applied: true, plan, result, finalTruth, remainingDrift: result.drift };
       console.log(`Actual: ${result.actual}`);
       console.log(`Remaining drift: ${result.drift.join(', ') || 'none'}`);
-      printSharedFinalTruth(finalTruth);
+      printSourceVerification(finalTruth);
       break;
     }
     case 'update': {
@@ -1456,7 +1428,7 @@ function cmdShared(
             stage: 'upstream',
             plan,
             items: result.items,
-            finalTruth: sharedFinalTruth(
+            finalTruth: sharedSourceVerification(
               home,
               plan,
               result,
@@ -1469,14 +1441,14 @@ function cmdShared(
       if (!json) {
         console.log(`Actual: ${result.actual}`);
         console.log(`Remaining drift: ${result.drift.join(', ') || 'none'}`);
-        printSharedFinalTruth(sharedFinalTruth(home, plan, result, projectPath));
+        printSourceVerification(sharedSourceVerification(home, plan, result, projectPath));
         break;
       }
       return {
         applied: true,
         plan,
         result,
-        finalTruth: sharedFinalTruth(home, plan, result, projectPath),
+        finalTruth: sharedSourceVerification(home, plan, result, projectPath),
         remainingDrift: result.drift,
       };
     }
@@ -1532,13 +1504,13 @@ function cmdShared(
           phase: 'cascade',
           plan: preview,
           result,
-          finalTruth: sharedFinalTruth(home, preview, result, projectPath, 'partial'),
+          finalTruth: sharedSourceVerification(home, preview, result, projectPath, 'partial'),
           nextConfirmation: 'source-deletion',
         };
         console.log('Relationship cascade complete.');
         console.log(`Completed work: ${result.completedWork?.join(', ') || 'no dependent Relationships'}`);
         console.log(`Recovery manifest: ${result.recoveryManifest}`);
-        printSharedFinalTruth(sharedFinalTruth(home, preview, result, projectPath, 'partial'));
+        printSourceVerification(sharedSourceVerification(home, preview, result, projectPath, 'partial'));
         console.log(`Confirm source deletion separately with: skillspub shared remove ${preview.source.name} --yes`);
         break;
       }
@@ -1558,13 +1530,13 @@ function cmdShared(
         phase: 'source',
         plan: preview,
         result,
-        finalTruth: sharedFinalTruth(home, preview, result, projectPath),
+        finalTruth: sharedSourceVerification(home, preview, result, projectPath),
         remainingDrift: result.drift,
       };
       console.log(`Actual: ${result.actual}`);
       console.log(`Completed work: ${result.completedWork?.join(', ')}`);
       console.log(`Remaining drift: ${result.drift.join(', ') || 'none'}`);
-      printSharedFinalTruth(sharedFinalTruth(home, preview, result, projectPath));
+      printSourceVerification(sharedSourceVerification(home, preview, result, projectPath));
       break;
     }
     default:

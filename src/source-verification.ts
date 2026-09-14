@@ -1,8 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type {Home} from './core.ts';
-import {explainVisibility} from './explain.ts';
-import {hashDirectory} from './inventory.ts';
+import {explainVisibility, explainVisibilityFromInventory} from './explain.ts';
+import {
+  hashDirectory,
+  scanGlobalInventory,
+  scanProjectInventory,
+  type InventoryScanReport,
+} from './inventory.ts';
 import {
   normalizeNpxSkillsName,
   npxSkillsProvenanceLabel,
@@ -11,16 +16,24 @@ import {
 } from './npx-skills.ts';
 import type {NpxSkillsCandidate} from './npx-skills.ts';
 import type {
+  SharedCommandResult,
   SharedMutationPlan,
   SharedRemovalPlan,
   SharedUpdatePlan,
   SharedUpdateResult,
 } from './shared.ts';
+import {attachUpdateAvailability, projectRows} from './view.ts';
 import type {Row, SkillRelationship, TuiSnapshot} from './view.ts';
 
 export type SourceScope = 'global' | 'project';
 
-export interface SourceVerifiedTruth {
+/**
+ * Source verification: the post-mutation, local, auditable conclusion about a
+ * Source operation (add, replace, update, remove). Disk can change after
+ * verification, so this is verified evidence at one moment — never a "final
+ * truth".
+ */
+export interface SourceVerification {
   resource: string;
   provenance: string;
   slot: string;
@@ -32,7 +45,10 @@ export interface SourceVerifiedTruth {
   effectiveVisibility: string;
 }
 
-export function sourceMirrorState(truth: SourceVerifiedTruth): string {
+/** @deprecated Temporary TUI migration seam alias; deleted by the TUI migration. */
+export type SourceVerifiedTruth = SourceVerification;
+
+export function sourceMirrorState(truth: SourceVerification): string {
   if (/mirror-diverged|diverged mirror/i.test(truth.drift)) return 'diverged';
   if (/mirror-sync/i.test(truth.drift)) return 'mirror-sync required';
   return truth.relationships.some((relationship) => /\smirror\//i.test(relationship))
@@ -111,17 +127,36 @@ function sourceVisibility(home: Home, row: Row | undefined, projectPath?: string
   }
 }
 
-export function verifiedSourceTruth(
+/** Effective visibility derived from the same inventory evidence — no second scan. */
+function sourceVisibilityFromInventory(
   home: Home,
-  snapshot: TuiSnapshot,
+  report: InventoryScanReport,
+  row: Row | undefined,
+  projectPath?: string,
+): string {
+  if (!row?.realPath) return 'unknown';
+  try {
+    const visibility = explainVisibilityFromInventory(home, report, `skill:${row.id}`, {projectPath});
+    return [...new Set(visibility.harnesses.map(({effectiveVisibility}) => effectiveVisibility))].join('/');
+  } catch {
+    return 'unknown';
+  }
+}
+
+type VisibilityOf = (row: Row | undefined) => string;
+
+function deriveSourceVerification(
+  home: Home,
+  rows: Row[],
   plan: SharedMutationPlan | SharedRemovalPlan,
   scope: SourceScope,
   projectPath: string,
-): SourceVerifiedTruth {
+  visibilityOf: VisibilityOf,
+): SourceVerification {
   const slot = plan.operation === 'shared.remove'
     ? plan.source.slot
     : plan.candidate?.normalizedSlot ?? plan.slots[0] ?? 'unknown';
-  const row = sourceInventoryRows(snapshot).find((candidate) =>
+  const row = rows.find((candidate) =>
     sourceRelationships(candidate).some((relationship) =>
       relationship.targetId === plan.targetId && relationship.slot === slot));
   const relationships = row?.observedRelationships ?? row?.relationships ?? [];
@@ -175,7 +210,7 @@ export function verifiedSourceTruth(
       ? `mirror-sync required (${mirrorDrift}); ${driftEvidence.join(', ')}`
       : driftEvidence.join(', ') || 'none observed',
     updateAvailability: row?.updateAvailability?.status ?? 'unknown',
-    effectiveVisibility: sourceVisibility(home, row, scope === 'project' ? projectPath : undefined),
+    effectiveVisibility: visibilityOf(row),
   };
 }
 
@@ -255,17 +290,15 @@ export function catalogCandidateTruth(
   };
 }
 
-export function verifiedUpdateTruth(
-  home: Home,
-  snapshot: TuiSnapshot,
+function deriveUpdateVerification(
+  sourceRows: Row[],
   plan: SharedUpdatePlan,
   result: SharedUpdateResult,
-  scope: SourceScope,
-  projectPath: string,
-): SourceVerifiedTruth {
+  visibilityOf: VisibilityOf,
+): SourceVerification {
   const rows = result.items.map((item) => ({
     item,
-    row: sourceInventoryRows(snapshot).find((candidate) =>
+    row: sourceRows.find((candidate) =>
       sourceRelationships(candidate).some(({targetId, slot}) =>
         targetId === plan.targetId && slot === item.slot)),
   }));
@@ -273,7 +306,7 @@ export function verifiedUpdateTruth(
     (row?.observedRelationships ?? row?.relationships ?? []).map((relationship) => ({row, relationship})));
   const relationships = relationshipRows.map(({relationship}) => relationship);
   const visibility = rows.map(({item, row}) =>
-    `${item.name}=${sourceVisibility(home, row, scope === 'project' ? projectPath : undefined)}`);
+    `${item.name}=${visibilityOf(row)}`);
   const actual = relationships.map((relationship) =>
     `${relationship.targetId}/${relationship.slot}=${sourceRelationshipActual(relationship)}/${relationship.info.form}`);
   const observedDrift = relationshipRows.flatMap(({row, relationship: {targetId, slot, info}}) => {
@@ -303,3 +336,85 @@ export function verifiedUpdateTruth(
     effectiveVisibility: visibility.join(', '),
   };
 }
+
+/**
+ * Verify a Source mutation (add, replace, update, remove) through exactly one
+ * fresh post-mutation inventory scan per invocation. Actual state, Desired
+ * state, Drift, Update availability, provenance, Relationships, and Effective
+ * visibility are all derived from that same inventory evidence. Fail-soft:
+ * unavailable evidence is reported as explicit unknown values, never as
+ * success.
+ */
+export function verifySourceMutation(
+  home: Home,
+  plan: SharedMutationPlan | SharedUpdatePlan | SharedRemovalPlan,
+  result: SharedCommandResult | SharedUpdateResult,
+  projectPath?: string,
+): SourceVerification {
+  const scope = plan.scope?.kind ?? 'global';
+  const exactProjectPath = projectPath ?? plan.scope?.path ?? process.cwd();
+  try {
+    const report = scope === 'project'
+      ? scanProjectInventory(home, exactProjectPath, undefined, {persist: false})
+      : scanGlobalInventory(home, undefined, {persist: false});
+    const rows = attachUpdateAvailability(projectRows(report), home, report)
+      .filter((row) => sourceRelationships(row).length > 0);
+    const visibilityOf: VisibilityOf = (row) =>
+      sourceVisibilityFromInventory(home, report, row, scope === 'project' ? exactProjectPath : undefined);
+    return 'items' in plan
+      ? deriveUpdateVerification(rows, plan, result as SharedUpdateResult, visibilityOf)
+      : deriveSourceVerification(home, rows, plan, scope, exactProjectPath, visibilityOf);
+  } catch {
+    return {
+      resource: 'unknown',
+      provenance: 'Source unknown',
+      slot: 'items' in plan
+        ? plan.items.map(({slot}) => slot).join(', ')
+        : plan.slots.join(', '),
+      relationships: [],
+      actual: result.actual,
+      desired: 'unknown',
+      drift: result.drift.join(', ') || 'rescan unavailable',
+      updateAvailability: 'unknown',
+      effectiveVisibility: 'unknown',
+    };
+  }
+}
+
+// --- Temporary TUI migration seam ----------------------------------------
+// The TUI still verifies through presentation snapshots; its follow-up
+// migration routes it through verifySourceMutation and deletes these two
+// presentation-shaped entry points.
+export function verifiedSourceTruth(
+  home: Home,
+  snapshot: TuiSnapshot,
+  plan: SharedMutationPlan | SharedRemovalPlan,
+  scope: SourceScope,
+  projectPath: string,
+): SourceVerification {
+  return deriveSourceVerification(
+    home,
+    sourceInventoryRows(snapshot),
+    plan,
+    scope,
+    projectPath,
+    (row) => sourceVisibility(home, row, scope === 'project' ? projectPath : undefined),
+  );
+}
+
+export function verifiedUpdateTruth(
+  home: Home,
+  snapshot: TuiSnapshot,
+  plan: SharedUpdatePlan,
+  result: SharedUpdateResult,
+  scope: SourceScope,
+  projectPath: string,
+): SourceVerification {
+  return deriveUpdateVerification(
+    sourceInventoryRows(snapshot),
+    plan,
+    result,
+    (row) => sourceVisibility(home, row, scope === 'project' ? projectPath : undefined),
+  );
+}
+// --- end temporary TUI migration seam -------------------------------------
