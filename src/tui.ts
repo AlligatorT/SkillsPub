@@ -17,6 +17,7 @@ import {
   harnessStatusBadge,
   projectTuiSnapshot,
   tuiSnapshot,
+  tuiSnapshotInventory,
   type Target,
   type Row,
   type SkillInfo,
@@ -37,6 +38,7 @@ import {
 import {
   scanGlobalInventory,
   scanProjectInventory,
+  type InventoryScanReport,
 } from './inventory.ts';
 import {
   addPresetSelectors,
@@ -47,6 +49,7 @@ import {
 } from './catalog.ts';
 import {
   explainVisibility,
+  explainVisibilityFromInventory,
   type VisibilityExplanation,
   type WantedVisibility,
 } from './explain.ts';
@@ -270,21 +273,28 @@ function statusColor(info: SkillInfo): string {
   return info.presence === 'on' ? 'green' : 'yellow';
 }
 
-function updateText(row: Row): string | undefined {
+function updateStatusText(row: Row): string | undefined {
   const update = row.updateAvailability;
   if (!update) return undefined;
-  return `${update.status}${update.checkedAt ? ` @ ${update.checkedAt}` : ''}`;
+  if (update.status === 'check-failed' && update.error?.includes('installer lock lacks'))
+    return 'not checkable';
+  if (update.status === 'check-failed' && /ETIMEDOUT|timed out/i.test(update.error ?? ''))
+    return 'check timeout';
+  return update.status;
+}
+
+function updateText(row: Row): string | undefined {
+  const status = updateStatusText(row);
+  if (!status) return undefined;
+  return `${status}${row.updateAvailability?.checkedAt ? ` @ ${row.updateAvailability.checkedAt}` : ''}`;
 }
 
 function updateColor(row: Row): string | undefined {
   const status = row.updateAvailability?.status;
-  return status === 'available'
-    ? 'yellow'
-    : status === 'current'
-      ? 'green'
-      : status === 'check-failed' || status === 'upstream-missing'
-        ? 'red'
-        : undefined;
+  if (status === 'current') return 'green';
+  if (status === 'available' || updateStatusText(row) === 'not checkable') return 'yellow';
+  if (status === 'check-failed' || status === 'upstream-missing') return 'red';
+  return undefined;
 }
 
 function statusSortValue(info?: SkillInfo): string {
@@ -673,7 +683,7 @@ function InfoPanel({
           ...labeled('Tags', membership?.tags.join(', '), 'green'),
           ...labeled('Presets', membership?.presets.join(', '), 'magenta'),
           h(Text, {key: 'gap-update'}, ''),
-          ...labeled('Update availability', row.updateAvailability?.status, updateColor(row)),
+          ...labeled('Update availability', updateStatusText(row), updateColor(row)),
           ...labeled('Checked at', row.updateAvailability?.checkedAt),
           ...(row.updateAvailability?.error
             ? labeled('Update error', row.updateAvailability.error, 'red')
@@ -871,7 +881,8 @@ function sourceDetailLines(
     `Name: ${row.name}`,
     `Provenance: ${row.sourceLabel}`,
     `Real path: ${row.realPath ?? 'unresolved'}`,
-    `Update availability: ${row.updateAvailability?.status ?? 'unknown'}`,
+    `Update availability: ${updateStatusText(row) ?? 'unknown'}`,
+    ...(row.updateAvailability?.error ? [`Update check: ${row.updateAvailability.error}`] : []),
     ...relationships.map((relationship) =>
       `${relationship.readOnly ? 'Read-only inherited' : relationship.info.form} ${relationship.scope ?? 'global'}: ${relationship.info.path}`),
   ];
@@ -1382,16 +1393,34 @@ function SourceWorkspace({
   );
 }
 
+const fallbackVisibilityInventories = new WeakMap<TuiSnapshot, InventoryScanReport>();
+
 function resolveVisibility(
   home: Home,
   row: Row | undefined,
   projectPath?: string,
   harness?: string,
   want?: WantedVisibility,
+  snapshot?: TuiSnapshot,
 ): VisibilityExplanation | undefined {
   if (!row?.realPath) return undefined;
   try {
-    return explainVisibility(home, `skill:${row.id}`, {projectPath, harness, want});
+    if (!snapshot)
+      return explainVisibility(home, `skill:${row.id}`, {projectPath, harness, want});
+    let report = tuiSnapshotInventory(snapshot) ?? fallbackVisibilityInventories.get(snapshot);
+    if (!report) {
+      report = snapshot.project
+        ? scanProjectInventory(home, snapshot.project, undefined, {persist: false})
+        : scanGlobalInventory(home, undefined, {persist: false});
+      fallbackVisibilityInventories.set(snapshot, report);
+    }
+    return explainVisibilityFromInventory(
+      home,
+      report,
+      `skill:${row.id}`,
+      {projectPath, harness, want},
+      snapshot.harnesses,
+    );
   } catch {
     return undefined;
   }
@@ -1502,7 +1531,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   // even when the TUI has an exact Project context (issue #145). exact
   // Project Source copies remain available through the explicit CLI only.
   const sourceTakeSnapshot = () => tuiSnapshot(home);
-  const [sourceSnapshot, setSourceSnapshot] = useState<TuiSnapshot>(() => tuiSnapshot(home));
+  const [sourceSnapshot, setSourceSnapshot] = useState<TuiSnapshot>(snapshot);
   const [sourceSurface, setSourceSurface] = useState<SourceSurface>('catalog');
   const [sourceCandidates, setSourceCandidates] = useState<NpxSkillsCandidate[]>([]);
   const [sourceCandidateId, setSourceCandidateId] = useState<string>();
@@ -1651,12 +1680,12 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         relationship.target === selectedTarget?.name &&
         relationship.info.path === selectedInfo?.path);
   const visibility = useMemo(
-    () => resolveVisibility(home, selectedRow, projectPath),
+    () => resolveVisibility(home, selectedRow, projectPath, undefined, undefined, snapshot),
     [home, projectPath, selectedRow, snapshot],
   );
   const activeSourceResource = sourceSurface === 'inventory' ? sourceResource : undefined;
   const sourceVisibility = useMemo(
-    () => resolveVisibility(home, activeSourceResource),
+    () => resolveVisibility(home, activeSourceResource, undefined, undefined, undefined, sourceSnapshot),
     [home, activeSourceResource, sourceSnapshot],
   );
   const sourceTruth = useMemo(
@@ -1696,7 +1725,8 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     explanationLines(explained).join('\n'),
     Math.max(1, width - 8),
   );
-  const actionable = focusColumn === 1 && selectedRow && selectedTarget;
+  const selectedCell = selectedRow && selectedTarget;
+  const actionable = focusColumn === 1 && selectedCell;
   const manageRow = manage ? rows.find((candidate) => candidate.id === manage.rowId) : undefined;
   const membership = useMemo((): Membership | undefined => {
     if (!selectedRow) return undefined;
@@ -2050,7 +2080,9 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         return;
       }
       const visibilityConsequences = selected.map((row) => {
-        const states = resolveVisibility(home, row)?.harnesses.map((harness) =>
+        const states = resolveVisibility(
+          home, row, undefined, undefined, undefined, sourceSnapshot,
+        )?.harnesses.map((harness) =>
           `${harness.name}=${harness.effectiveVisibility}`) ?? ['unknown'];
         return `${row.name}: Relationships remain in place; ${states.join(', ')} on next load; Mirror content may require explicit reconcile.`;
       });
@@ -2677,7 +2709,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       }
       return;
     }
-    if (input === ' ' && actionable) {
+    if (input === ' ' && selectedCell) {
       if (inheritedOn(selectedInfo))
         return setFeedback(`read-only: inherited from ${selectedRel?.scope}`);
       const canEnable = Boolean(projectPath) && selectedRow.realPath &&
@@ -2784,17 +2816,19 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         : focusColumn === 0
           ? 'skills'
           : 'targets';
-  const actionHint = actionable
+  const actionHint = selectedCell
     ? inheritedOn(selectedInfo)
       ? ''
       : selectedInfo && !selectedInfo.readOnly
-        ? ` space ${selectedInfo.underOff ? 'on' : 'off'}${selectedInfo.mirrored
-          ? '  S sync  o overwrite  c convert  u remove'
-          : selectedInfo.linked
-            ? '  u unlink'
-            : ''}`
+        ? ` space ${selectedInfo.underOff ? 'on' : 'off'}${actionable
+          ? selectedInfo.mirrored
+            ? '  S sync  o overwrite  c convert  u remove'
+            : selectedInfo.linked
+              ? '  u unlink'
+              : ''
+          : ''}`
         : selectedRow.realPath
-          ? projectPath ? ' space on' : ' i link'
+          ? projectPath ? ' space on' : actionable ? ' i link' : ''
           : ''
     : '';
 
@@ -3001,7 +3035,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
             ? sourceOperation
               ? sourceOperationHint(sourceOperation)
               : ` ${feedback}${feedback ? '  ' : ''}source:${columnName}${latestSourceOperation ? '  l latest transcript' : ''}  tab Catalog/Inventory  / search  ↑↓/jk  enter detail${sourceSurface === 'catalog' && sourceCandidate ? '  a add/replace' : ''}  r refresh${sourceSurface === 'inventory' ? `  space mark (${sourceMarks.size})${sourceResource?.updateAvailability?.status === 'available' && mutableSourceRelationship(sourceResource) ? '  u update' : ''}${sourceMarks.size > 0 ? '  b batch update' : ''}${sourceRemovable ? '  d remove' : ''}` : ''}  1/2 matrices  q `
-            : ` ${feedback}${feedback ? '  ' : ''}${tab}:${columnName}  ←→/hl  ↑↓/jk${actionHint}  enter ${tab === 'target' && focusColumn === 0 ? 'details' : 'SKILL.md'}${selectedRow?.realPath ? '  e explain' : ''}  m manage  / search  s sort:${sortLabel(sort)}  R refresh  tab  1/2/3 workspace  q `,
+            : ` ${feedback}${feedback ? '  ' : ''}${tab}:${columnName}  ←→/hl  ↑↓/jk${selectedRow?.realPath ? '  e explain' : ''}${actionHint}  enter ${tab === 'target' && focusColumn === 0 ? 'details' : 'SKILL.md'}  m manage  / search  s sort:${sortLabel(sort)}  R refresh  tab  1/2/3 workspace  q `,
     ),
   );
 }

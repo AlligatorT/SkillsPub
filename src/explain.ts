@@ -410,17 +410,14 @@ function explainHarness(
   return explanation;
 }
 
-export function explainVisibility(
+export function explainVisibilityFromInventory(
   home: Home,
+  report: InventoryScanReport,
   selector: string,
   options: { projectPath?: string; harness?: string; want?: WantedVisibility } = {},
+  inspected = inspectHarnesses(home, report.targets, report.projectPath),
 ): VisibilityExplanation {
-  const targets = loadTargets(home);
-  const report = options.projectPath
-    ? scanProjectInventory(home, options.projectPath, targets, { persist: false })
-    : scanGlobalInventory(home, targets, { persist: false });
   const resource = resolveResource(report, selector);
-  const inspected = inspectHarnesses(home, report.targets, report.projectPath);
   let harnesses = [...inspected.detected, ...inspected.available];
   if (options.harness) {
     harnesses = harnesses.filter(({ key }) => key === options.harness);
@@ -435,4 +432,16 @@ export function explainVisibility(
     ...(options.want ? { wanted: options.want } : {}),
     harnesses: harnesses.map((harness) => explainHarness(home, report, resource, harness, options.want)),
   };
+}
+
+export function explainVisibility(
+  home: Home,
+  selector: string,
+  options: { projectPath?: string; harness?: string; want?: WantedVisibility } = {},
+): VisibilityExplanation {
+  const targets = loadTargets(home);
+  const report = options.projectPath
+    ? scanProjectInventory(home, options.projectPath, targets, { persist: false })
+    : scanGlobalInventory(home, targets, { persist: false });
+  return explainVisibilityFromInventory(home, report, selector, options);
 }
