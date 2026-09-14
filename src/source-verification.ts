@@ -45,9 +45,6 @@ export interface SourceVerification {
   effectiveVisibility: string;
 }
 
-/** @deprecated Temporary TUI migration seam alias; deleted by the TUI migration. */
-export type SourceVerifiedTruth = SourceVerification;
-
 export function sourceMirrorState(truth: SourceVerification): string {
   if (/mirror-diverged|diverged mirror/i.test(truth.drift)) return 'diverged';
   if (/mirror-sync/i.test(truth.drift)) return 'mirror-sync required';
@@ -380,41 +377,3 @@ export function verifySourceMutation(
     };
   }
 }
-
-// --- Temporary TUI migration seam ----------------------------------------
-// The TUI still verifies through presentation snapshots; its follow-up
-// migration routes it through verifySourceMutation and deletes these two
-// presentation-shaped entry points.
-export function verifiedSourceTruth(
-  home: Home,
-  snapshot: TuiSnapshot,
-  plan: SharedMutationPlan | SharedRemovalPlan,
-  scope: SourceScope,
-  projectPath: string,
-): SourceVerification {
-  return deriveSourceVerification(
-    home,
-    sourceInventoryRows(snapshot),
-    plan,
-    scope,
-    projectPath,
-    (row) => sourceVisibility(home, row, scope === 'project' ? projectPath : undefined),
-  );
-}
-
-export function verifiedUpdateTruth(
-  home: Home,
-  snapshot: TuiSnapshot,
-  plan: SharedUpdatePlan,
-  result: SharedUpdateResult,
-  scope: SourceScope,
-  projectPath: string,
-): SourceVerification {
-  return deriveUpdateVerification(
-    sourceInventoryRows(snapshot),
-    plan,
-    result,
-    (row) => sourceVisibility(home, row, scope === 'project' ? projectPath : undefined),
-  );
-}
-// --- end temporary TUI migration seam -------------------------------------
