@@ -1777,6 +1777,54 @@ test('Agent projection toggles the selected local relationship immediately', asy
   t.unmount();
 });
 
+test('Space operates the selected cell while the Target list has focus', async () => {
+  const { home } = setup();
+  const t = await renderApp(home);
+  await t.send('l');
+  await t.send('j');
+  await t.send('j'); // grilling
+  await t.send('h');
+  await t.send(' ');
+
+  assert.ok(fs.existsSync(path.join(home.configDir, '.skillspub-off', 'a-skills', 'grilling', 'SKILL.md')));
+  assert.match(t.stdout.frame(), /grilling @ a: off/);
+  t.unmount();
+});
+
+test('Space operates the selected cell while the Skill list has focus', async () => {
+  const { home } = setup();
+  const t = await renderApp(home);
+  await t.send('\t');
+  for (let i = 0; i < 3; i++) await t.send('j'); // grilling
+  await t.send(' ');
+
+  assert.ok(fs.existsSync(path.join(home.configDir, '.skillspub-off', 'a-skills', 'grilling', 'SKILL.md')));
+  assert.match(t.stdout.frame(), /grilling @ a: off/);
+  t.unmount();
+});
+
+test('relationship navigation reuses the rendered inventory snapshot', async () => {
+  const { home } = setup();
+  const t = await renderApp(home);
+  await t.send('l');
+  const original = fs.readdirSync;
+  let reads = 0;
+  Object.defineProperty(fs, 'readdirSync', {
+    configurable: true,
+    value: (...args: unknown[]) => {
+      reads++;
+      return Reflect.apply(original, fs, args);
+    },
+  });
+  try {
+    await t.send('j');
+  } finally {
+    Object.defineProperty(fs, 'readdirSync', {configurable: true, value: original});
+  }
+  assert.equal(reads, 0, 'navigation must not rescan skill directories');
+  t.unmount();
+});
+
 test('relationship statuses pad to a fixed width so skill names align', async () => {
   const { home } = setup();
   const t = await renderApp(home);
@@ -2071,8 +2119,8 @@ test('footer reflects available navigation actions and modal state', async () =>
   assert.match(t.stdout.frame(), /\/ search/);
   assert.match(t.stdout.frame(), /s sort:Name/);
   assert.match(t.stdout.frame(), /R refresh/);
-  // read-only slice: no mutation actions in the footer
-  assert.doesNotMatch(t.stdout.frame().split('\n').pop() ?? '', /toggle|space|unlink/i);
+  // Space operates the selected Skill × Target cell even while the list has focus.
+  assert.match(t.stdout.frame().split('\n').pop() ?? '', /space off/);
   await t.send('l');
   assert.match(t.stdout.frame(), /enter SKILL\.md/);
   await t.send('\r');
@@ -2324,6 +2372,26 @@ test('Source marked update previews exclusions, reports partial truth, and retri
   const calls = fs.readFileSync(fixture.npxLog, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
   assert.deepEqual(calls.map(({args}) => args[3]), ['a-success', 'b-fail', 'b-fail']);
   assert.ok(fs.existsSync(path.join(fixture.parking, 'b-fail', 'SKILL.md')));
+  t.unmount();
+});
+
+test('Source renders missing lock identity as not checkable rather than an update failure', async (context) => {
+  const fixture = setupManagedTui([
+    {name: 'legacy', source: 'owner/legacy', hash: 'legacy-hash'},
+  ]);
+  useFixtureEnv(context, fixture.env);
+  const lockFile = path.join(path.dirname(fixture.discovery), '.skill-lock.json');
+  const lock = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
+  delete lock.skills.legacy.skillPath;
+  delete lock.skills.legacy.skillFolderHash;
+  fs.writeFileSync(lockFile, JSON.stringify(lock));
+  sharedRefresh(fixture.home);
+
+  const t = await renderApp(fixture.home, 120, 34);
+  await t.send('3');
+  await t.send('\t');
+  assert.match(t.stdout.frame(), /Update availability: not checkable/);
+  assert.match(t.stdout.frame(), /Update check: installer lock lacks skillPath or/);
   t.unmount();
 });
 

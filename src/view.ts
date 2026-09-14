@@ -379,6 +379,18 @@ export interface TuiSnapshot {
   };
 }
 
+const snapshotInventories = new WeakMap<TuiSnapshot, InventoryScanReport>();
+
+/** Reuse the exact inventory evidence that produced a TUI snapshot. */
+export function tuiSnapshotInventory(snapshot: TuiSnapshot): InventoryScanReport | undefined {
+  return snapshotInventories.get(snapshot);
+}
+
+function rememberInventory(snapshot: TuiSnapshot, report: InventoryScanReport): TuiSnapshot {
+  snapshotInventories.set(snapshot, report);
+  return snapshot;
+}
+
 function attachUpdateAvailability(
   rows: Row[],
   home: Home,
@@ -412,13 +424,13 @@ function visibleTargets(
 export function tuiSnapshot(home: Home): TuiSnapshot {
   const report = scanGlobalInventory(home, undefined, { persist: false });
   const harnesses = inspectHarnesses(home, report.targets);
-  return {
+  return rememberInventory({
     targets: visibleTargets(report, harnesses),
     harnesses,
     pendingTargetKeys: pendingTargetDefinitions(home).map(({ key }) => key),
     rows: attachUpdateAvailability(projectRows(report), home, report),
     catalog: readViewState(home),
-  };
+  }, report);
 }
 
 /** Project-scope snapshot (ADR-0010): target columns are the project targets only;
@@ -426,7 +438,7 @@ export function tuiSnapshot(home: Home): TuiSnapshot {
 export function projectTuiSnapshot(home: Home, projectPath: string): TuiSnapshot {
   const report = scanProjectInventory(home, projectPath, undefined, { persist: false });
   const harnesses = inspectHarnesses(home, report.targets, report.projectPath);
-  return {
+  return rememberInventory({
     targets: visibleTargets(
       { ...report, targets: report.targets.filter((target) => target.scope === 'project') },
       harnesses,
@@ -436,7 +448,7 @@ export function projectTuiSnapshot(home: Home, projectPath: string): TuiSnapshot
     rows: attachUpdateAvailability(projectRows(report), home, report),
     catalog: readViewState(home),
     project: report.projectPath,
-  };
+  }, report);
 }
 
 /** Assemble detail for one explicit instance identity. */
