@@ -86,7 +86,7 @@ import {
   verifiedUpdateTruth,
   type CatalogCandidateTruth,
   type SourceVerifiedTruth,
-} from './source-truth.ts';
+} from './source-verification.ts';
 
 /** Below this width the passive summary column is hidden. */
 const WIDE_MIN = 80;

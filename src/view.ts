@@ -391,7 +391,7 @@ function rememberInventory(snapshot: TuiSnapshot, report: InventoryScanReport): 
   return snapshot;
 }
 
-function attachUpdateAvailability(
+export function attachUpdateAvailability(
   rows: Row[],
   home: Home,
   report: InventoryScanReport,

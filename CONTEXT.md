@@ -107,6 +107,10 @@ Effective visibility 的可审计说明，包括贡献或绕过预期的 Targets
 **Drift**:
 Actual state 与 Desired state，或受管 Harness/Source 配置与其 claim 不一致。SkillsPub 显示 drift，但没有 watcher、daemon 或后台自动修复。
 
+**Source verification**:
+Source 变更（add、replace、update、remove）后的本地可审计结论：由同一次 fresh post-mutation inventory scan 派生 provenance、Relationships、Actual state、Desired state、Drift、Update availability 与 Effective visibility。磁盘在验证后仍可能变化，所以它是某一时刻的已验证证据；证据不可用时 fail-soft 为显式 `unknown`，绝不当作成功。
+_避免_: Final truth、Source final truth、把验证结果当作持久磁盘状态（CLI 文本 `Final truth:` 与 JSON `finalTruth` 字段是 ADR-0012 versioned contract 锁定的历史名称，保留不变）
+
 **Reconcile**:
 显式、幂等地把 Actual state 和受管配置收敛到 Desired state。预检失败时零变更；意外 I/O 失败保留已完成操作与 Desired state，后续再次 reconcile。
 
