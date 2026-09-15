@@ -1,8 +1,6 @@
 # SkillsPub
 
-SkillsPub is an auditable relationship and visibility manager for Agent Skills. Disk records Actual state; SkillsPub records human intent and persistent Preset claims, then explains why a skill will or will not be discovered on the next Harness load.
-
-The v0.1 built-in Harnesses are Pi (`managed`, with Global/exact-Project Shared isolation), Claude Code (`managed`, Shared `not-consumed`), and Grok Build (`managed/excluded`). Codex, OpenCode, Kimi Code, and TraeCode remain `discoverable` compatibility candidates; WorkBuddy remains `unsupported`.
+SkillsPub switches Agent Skills on and off across AI coding harnesses — Pi, Claude Code, and Grok Build — from one place. It reads the disk as the source of truth, shows what each harness will pick up on its next load, and prints an immutable preview before any change is written.
 
 ## Requirements
 
@@ -26,29 +24,44 @@ Harness support levels are enforced by `npm run audit:release`. The verified-ver
 
 ```sh
 npm install --global skillspub
-skillspub targets
 ```
 
-You can also run it without a global install:
+Or without a global install: `npx skillspub targets`.
+
+## First run
+
+There is no setup step. SkillsPub discovers installed skills and harnesses by scanning the disk, so open the TUI and everything is already there:
 
 ```sh
-npx skillspub targets
+skillspub
 ```
 
-## Start safely
-
-Inspect before changing anything:
+All browsing is read-only; nothing changes without an explicit confirmed plan. One optional configuration exists: Pi's Shared-skills isolation, applied only when you ask for it:
 
 ```sh
-skillspub scan
-skillspub status <skill>
-skillspub explain <skill>
-skillspub targets --json
+skillspub harnesses pi setup   # prints a preview; rerun with --yes to apply
 ```
 
-Run `skillspub` in a terminal to open the TUI. Source add, replace, and update commands print an immutable plan first; rerun the same command with `--yes` to apply it. Source removal separately confirms the Relationship cascade and named source deletion. SkillsPub does not inspect running Harness process memory; Effective visibility describes the next Harness load from local evidence.
+Claude Code and Grok Build need no setup.
 
-The bundled [`SKILL.md`](SKILL.md) is the thin router for agents. It requires all Skill Target operations to go through the CLI rather than direct filesystem edits.
+## TUI
+
+`skillspub` in a terminal opens the full-screen browser (same as `skillspub tui`; add `--project [path]` for a project-scope view). It is keyboard-driven: browse the skill × Target matrix, toggle skills, manage Tags, Bundles, and Presets, and run the Source lifecycle (find, add, update, remove) with preview → confirm → verify for every mutation.
+
+## CLI
+
+Everything the TUI does is also a scriptable command:
+
+| Group | Commands |
+| --- | --- |
+| Inspect | `scan` · `ls` · `status <skill>` · `explain <skill>` · `targets` · `doctor` |
+| Toggle | `on\|off <selector> <target...> [--yes]` |
+| Organize | `tag` · `bundle` · `preset` (persistent always-on policy) |
+| Sources | `shared find\|describe\|refresh\|outdated\|add\|update\|remove` |
+| Harnesses | `harnesses [name inspect\|setup\|reconcile [--yes]]` |
+| Project scope | prefix any of the above with `project <exact-path>` |
+
+Every mutation prints its plan first and applies only with `--yes`.
 
 ## Development
 
