@@ -8,6 +8,20 @@ The v0.1 built-in Harnesses are Pi (`managed`, with Global/exact-Project Shared 
 
 - Node.js 22.20 or newer
 
+## Compatibility
+
+Remote Source operations go through one pinned Vercel `skills` release (`skills@1.5.21`), so release behavior does not drift with upstream `latest`.
+
+Harness support levels are enforced by `npm run audit:release`. The verified-version evidence each adapter was accepted against:
+
+| Harness | Support | Verified against |
+| --- | --- | --- |
+| Pi | `managed` | v0.85.1 |
+| Claude Code | `managed` | docs snapshot 2026-08-12 |
+| Grok Build | `managed/excluded` | settings reference @ `19d42e35` |
+
+`discoverable` candidates (Codex, OpenCode, Kimi Code, TraeCode) are observed only and carry no verified-version claim.
+
 ## Install
 
 ```sh
