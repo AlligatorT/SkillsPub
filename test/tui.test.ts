@@ -483,6 +483,37 @@ test('Source Catalog search replaces the explanatory empty state with identified
   t.unmount();
 });
 
+test('Source tab layers information: default is decision-only, enter expands developer detail', async (context) => {
+  const fixture = setupManagedTui([{name: 'managed', source: 'owner/repo', hash: 'managed-hash'}]);
+  useFixtureEnv(context, fixture.env);
+  const t = await renderApp(fixture.home, 120, 34);
+
+  await t.send('3');
+  await t.send('\t');
+  // 用户态 default layer: owner can answer 能不能更新 / 来源在哪 without developer noise.
+  let frame = t.stdout.frame();
+  assert.match(frame, /Selected: managed · https:\/\/github\.com\/owner\/repo\.git/);
+  assert.match(frame, /Source: https:\/\/github\.com\/owner\/repo\.git/);
+  assert.match(frame, /Update:/);
+  assert.match(frame, /State: ON local · desired: ON/);
+  assert.doesNotMatch(frame, /Identity:/);
+  assert.doesNotMatch(frame, /Real path:/);
+  assert.doesNotMatch(frame, /Update check:/);
+
+  // 开发态 expansion layer (enter): full original detail, no new global state.
+  await t.send('\r');
+  frame = t.stdout.frame();
+  assert.match(frame, /Resource detail/);
+  assert.match(frame, /Identity: \//);
+  assert.match(frame, /Real path: \//);
+  assert.match(frame, /Provenance: https:\/\/github\.com\/owner\/repo\.git/);
+  assert.match(frame, /Relationships: 1/);
+  assert.match(frame, /local global: \//);
+  await t.send('\x1b');
+  assert.doesNotMatch(t.stdout.frame(), /Real path:/);
+  t.unmount();
+});
+
 test('Source Inventory keeps managed and unknown Global ownership readable under an exact Project context (narrow)', async (context) => {
   const fixture = setupManagedTui([{name: 'managed', source: 'owner/repo', hash: 'managed-hash'}]);
   mkSkill(fixture.discovery, 'unknown');
@@ -498,7 +529,10 @@ test('Source Inventory keeps managed and unknown Global ownership readable under
   assert.match(frame, /Inventory/);
   assert.match(frame, /managed/);
   assert.match(frame, /Selected resource/);
-  assert.match(frame, /Provenance: https:\/\/github\.com\/owner\/repo\.git/);
+  // 用户态 default layer: 来源链接 + update availability, no path-resolution detail.
+  assert.match(frame, /Source: https:\/\/github\.com\/owner\/repo\.git/);
+  assert.doesNotMatch(frame, /Identity:/);
+  assert.doesNotMatch(frame, /Real path:/);
   assert.match(frame, /Actual:/);
   assert.match(frame, /Effective Visibility:/);
 
@@ -2396,6 +2430,10 @@ test('Source renders missing lock identity as not checkable rather than an updat
   const t = await renderApp(fixture.home, 120, 34);
   await t.send('3');
   await t.send('\t');
+  // 用户态 default layer: status only; the check error detail is 开发态.
+  assert.match(t.stdout.frame(), /Update: not checkable/);
+  assert.doesNotMatch(t.stdout.frame(), /Update check:/);
+  await t.send('\r');
   assert.match(t.stdout.frame(), /Update availability: not checkable/);
   assert.match(t.stdout.frame(), /Update check: installer lock lacks skillPath or/);
   t.unmount();
@@ -2420,12 +2458,12 @@ test('r refreshes Global availability by source and preserves selection through 
   await t.send('\t');
   await t.send('j'); // current
   assert.match(t.stdout.frame(), /› current/);
-  assert.match(t.stdout.frame(), /Update availability: unknown/);
+  assert.match(t.stdout.frame(), /Update: unknown/);
 
   await t.send('r');
   const frame = await waitForFrame(t, /Refreshed 4 managed resources/);
   assert.match(frame, /› current/);
-  assert.match(frame, /Update availability: current/);
+  assert.match(frame, /Update: current/);
   assert.equal((fs.readFileSync(fixture.gitLog, 'utf8').match(/"clone"/g) ?? []).length, 2);
   t.unmount();
 });
@@ -2482,7 +2520,7 @@ test('Source refresh keeps search and workspace navigation responsive during rem
   await t.flush();
   const frame = await waitForFrame(t, /Refreshed 2 managed resources/);
   assert.match(frame, /› available-b/);
-  assert.match(frame, /Update availability: available/);
+  assert.match(frame, /Update: available/);
   t.unmount();
 });
 

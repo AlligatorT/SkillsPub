@@ -43,6 +43,71 @@ export function harnessStatusBadge(
 
 export type Presence = 'on' | 'off' | 'deadlink';
 
+// --- Source tab information layering (issue #167, spec #164) ---
+// 用户态 default layer: decision-useful info only (能否更新、版本差异、来源链接).
+// 开发态 developer layer: hash/path-resolution/download/lock-cache detail, shown
+// in the TUI detail expansion layer; CLI --json remains the full-fidelity contract.
+
+export interface SourceLayerInput {
+  kind: 'candidate' | 'resource';
+  name: string;
+  /** 来源链接/label shown in the default layer. */
+  sourceLabel: string;
+  /** Update availability status (能否更新/版本差异), preformatted by the caller. */
+  update: string;
+  actual: string;
+  desired: string;
+  drift: string;
+  relationships: number;
+  effectiveVisibility: string;
+  /** 开发态: stable identity (realPath or source@name). */
+  identity: string;
+  /** 开发态: resolved on-disk path (resources only). */
+  realPath?: string;
+  /** 开发态: update check error detail. */
+  updateError?: string;
+  /** 开发态: extra detail lines (Slot/path resolution, installs, per-Relationship paths). */
+  details: string[];
+}
+
+export interface SourceLayers {
+  /** 用户态 status strip (default Source surface bottom block). */
+  status: {selected: string; truth: string};
+  /** 用户态 panel lines (default Source surface). */
+  user: string[];
+  /** 开发态 full detail (expansion layer); a superset of the user layer. */
+  developer: string[];
+}
+
+/** Split Source tab information into 用户态/开发态 layers. Pure projection. */
+export function projectSourceLayers(input: SourceLayerInput): SourceLayers {
+  return {
+    status: {
+      selected: `Selected: ${input.name} · ${input.sourceLabel}  Actual: ${input.actual}  Desired: ${input.desired}`,
+      truth: `Drift: ${input.drift}  Update: ${input.update}  Relationship: ${input.relationships}  Effective Visibility: ${input.effectiveVisibility}`,
+    },
+    user: [
+      `Name: ${input.name}`,
+      `Source: ${input.sourceLabel}`,
+      `Update: ${input.update}`,
+      `State: ${input.actual} · desired: ${input.desired} · drift: ${input.drift}`,
+      `Visibility: ${input.effectiveVisibility}`,
+    ],
+    developer: [
+      `Identity: ${input.identity}`,
+      `Name: ${input.name}`,
+      `Provenance: ${input.sourceLabel}`,
+      ...(input.kind === 'resource' ? [`Real path: ${input.realPath ?? 'unresolved'}`] : []),
+      `Update availability: ${input.update}`,
+      ...(input.updateError ? [`Update check: ${input.updateError}`] : []),
+      `State: ${input.actual} · desired: ${input.desired} · drift: ${input.drift}`,
+      `Effective visibility: ${input.effectiveVisibility}`,
+      `Relationships: ${input.relationships}`,
+      ...input.details,
+    ],
+  };
+}
+
 export interface SkillInfo {
   presence: Presence;
   path: string;

@@ -4,6 +4,7 @@ import {
   filterRows,
   harnessStatusBadge,
   projectRows,
+  projectSourceLayers,
   searchRows,
   sortRows,
   untagged,
@@ -292,3 +293,71 @@ test('project scope keeps one effective cell per Skill and Target', () => {
   assert.equal(rows[0].relationships[0].readOnly, true);
 });
 
+
+test('Source layering: default layer answers decisions without developer detail', () => {
+  const layers = projectSourceLayers({
+    kind: 'resource',
+    name: 'grilling',
+    sourceLabel: 'https://github.com/owner/repo.git',
+    update: 'available',
+    actual: 'ON local',
+    desired: 'ON',
+    drift: 'none observed',
+    relationships: 1,
+    effectiveVisibility: 'visible',
+    identity: '/src/grilling',
+    realPath: '/src/grilling',
+    updateError: 'installer lock lacks skillPath',
+    details: ['local global: /roots/shared/skills/grilling'],
+  });
+
+  // 用户态: 能否更新、版本差异、来源链接 — and no hash/path-resolution detail.
+  const userFacing = [layers.status.selected, layers.status.truth, ...layers.user].join('\n');
+  assert.match(userFacing, /https:\/\/github\.com\/owner\/repo\.git/);
+  assert.match(userFacing, /available/);
+  assert.doesNotMatch(userFacing, /\/src\/grilling/);
+  assert.doesNotMatch(userFacing, /Identity/);
+  assert.doesNotMatch(userFacing, /\/roots\/shared\/skills/);
+  assert.doesNotMatch(userFacing, /installer lock/);
+
+  // 开发态: a superset with the full original detail.
+  const developer = layers.developer.join('\n');
+  assert.match(developer, /Identity: \/src\/grilling/);
+  assert.match(developer, /Real path: \/src\/grilling/);
+  assert.match(developer, /Provenance: https:\/\/github\.com\/owner\/repo\.git/);
+  assert.match(developer, /Update availability: available/);
+  assert.match(developer, /Update check: installer lock lacks skillPath/);
+  assert.match(developer, /local global: \/roots\/shared\/skills\/grilling/);
+  assert.match(developer, /Effective visibility: visible/);
+});
+
+test('Source layering: candidate layer keeps Slot resolution and links in developer detail', () => {
+  const layers = projectSourceLayers({
+    kind: 'candidate',
+    name: 'shared-name',
+    sourceLabel: 'https://skills.sh/owner/one/shared-name',
+    update: 'unknown',
+    actual: 'not installed',
+    desired: 'not applicable',
+    drift: 'not applicable',
+    relationships: 0,
+    effectiveVisibility: 'not applicable',
+    identity: 'owner/one@shared-name',
+    details: [
+      'Source: owner/one',
+      'Destination Slot: shared-name',
+      'Installs: 10',
+      'Detail: https://skills.sh/owner/one/shared-name',
+    ],
+  });
+
+  const userFacing = [layers.status.selected, layers.status.truth, ...layers.user].join('\n');
+  assert.match(userFacing, /https:\/\/skills\.sh\/owner\/one\/shared-name/);
+  assert.match(userFacing, /not installed/);
+  assert.doesNotMatch(userFacing, /Destination Slot/);
+
+  const developer = layers.developer.join('\n');
+  assert.match(developer, /Identity: owner\/one@shared-name/);
+  assert.match(developer, /Destination Slot: shared-name/);
+  assert.match(developer, /Installs: 10/);
+});
