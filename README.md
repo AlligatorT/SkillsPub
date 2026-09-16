@@ -17,8 +17,9 @@ Harness support levels are enforced by `npm run audit:release`. The verified-ver
 | Pi | `managed` | v0.85.1 |
 | Claude Code | `managed` | docs snapshot 2026-08-12 |
 | Grok Build | `managed/excluded` | settings reference @ `19d42e35` |
+| OpenCode | `discoverable` | v1.18.31 |
 
-`discoverable` candidates (Codex, OpenCode, Kimi Code, TraeCode) are observed only and carry no verified-version claim.
+`discoverable` candidates (Codex, Kimi Code, TraeCode) are observed only and carry no verified-version claim.
 
 ## Install
 

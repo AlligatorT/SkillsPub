@@ -12,6 +12,7 @@ src/harnesses/grok.ts        Grok Build 专属知识
 src/harnesses/codex.ts       Codex 专属知识（required-Shared 样板）
 src/harnesses/cursor.ts      Cursor 专属知识（required-Shared）
 src/harnesses/hermes.ts      Hermes 专属知识（discoverable；Shared 默认不读）
+src/harnesses/opencode.ts    OpenCode 专属知识（required-Shared 模式）
 src/harnesses/<name>.ts      后续内置 Harness Adapter
 src/sources/npx-skills.ts    固定版本的 npx skills Source Adapter
 src/inventory.ts             通用 Target/Slot/Relationship 扫描
@@ -244,13 +245,29 @@ Support 保持 `discoverable`：project trust 与 cwd 相关，且 Adapter 不�
 
 官方证据：[Skills](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills)（verifiedVersion `0.21.3`）、[pinned skill_utils.py v2026.9.14](https://github.com/NousResearch/hermes-agent/blob/v2026.9.14/agent/skill_utils.py)。
 
+## OpenCode v0.2 required-Shared Adapter
+
+v0.2 为 OpenCode 增加 `discoverable` Adapter（#172），复用 #170（Codex）确立的 required-Shared 样板：Shared consumption 如实报告 `required`，不做阻断 hack；自有 Target 仍走通用 ON/OFF/批量/Project inventory。
+
+### Targets
+
+- Global Target：`$OPENCODE_CONFIG_DIR/skills`，未设置时为 `$XDG_CONFIG_HOME/opencode/skills`（默认 `~/.config/opencode/skills`）。
+- Canonical user root：`$HOME/.agents/skills`（Shared Target）。官方唯一的排除机制是 per-process 环境变量 `OPENCODE_DISABLE_EXTERNAL_SKILLS`（launch-scoped，见 #113），不是持久配置 seam；per-skill `permission.skill` 只是条目级开关，不当作 Target isolation。
+- Project Target：所选项目的 `.opencode/skills`。
+- Repository Shared：所选项目及 ancestor 的 `.agents/skills`（loader 从 CWD 向上走到 worktree）。
+- Claude compatibility：Global/Project `.claude/skills` 作为 compatibility root 如实报告 `consumed`；只能由 per-process `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS` 关闭。Adapter 不把 `skills.paths` 自定义路径、`skills.urls` 远程缓存或 bundled skills 做成可写 Target。
+
+Support 保持 `discoverable`：required Shared 与 env-only isolation 使该 Harness 不能达到 `managed`。无 setup/reconcile。官方 loader 跟随 symlink（Glob `symlink: true`），Link capability 为 supported。
+
+官方证据：[Skills docs](https://opencode.ai/docs/skills/)（verifiedVersion `1.18.31`）、[pinned skill loader v1.18.31](https://github.com/sst/opencode/blob/v1.18.31/packages/opencode/src/skill/index.ts)、[pinned global paths v1.18.31](https://github.com/sst/opencode/blob/v1.18.31/packages/core/src/global.ts)。
+
 ## v0.1 no-launcher boundary and empty additional shortlist
 
 SkillsPub 不拥有 Harness startup。v0.1 不增加 wrapper command、OS persistent environment provisioning、per-entry-point environment/argument profiles、IDE/GUI/daemon/service/remote/container launch integration，也不建立 Launch Profile identity、Desired state、Drift、backup 或 recovery model。already-running process 永远不被当作 reload；依赖 process environment、arguments 或特定 launcher 的 consumption 在未受控 entry point 下为 `unknown`。
 
 Harness 只有在自己的 persistent filesystem/configuration seam 允许 SkillsPub 完整 inspect、reconcile、verify 与 recover claimed consumption boundary 时才可为 `managed`。因此 v0.1 additional Managed Harness shortlist 为零：
 
-- OpenCode、Kimi Code、TraeCode 保持 evidence-backed `discoverable` compatibility-roadmap candidates，不实现 runtime Adapter；Codex 在 v0.2 有 `discoverable` Adapter（#170），Shared `required`，仍不能 promotion 为 `managed`；
+- Kimi Code、TraeCode 保持 evidence-backed `discoverable` compatibility-roadmap candidates，不实现 runtime Adapter；Codex 与 OpenCode 分别在 v0.2 有 `discoverable` Adapter（#170、#172），Shared `required`，仍不能 promotion 为 `managed`；
 - Cursor 在 v0.2 有 `discoverable` Adapter（#171），Shared `required`，仍不能 promotion 为 `managed`；
 - Hermes 在 v0.2 有 `discoverable` Adapter（#173），Shared 默认 `not-consumed`，仍不能 promotion 为 `managed`；
 - WorkBuddy 保持 `unsupported`，不根据未合并 patch 猜 `.workbuddy/skills`；
@@ -268,7 +285,7 @@ Harness 只有在自己的 persistent filesystem/configuration seam 允许 Skill
 | Claude Code | Personal/Project `.claude/skills` 支持 symlink；accepted Adapter contract 不消费 Shared | `managed`；Shared `not-consumed`、isolation `not-required`，不增加配置写入；只解释 next load | [Skills](https://docs.anthropic.com/en/docs/claude-code/skills), [Settings](https://docs.anthropic.com/en/docs/claude-code/settings), [#112 contract](https://github.com/AlligatorT/SkillsPub/issues/112#issuecomment-5547687525) |
 | Grok Build | `$GROK_HOME/skills`、Project/ancestor `.grok/skills`、Shared 与 Claude/Cursor compatible roots；canonical ignore 可隔离 Shared | 保持 `managed/excluded`；Global/Project setup/reconcile 必须完整显示 Relationship impact 与 recovery | [settings](https://docs.x.ai/build/settings/reference), [skills](https://docs.x.ai/build/features/skills-plugins-marketplaces), [pinned source](https://github.com/xai-org/grok-build/blob/19d42e35c07a9c9244f03f6df0c4c353f970d4f9/crates/codegen/xai-grok-agent/src/prompt/skills.rs), [#109 machine evidence](https://github.com/AlligatorT/SkillsPub/issues/109#issuecomment-5532175662) |
 | Cursor | 官方 user root 为 `~/.cursor/skills`；Project `.cursor/skills`；同时消费 Shared `~/.agents/skills` 与项目 `.agents/skills`；无 root-level Shared exclusion | v0.2 `discoverable` Adapter；Shared `required`；自有 Global/Project Target 可管理；无 isolation write | [Agent Skills](https://cursor.com/docs/skills), [Skills help](https://cursor.com/help/customization/skills), [#171](https://github.com/AlligatorT/SkillsPub/issues/171) |
-| OpenCode | Native/Shared/vendor roots 强；完整 isolation 依赖 actual process 的 environment flag | `discoverable` roadmap candidate；v0.1 无 Adapter，no-launcher boundary 下不 promotion | [research resolution](https://github.com/AlligatorT/SkillsPub/issues/104#issuecomment-5470909113), [launch evidence](https://github.com/AlligatorT/SkillsPub/issues/113#issuecomment-5531242966) |
+| OpenCode | 官方 roots：`.opencode/skills`、`~/.config/opencode/skills`、Shared `.agents/skills` 与 Claude-compatible `.claude/skills`（Global 与 project walk-up）；symlink 跟随；Shared/compat 排除只有 per-process environment flag | v0.2 `discoverable` Adapter；Shared `required`；自有 Global/Project Target 可管理；无 isolation write | [Skills docs](https://opencode.ai/docs/skills/), [pinned skill loader 1.18.31](https://github.com/sst/opencode/blob/v1.18.31/packages/opencode/src/skill/index.ts), [#104 research](https://github.com/AlligatorT/SkillsPub/issues/104#issuecomment-5470909113), [#113 launch evidence](https://github.com/AlligatorT/SkillsPub/issues/113#issuecomment-5531242966) |
 | Codex | 官方 user root 为 `$HOME/.agents/skills`；`$CODEX_HOME/skills` 为 deprecated 兼容位置；Project `.codex/skills`；symlink 跟随；无 root-level Shared exclusion | v0.2 `discoverable` Adapter；Shared `required`；自有 Global/Project Target 可管理；无 isolation write | [Agent Skills](https://developers.openai.com/codex/skills), [pinned host_roots.rs 0.154.0](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/ext/skills/src/host_roots.rs), [#103 research](https://github.com/AlligatorT/SkillsPub/issues/103#issuecomment-5470908872) |
 | Kimi Code | roots、precedence、schema、symlink 与 next-session 有证据；替换自动 Shared discovery 依赖每次启动的 `--skills-dir` | `discoverable` roadmap candidate；v0.1 无 Adapter，no-launcher boundary 下不 promotion | [research resolution](https://github.com/AlligatorT/SkillsPub/issues/105#issuecomment-5470909355), [launch evidence](https://github.com/AlligatorT/SkillsPub/issues/113#issuecomment-5531242966) |
 | TraeCode | International product 有 native Global/Project roots 与 opt-in Project Shared evidence | `discoverable` roadmap candidate；toggle/schema/precedence/recovery/regional parity/real-machine evidence 不足，v0.1 无 Adapter | [research resolution](https://github.com/AlligatorT/SkillsPub/issues/107#issuecomment-5470909721) |
