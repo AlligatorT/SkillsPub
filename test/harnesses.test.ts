@@ -69,7 +69,7 @@ function setup(): {
         discoveryRoot: path.join(codexHome, 'skills'),
         parkingRoot: path.join(codexHome, '.skillspub-off', 'skills'),
         projectPath: '.codex/skills',
-        relationship: { support: 'managed', link: 'supported' },
+        relationship: { support: 'discoverable', link: 'supported' },
       },
     ],
   };
@@ -156,7 +156,7 @@ test('Codex Target honors CODEX_HOME and keeps the deprecated user root as its S
     assert.equal(target.discoveryRoot, path.join(root, 'skills'));
     assert.equal(target.parkingRoot, path.join(root, '.skillspub-off', 'skills'));
     assert.equal(target.projectPath, '.codex/skills');
-    assert.deepEqual(target.relationship, { support: 'managed', link: 'supported' });
+    assert.deepEqual(target.relationship, { support: 'discoverable', link: 'supported' });
   } finally {
     if (previous === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previous;

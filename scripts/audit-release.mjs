@@ -49,6 +49,7 @@ assert.deepEqual(
     .sort(([left], [right]) => left.localeCompare(right)),
   [
     ['claude', 'managed'],
+    ['codex', 'discoverable'],
     ['grok', 'managed'],
     ['pi', 'managed'],
   ],

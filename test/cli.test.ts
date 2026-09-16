@@ -611,7 +611,7 @@ test('legacy migration previews and adds built-in Targets introduced after runti
     discoveryRoot: path.join(userHome, '.codex', 'skills'),
     parkingRoot: path.join(userHome, '.codex', '.skillspub-off', 'skills'),
     projectPath: '.codex/skills',
-    relationship: { support: 'managed', link: 'supported' },
+    relationship: { support: 'discoverable', link: 'supported' },
   }]);
   assert.equal(previewData.plan.overrides.some(({ key, disabled }: { key: string; disabled?: true }) =>
     key === 'grok' && disabled), false);

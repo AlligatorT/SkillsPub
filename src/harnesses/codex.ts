@@ -35,7 +35,7 @@ export const codexAdapter: HarnessAdapter = {
       discoveryRoot: path.join(root, 'skills'),
       parkingRoot: path.join(root, '.skillspub-off', 'skills'),
       projectPath: '.codex/skills',
-      relationship: { support: 'managed', link: 'supported' },
+      relationship: { support: 'discoverable', link: 'supported' },
     };
   },
   inspect(_home, targets, projectPath) {
