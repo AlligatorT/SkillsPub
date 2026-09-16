@@ -437,7 +437,9 @@ test('Source Global empty Catalog explains lifecycle, scope isolation, and expli
 
 test('Source Global empty Catalog stays explanatory in a narrow terminal', async () => {
   const {home} = setup();
-  const t = await renderApp(home, 52, 32);
+  // 44 rows: the key area takes 3 more rows than the old one-line footer,
+  // and the narrow layout stacks the detail block below the list.
+  const t = await renderApp(home, 52, 44);
 
   await t.send('3');
   const frame = t.stdout.frame();
@@ -474,7 +476,7 @@ test('Source Catalog search replaces the explanatory empty state with identified
       '└ https://skills.sh/owner/one/shared-name',
     ].join('\n'),
   });
-  const t = await renderApp(fixture.home, 52, 32);
+  const t = await renderApp(fixture.home, 52, 44);
 
   await t.send('3');
   assert.match(t.stdout.frame(), /No remote candidates loaded/);
@@ -808,11 +810,14 @@ test('Source Add and explicit Replace run A+C preview, cancellation, confirmatio
     assert.match(frame, /consume-replacement/);
     assert.match(frame, /mirror-sync/);
     assert.match(frame, /queued/);
+    // The key area shrank the preview viewport by a row; scroll once for the rest.
+    await t.send('j');
+    frame = t.stdout.frame();
     assert.match(frame, /Tags: reviewed/);
     assert.match(frame, /Bundles: tools/);
     assert.match(frame, /Preset claims: preset:work/);
     await t.send('j');
-    assert.match(t.stdout.frame(), /Source Replace plan \[2\//);
+    assert.match(t.stdout.frame(), /Source Replace plan \[3\//);
     await t.send('k');
     await t.send('\x1b');
     assert.doesNotMatch(t.stdout.frame(), /Source Replace plan/);
@@ -2094,7 +2099,9 @@ test('TUI separates Harness capability from current state in the target list and
     genericTargets: [],
   }));
 
-  const t = await renderApp({ configDir });
+  // 34 rows: the Harness capability block plus the key area exceeds the
+  // default 30-row terminal; the Info column clips at the bottom.
+  const t = await renderApp({ configDir }, 100, 34);
   let frame = t.stdout.frame();
   assert.doesNotMatch(frame, /Detected Harnesses|Skill Targets/);
   assert.match(frame, /pi\s+\[manageable\]/);
@@ -2152,7 +2159,7 @@ test('TUI reports Grok managed Mirror capability without writing Grok files', as
   }));
   const before = fs.readdirSync(configDir, { recursive: true }).sort();
 
-  const t = await renderApp({ configDir });
+  const t = await renderApp({ configDir }, 100, 34);
   await t.send('j');
   const frame = t.stdout.frame();
   assert.match(frame, /Harness:\s*Grok Build/);
@@ -2237,12 +2244,61 @@ test('footer reflects available navigation actions and modal state', async () =>
   assert.match(t.stdout.frame(), /s sort:Name/);
   assert.match(t.stdout.frame(), /R refresh/);
   // Space operates the selected Skill × Target cell even while the list has focus.
-  assert.match(t.stdout.frame().split('\n').pop() ?? '', /space off/);
+  assert.match(t.stdout.frame(), /space off/);
   await t.send('l');
   assert.match(t.stdout.frame(), /enter SKILL\.md/);
   await t.send('\r');
   assert.match(t.stdout.frame(), /esc close/);
   assert.doesNotMatch(t.stdout.frame(), /R refresh/);
+  t.unmount();
+});
+
+test('key area groups context-appropriate keys below a divider', async () => {
+  const { home } = setup();
+  const t = await renderApp(home);
+  let frame = t.stdout.frame();
+  // dedicated area under a divider, one labeled line per group
+  assert.match(frame, /─+\n target:targets {2}←→\/hl {2}↑↓\/jk/);
+  assert.match(frame, /Actions {2}space off {2}enter details {2}m manage/);
+  assert.match(frame, /View {2}\/ search {2}s sort:Name {2}R refresh/);
+  assert.match(frame, /Workspace {2}tab {2}1\/2\/3 workspace {2}q/);
+  // tab switch re-projects the location group
+  await t.send('\t');
+  frame = t.stdout.frame();
+  assert.match(frame, / skill:skills {2}←→\/hl/);
+  // a modal replaces the matrix groups with its own keys
+  await t.send('\r');
+  frame = t.stdout.frame();
+  assert.match(frame, / ↑↓\/jk scroll {2}PgUp\/PgDn page {2}esc close/);
+  assert.doesNotMatch(frame, /Workspace/);
+  await t.send('\x1b');
+  frame = t.stdout.frame();
+  assert.match(frame, /Workspace {2}tab {2}1\/2\/3 workspace {2}q/);
+  // batch mode exposes its own keys plus the fallthrough navigation keys
+  await t.send('v');
+  frame = t.stdout.frame();
+  assert.match(frame, /0 marked {2}v\/esc exit {2}space mark {2}o on {2}O off {2}t tag {2}T untag {2}↑↓\/jk move/);
+  // search input wins over batch hints, mirroring input-handler priority
+  await t.send('/');
+  frame = t.stdout.frame();
+  assert.match(frame, / search: … {2}enter apply {2}esc clear/);
+  assert.doesNotMatch(frame, /space mark/);
+  await t.send('\x1b');
+  await t.send('v');
+  t.unmount();
+});
+
+test('main viewport keeps scrolling after the key area shrinks it', async () => {
+  const { home } = setup();
+  const a = path.join(home.configDir, 'a-skills');
+  for (let i = 1; i <= 20; i++) mkSkill(a, `scroll-${String(i).padStart(2, '0')}`);
+  const t = await renderApp(home, 100, 16);
+  await t.send('l');
+  for (let i = 0; i < 30; i++) await t.send('j');
+  const frame = t.stdout.frame();
+  // the last entry is reachable and the first scrolled out of the shrunken list
+  assert.match(frame, /scroll-20/);
+  assert.doesNotMatch(frame, /broken/);
   t.unmount();
 });
 
