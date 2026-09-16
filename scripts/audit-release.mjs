@@ -52,6 +52,7 @@ assert.deepEqual(
     ['codex', 'discoverable'],
     ['cursor', 'discoverable'],
     ['grok', 'managed'],
+    ['hermes', 'discoverable'],
     ['pi', 'managed'],
   ],
   'v0.1.0 Harness boundary changed',

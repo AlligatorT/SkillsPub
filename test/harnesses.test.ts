@@ -8,6 +8,7 @@ import { inspectHarnesses, planHarnessOperation } from '../src/harnesses/registr
 import { codexAdapter } from '../src/harnesses/codex.ts';
 import { cursorAdapter } from '../src/harnesses/cursor.ts';
 import { grokAdapter } from '../src/harnesses/grok.ts';
+import { hermesAdapter } from '../src/harnesses/hermes.ts';
 import { piAdapter } from '../src/harnesses/pi.ts';
 import type { Home } from '../src/core.ts';
 import { scanGlobalInventory, type SkillTarget } from '../src/inventory.ts';
@@ -20,6 +21,7 @@ function setup(): {
   grokHome: string;
   codexHome: string;
   cursorHome: string;
+  hermesHome: string;
   shared: string;
 } {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-harnesses-'));
@@ -28,6 +30,7 @@ function setup(): {
   const grokHome = path.join(configDir, 'grok');
   const codexHome = path.join(configDir, 'codex');
   const cursorHome = path.join(configDir, 'cursor');
+  const hermesHome = path.join(configDir, 'hermes');
   const shared = path.join(configDir, 'agents', 'skills');
   return {
     home: { configDir },
@@ -36,6 +39,7 @@ function setup(): {
     grokHome,
     codexHome,
     cursorHome,
+    hermesHome,
     shared,
     targets: [
       {
@@ -81,6 +85,14 @@ function setup(): {
         discoveryRoot: path.join(cursorHome, 'skills'),
         parkingRoot: path.join(cursorHome, '.skillspub-off', 'skills'),
         projectPath: '.cursor/skills',
+        relationship: { support: 'discoverable', link: 'supported' },
+      },
+      {
+        key: 'hermes',
+        kind: 'harness',
+        discoveryRoot: path.join(hermesHome, 'skills'),
+        parkingRoot: path.join(hermesHome, '.skillspub-off', 'skills'),
+        projectPath: '.hermes/skills',
         relationship: { support: 'discoverable', link: 'supported' },
       },
     ],
@@ -271,6 +283,73 @@ test('Cursor inspection reports required Shared consumption without configuratio
   const scanned = scanGlobalInventory(home, targets, { persist: false });
   assert.ok(scanned.relationships.some((relationship) =>
     relationship.targetKey === 'cursor' && relationship.slot === 'demo' && relationship.activation === 'on'));
+  assert.deepEqual(fs.readdirSync(home.configDir, { recursive: true }).sort(), before);
+});
+
+test('Hermes Target honors HERMES_HOME and keeps ~/.hermes/skills as its Skill Target', () => {
+  const previous = process.env.HERMES_HOME;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-hermes-home-'));
+  process.env.HERMES_HOME = root;
+  try {
+    const target = hermesAdapter.targetDefinition();
+    assert.equal(target.discoveryRoot, path.join(root, 'skills'));
+    assert.equal(target.parkingRoot, path.join(root, '.skillspub-off', 'skills'));
+    assert.equal(target.projectPath, '.hermes/skills');
+    assert.deepEqual(target.relationship, { support: 'discoverable', link: 'supported' });
+  } finally {
+    if (previous === undefined) delete process.env.HERMES_HOME;
+    else process.env.HERMES_HOME = previous;
+  }
+});
+
+test('Hermes inspection reports not-consumed Shared without configuration writes', () => {
+  const { home, targets, hermesHome, shared } = setup();
+  const project = path.join(home.configDir, 'project');
+  fs.mkdirSync(hermesHome, { recursive: true });
+  fs.mkdirSync(path.join(project, '.hermes'), { recursive: true });
+  const skillRoot = path.join(hermesHome, 'skills', 'demo');
+  fs.mkdirSync(skillRoot, { recursive: true });
+  fs.copyFileSync(
+    path.join(import.meta.dirname, 'fixtures/hermes/demo/SKILL.md'),
+    path.join(skillRoot, 'SKILL.md'),
+  );
+  const before = fs.readdirSync(home.configDir, { recursive: true }).sort();
+
+  const hermes = inspectHarnesses(home, targets, project).detected
+    .find(({ key }) => key === 'hermes');
+
+  assert.equal(hermes?.name, 'Hermes');
+  assert.equal(hermes?.support, 'discoverable');
+  assert.equal(hermes?.sharedConsumption.status, 'not-consumed');
+  assert.match(hermes?.sharedConsumption.detail ?? '', /does not invent a block/i);
+  assert.equal(hermes?.isolation.status, 'not-required');
+  assert.equal(hermes?.link.supported, true);
+  assert.deepEqual(hermes?.targets, [
+    { scope: 'global', discoveryRoot: path.join(hermesHome, 'skills') },
+    { scope: 'project', discoveryRoot: path.join(project, '.hermes', 'skills') },
+  ]);
+  assert.equal(
+    hermes?.roots.find(({ kind, scope }) => kind === 'shared' && scope === 'global')?.consumption,
+    'excluded',
+  );
+  assert.equal(
+    hermes?.roots.find(({ kind, scope }) => kind === 'shared' && scope === 'global')?.discoveryRoot,
+    shared,
+  );
+  assert.equal(
+    hermes?.roots.find(({ kind, scope }) => kind === 'shared' && scope === 'project')?.consumption,
+    'unknown',
+  );
+  assert.ok(hermes?.evidence.some(({ url }) =>
+    url === 'https://hermes-agent.nousresearch.com/docs/user-guide/features/skills'));
+  assert.ok(hermes?.evidence.some(({ url }) =>
+    url === 'https://github.com/NousResearch/hermes-agent/blob/v2026.9.14/agent/skill_utils.py'));
+  assert.ok(hermes?.evidence.every(({ verifiedVersion }) => verifiedVersion === '0.21.3'));
+  assert.deepEqual(fs.readdirSync(home.configDir, { recursive: true }).sort(), before);
+
+  const scanned = scanGlobalInventory(home, targets, { persist: false });
+  assert.ok(scanned.relationships.some((relationship) =>
+    relationship.targetKey === 'hermes' && relationship.slot === 'demo' && relationship.activation === 'on'));
   assert.deepEqual(fs.readdirSync(home.configDir, { recursive: true }).sort(), before);
 });
 
@@ -613,6 +692,10 @@ test('Harness operation dispatch reports unsupported optional capabilities', () 
   assert.throws(
     () => planHarnessOperation('cursor', 'setup', home, targets),
     /Cursor does not support setup.*no configuration write is required/i,
+  );
+  assert.throws(
+    () => planHarnessOperation('hermes', 'setup', home, targets),
+    /Hermes does not support setup.*no configuration write is required/i,
   );
   assert.throws(
     () => planHarnessOperation('missing', 'setup', home, targets),

@@ -64,6 +64,7 @@ test('explain resolves one installed resource for every built-in Harness without
     'codex',
     'cursor',
     'grok',
+    'hermes',
     'pi',
   ]);
   assert.equal(document.data.harnesses.find((harness: { key: string }) => harness.key === 'pi')
