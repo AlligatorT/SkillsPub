@@ -61,6 +61,7 @@ test('explain resolves one installed resource for every built-in Harness without
   assert.equal(document.data.scope.kind, 'global');
   assert.deepEqual(document.data.harnesses.map((harness: { key: string }) => harness.key).sort(), [
     'claude',
+    'codex',
     'grok',
     'pi',
   ]);

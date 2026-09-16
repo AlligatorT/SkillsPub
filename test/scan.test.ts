@@ -641,6 +641,7 @@ test('Target migration previews legacy Runtime overrides and Generic Targets wit
   ]);
   assert.deepEqual(plan.introducedDefinitions.map(({ key, kind }) => ({ key, kind })), [
     { key: 'grok', kind: 'harness' },
+    { key: 'codex', kind: 'harness' },
   ]);
   assert.deepEqual(plan.genericTargets.map(({ key, kind, discoveryRoot }) => ({ key, kind, discoveryRoot })), [
     { key: 'other', kind: 'generic', discoveryRoot: genericRoot },
@@ -661,7 +662,13 @@ test('Target migration previews legacy Runtime overrides and Generic Targets wit
         kind: 'harness',
         discoveryRoot: defaultTargetDefinitions().find(({ key }) => key === 'grok')!.discoveryRoot,
       },
-      ...expectedTargets,
+      expectedTargets[0],
+      {
+        key: 'codex',
+        kind: 'harness',
+        discoveryRoot: defaultTargetDefinitions().find(({ key }) => key === 'codex')!.discoveryRoot,
+      },
+      expectedTargets[1],
     ],
   );
   assert.equal(planTargetMigration(home).status, 'already-migrated');

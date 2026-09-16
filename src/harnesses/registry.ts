@@ -1,6 +1,7 @@
 import type { Home } from '../core.ts';
 import type { SkillTarget } from '../inventory.ts';
 import { claudeAdapter } from './claude.ts';
+import { codexAdapter } from './codex.ts';
 import { grokAdapter } from './grok.ts';
 import { piAdapter } from './pi.ts';
 import type {
@@ -10,7 +11,7 @@ import type {
   HarnessOperationPlan,
 } from './types.ts';
 
-const adapters: readonly HarnessAdapter[] = [claudeAdapter, grokAdapter, piAdapter];
+const adapters: readonly HarnessAdapter[] = [claudeAdapter, grokAdapter, piAdapter, codexAdapter];
 
 export function harnessAdapters(): readonly HarnessAdapter[] {
   return adapters;
