@@ -94,6 +94,7 @@ function setupVisibilityTui({grokDetected = true} = {}) {
     claude: path.join(configDir, 'claude', 'skills'),
     grok: path.join(configDir, 'grok', 'skills'),
     codex: path.join(configDir, 'codex', 'skills'),
+    cursor: path.join(configDir, 'cursor', 'skills'),
   };
   fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
     version: 1,
@@ -198,6 +199,7 @@ function setupManagedTui(skills: ManagedTuiSkill[], projectScope = false) {
       {key: 'grok', disabled: true},
       {key: 'pi', disabled: true},
       {key: 'codex', disabled: true},
+      {key: 'cursor', disabled: true},
       {
         key: 'shared',
         discoveryRoot: path.join(userHome, '.agents', 'skills'),
@@ -2006,6 +2008,7 @@ test('TUI separates Harness capability from current state in the target list and
       { key: 'claude', disabled: true },
       { key: 'grok', disabled: true },
       { key: 'codex', disabled: true },
+      { key: 'cursor', disabled: true },
       {
         key: 'pi',
         discoveryRoot: path.join(piHome, 'agent', 'skills'),
@@ -2062,6 +2065,7 @@ test('TUI reports Grok managed Mirror capability without writing Grok files', as
       { key: 'claude', disabled: true },
       { key: 'pi', disabled: true },
       { key: 'codex', disabled: true },
+      { key: 'cursor', disabled: true },
       {
         key: 'grok',
         discoveryRoot: path.join(grokHome, 'skills'),
@@ -2097,6 +2101,7 @@ test('TUI keeps undetected Harnesses in a compact Available section', async () =
       { key: 'claude', disabled: true },
       { key: 'grok', disabled: true },
       { key: 'codex', disabled: true },
+      { key: 'cursor', disabled: true },
       {
         key: 'pi',
         discoveryRoot: path.join(piHome, 'agent', 'skills'),
@@ -2132,7 +2137,7 @@ test('narrow TUI opens Harness details from a selected Target', async () => {
   fs.mkdirSync(path.join(piHome, 'agent'), { recursive: true });
   fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
     version: 1,
-    overrides: [{ key: 'claude', disabled: true }, { key: 'grok', disabled: true }, { key: 'codex', disabled: true }, {
+    overrides: [{ key: 'claude', disabled: true }, { key: 'grok', disabled: true }, { key: 'codex', disabled: true }, { key: 'cursor', disabled: true }, {
       key: 'pi',
       discoveryRoot: path.join(piHome, 'agent', 'skills'),
       parkingRoot: path.join(piHome, 'agent', '.skillspub-off', 'skills'),
@@ -2178,6 +2183,7 @@ test('Skill detail shows every built-in Effective Visibility result and not-dete
   assert.match(frame, /Grok Build: unknown/);
   assert.match(frame, /Pi: visible/);
   assert.match(frame, /Codex: unknown/);
+  assert.match(frame, /Cursor: unknown/);
   assert.match(frame, /e explain/);
   t.unmount();
 
@@ -2197,7 +2203,7 @@ test('Explain modal projects evidence and read-only visible/hidden plans for eac
   await t.send('e');
 
   let frame = t.stdout.frame();
-  assert.match(frame, /Explain — demo — Claude Code \[1\/4\]/);
+  assert.match(frame, /Explain — demo — Claude Code \[1\/5\]/);
   assert.match(frame, /Result: not-visible/);
   assert.match(frame, /Adapter support: managed/);
   assert.match(frame, /Shared consumption: not-consumed/);
@@ -2220,7 +2226,7 @@ test('Explain modal projects evidence and read-only visible/hidden plans for eac
 
   await t.send('\t');
   frame = t.stdout.frame();
-  assert.match(frame, /Explain — demo — Grok Build \[2\/4\]/);
+  assert.match(frame, /Explain — demo — Grok Build \[2\/5\]/);
   assert.match(frame, /Result: unknown/);
   for (let i = 0; i < 10; i++) await t.send('j');
   frame = t.stdout.frame();
@@ -2232,7 +2238,7 @@ test('Explain modal projects evidence and read-only visible/hidden plans for eac
 
   await t.send('\t');
   frame = t.stdout.frame();
-  assert.match(frame, /Explain — demo — Pi \[3\/4\]/);
+  assert.match(frame, /Explain — demo — Pi \[3\/5\]/);
   assert.match(frame, /Result: visible/);
   assert.match(frame, /Adapter support: managed/);
   assert.match(frame, /Shared consumption: excluded/);

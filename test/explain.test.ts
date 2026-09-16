@@ -62,6 +62,7 @@ test('explain resolves one installed resource for every built-in Harness without
   assert.deepEqual(document.data.harnesses.map((harness: { key: string }) => harness.key).sort(), [
     'claude',
     'codex',
+    'cursor',
     'grok',
     'pi',
   ]);
@@ -273,6 +274,10 @@ test('managed Pi blocks hidden plans before guessing from malformed Preset state
 
 test('unreadable compatibility roots make Grok visibility unknown', () => {
   const { configDir, roots, resource, run } = setup();
+  const targetFile = path.join(configDir, 'targets.json');
+  const registry = JSON.parse(fs.readFileSync(targetFile, 'utf8'));
+  registry.overrides.push({ key: 'cursor', disabled: true });
+  fs.writeFileSync(targetFile, JSON.stringify(registry));
   fs.mkdirSync(path.dirname(roots.grok), { recursive: true });
   fs.writeFileSync(path.join(path.dirname(roots.grok), 'config.toml'), [
     '[skills]',

@@ -10,6 +10,7 @@ src/harnesses/registry.ts    检测并调用内置 Harness Adapters
 src/harnesses/pi.ts          Pi 专属知识
 src/harnesses/grok.ts        Grok Build 专属知识
 src/harnesses/codex.ts       Codex 专属知识（required-Shared 样板）
+src/harnesses/cursor.ts      Cursor 专属知识（required-Shared）
 src/harnesses/<name>.ts      后续内置 Harness Adapter
 src/sources/npx-skills.ts    固定版本的 npx skills Source Adapter
 src/inventory.ts             通用 Target/Slot/Relationship 扫描
@@ -211,6 +212,21 @@ Support 保持 `discoverable`：required Shared 使该 Harness 不能达到 `man
 
 官方证据：[Agent Skills](https://developers.openai.com/codex/skills)（verifiedVersion `0.154.0`）、[pinned host_roots.rs rust-v0.154.0](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/ext/skills/src/host_roots.rs)。
 
+## Cursor v0.2 required-Shared Adapter
+
+v0.2 为 Cursor 增加 `discoverable` Adapter（#171）。Shared consumption 如实报告 `required`，不做阻断 hack；自有 Target 仍走通用 ON/OFF/批量/Project inventory。
+
+### Targets
+
+- Global Target：`~/.cursor/skills`。
+- Canonical user Shared root：`$HOME/.agents/skills`（Shared Target）。官方文档无 root-level exclusion。IDE 的 third-party compatibility 开关不当作 Shared Target isolation。
+- Project Target：所选项目的 `.cursor/skills`。
+- Repository Shared：所选项目的 `.agents/skills`。Adapter 不把 Claude/Codex compatibility 目录或 bundled `~/.cursor/skills-cursor` 做成可写 Target。
+
+Support 保持 `discoverable`：required Shared 使该 Harness 不能达到 `managed`。无 setup/reconcile。Skills 以 `SKILL.md` 目录发现，Link capability 为 supported。
+
+官方证据：[Agent Skills](https://cursor.com/docs/skills)（verifiedVersion `docs-2026-09-10`）、[Skills help](https://cursor.com/help/customization/skills)。
+
 ## v0.1 no-launcher boundary and empty additional shortlist
 
 SkillsPub 不拥有 Harness startup。v0.1 不增加 wrapper command、OS persistent environment provisioning、per-entry-point environment/argument profiles、IDE/GUI/daemon/service/remote/container launch integration，也不建立 Launch Profile identity、Desired state、Drift、backup 或 recovery model。already-running process 永远不被当作 reload；依赖 process environment、arguments 或特定 launcher 的 consumption 在未受控 entry point 下为 `unknown`。
@@ -218,6 +234,8 @@ SkillsPub 不拥有 Harness startup。v0.1 不增加 wrapper command、OS persis
 Harness 只有在自己的 persistent filesystem/configuration seam 允许 SkillsPub 完整 inspect、reconcile、verify 与 recover claimed consumption boundary 时才可为 `managed`。因此 v0.1 additional Managed Harness shortlist 为零：
 
 - OpenCode、Kimi Code、TraeCode 保持 evidence-backed `discoverable` compatibility-roadmap candidates，不实现 runtime Adapter；Codex 在 v0.2 有 `discoverable` Adapter（#170），Shared `required`，仍不能 promotion 为 `managed`；
+- Cursor 在 v0.2 有 `discoverable` Adapter（#171），Shared `required`，仍不能 promotion 为 `managed`；
+
 - WorkBuddy 保持 `unsupported`，不根据未合并 patch 猜 `.workbuddy/skills`；
 - adoption、path table、partial discovery 与 launch-scoped control 都不能替代 Managed evidence bar。
 
@@ -232,6 +250,7 @@ Harness 只有在自己的 persistent filesystem/configuration seam 允许 Skill
 | Pi | Pi roots 与 `.agents/skills` 共用 matcher；root-specific absolute exclusions 可在 canonical dedupe 前只排除 Shared alias | `managed`；Global/exact-Project isolation 可独立为 `enabled` 或 `excluded`，并保留 Pi Target Relationships | [#109 failed machine chain](https://github.com/AlligatorT/SkillsPub/issues/109#issuecomment-5532175662), [#115 decision](https://github.com/AlligatorT/SkillsPub/issues/115#issuecomment-5543708195), [#127 Pi 0.85.1 real-machine acceptance](https://github.com/AlligatorT/SkillsPub/issues/127), [pinned research](https://github.com/AlligatorT/SkillsPub/blob/4f6ae8d62bf1c4182ec70682b4ff755435dcfab5/docs/research/pi-shared-skill-root-isolation-0.84.4.md), [Pi 0.85.1 skills docs](https://github.com/earendil-works/pi/blob/v0.85.1/packages/coding-agent/docs/skills.md) |
 | Claude Code | Personal/Project `.claude/skills` 支持 symlink；accepted Adapter contract 不消费 Shared | `managed`；Shared `not-consumed`、isolation `not-required`，不增加配置写入；只解释 next load | [Skills](https://docs.anthropic.com/en/docs/claude-code/skills), [Settings](https://docs.anthropic.com/en/docs/claude-code/settings), [#112 contract](https://github.com/AlligatorT/SkillsPub/issues/112#issuecomment-5547687525) |
 | Grok Build | `$GROK_HOME/skills`、Project/ancestor `.grok/skills`、Shared 与 Claude/Cursor compatible roots；canonical ignore 可隔离 Shared | 保持 `managed/excluded`；Global/Project setup/reconcile 必须完整显示 Relationship impact 与 recovery | [settings](https://docs.x.ai/build/settings/reference), [skills](https://docs.x.ai/build/features/skills-plugins-marketplaces), [pinned source](https://github.com/xai-org/grok-build/blob/19d42e35c07a9c9244f03f6df0c4c353f970d4f9/crates/codegen/xai-grok-agent/src/prompt/skills.rs), [#109 machine evidence](https://github.com/AlligatorT/SkillsPub/issues/109#issuecomment-5532175662) |
+| Cursor | 官方 user root 为 `~/.cursor/skills`；Project `.cursor/skills`；同时消费 Shared `~/.agents/skills` 与项目 `.agents/skills`；无 root-level Shared exclusion | v0.2 `discoverable` Adapter；Shared `required`；自有 Global/Project Target 可管理；无 isolation write | [Agent Skills](https://cursor.com/docs/skills), [Skills help](https://cursor.com/help/customization/skills), [#171](https://github.com/AlligatorT/SkillsPub/issues/171) |
 | OpenCode | Native/Shared/vendor roots 强；完整 isolation 依赖 actual process 的 environment flag | `discoverable` roadmap candidate；v0.1 无 Adapter，no-launcher boundary 下不 promotion | [research resolution](https://github.com/AlligatorT/SkillsPub/issues/104#issuecomment-5470909113), [launch evidence](https://github.com/AlligatorT/SkillsPub/issues/113#issuecomment-5531242966) |
 | Codex | 官方 user root 为 `$HOME/.agents/skills`；`$CODEX_HOME/skills` 为 deprecated 兼容位置；Project `.codex/skills`；symlink 跟随；无 root-level Shared exclusion | v0.2 `discoverable` Adapter；Shared `required`；自有 Global/Project Target 可管理；无 isolation write | [Agent Skills](https://developers.openai.com/codex/skills), [pinned host_roots.rs 0.154.0](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/ext/skills/src/host_roots.rs), [#103 research](https://github.com/AlligatorT/SkillsPub/issues/103#issuecomment-5470908872) |
 | Kimi Code | roots、precedence、schema、symlink 与 next-session 有证据；替换自动 Shared discovery 依赖每次启动的 `--skills-dir` | `discoverable` roadmap candidate；v0.1 无 Adapter，no-launcher boundary 下不 promotion | [research resolution](https://github.com/AlligatorT/SkillsPub/issues/105#issuecomment-5470909355), [launch evidence](https://github.com/AlligatorT/SkillsPub/issues/113#issuecomment-5531242966) |
