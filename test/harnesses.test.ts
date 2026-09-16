@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { inspectHarnesses, planHarnessOperation } from '../src/harnesses/registry.ts';
 import { codexAdapter } from '../src/harnesses/codex.ts';
+import { cursorAdapter } from '../src/harnesses/cursor.ts';
 import { grokAdapter } from '../src/harnesses/grok.ts';
 import { piAdapter } from '../src/harnesses/pi.ts';
 import type { Home } from '../src/core.ts';
@@ -18,6 +19,7 @@ function setup(): {
   claudeHome: string;
   grokHome: string;
   codexHome: string;
+  cursorHome: string;
   shared: string;
 } {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-harnesses-'));
@@ -25,6 +27,7 @@ function setup(): {
   const claudeHome = path.join(configDir, 'claude');
   const grokHome = path.join(configDir, 'grok');
   const codexHome = path.join(configDir, 'codex');
+  const cursorHome = path.join(configDir, 'cursor');
   const shared = path.join(configDir, 'agents', 'skills');
   return {
     home: { configDir },
@@ -32,6 +35,7 @@ function setup(): {
     claudeHome,
     grokHome,
     codexHome,
+    cursorHome,
     shared,
     targets: [
       {
@@ -69,6 +73,14 @@ function setup(): {
         discoveryRoot: path.join(codexHome, 'skills'),
         parkingRoot: path.join(codexHome, '.skillspub-off', 'skills'),
         projectPath: '.codex/skills',
+        relationship: { support: 'discoverable', link: 'supported' },
+      },
+      {
+        key: 'cursor',
+        kind: 'harness',
+        discoveryRoot: path.join(cursorHome, 'skills'),
+        parkingRoot: path.join(cursorHome, '.skillspub-off', 'skills'),
+        projectPath: '.cursor/skills',
         relationship: { support: 'discoverable', link: 'supported' },
       },
     ],
@@ -206,6 +218,59 @@ test('Codex inspection reports required Shared consumption without configuration
   const scanned = scanGlobalInventory(home, targets, { persist: false });
   assert.ok(scanned.relationships.some((relationship) =>
     relationship.targetKey === 'codex' && relationship.slot === 'demo' && relationship.activation === 'on'));
+  assert.deepEqual(fs.readdirSync(home.configDir, { recursive: true }).sort(), before);
+});
+
+test('Cursor Target uses ~/.cursor/skills and keeps Link supported', () => {
+  const target = cursorAdapter.targetDefinition();
+  assert.equal(target.discoveryRoot, path.join(os.homedir(), '.cursor', 'skills'));
+  assert.equal(target.parkingRoot, path.join(os.homedir(), '.cursor', '.skillspub-off', 'skills'));
+  assert.equal(target.projectPath, '.cursor/skills');
+  assert.deepEqual(target.relationship, { support: 'discoverable', link: 'supported' });
+});
+
+test('Cursor inspection reports required Shared consumption without configuration writes', () => {
+  const { home, targets, cursorHome, shared } = setup();
+  const project = path.join(home.configDir, 'project');
+  fs.mkdirSync(cursorHome, { recursive: true });
+  fs.mkdirSync(path.join(project, '.cursor'), { recursive: true });
+  const skillRoot = path.join(cursorHome, 'skills', 'demo');
+  fs.mkdirSync(skillRoot, { recursive: true });
+  fs.copyFileSync(
+    path.join(import.meta.dirname, 'fixtures/cursor/demo/SKILL.md'),
+    path.join(skillRoot, 'SKILL.md'),
+  );
+  const before = fs.readdirSync(home.configDir, { recursive: true }).sort();
+
+  const cursor = inspectHarnesses(home, targets, project).detected
+    .find(({ key }) => key === 'cursor');
+
+  assert.equal(cursor?.name, 'Cursor');
+  assert.equal(cursor?.support, 'discoverable');
+  assert.equal(cursor?.sharedConsumption.status, 'required');
+  assert.match(cursor?.sharedConsumption.detail ?? '', /does not invent a block/i);
+  assert.equal(cursor?.isolation.status, 'unmanaged');
+  assert.equal(cursor?.link.supported, true);
+  assert.deepEqual(cursor?.targets, [
+    { scope: 'global', discoveryRoot: path.join(cursorHome, 'skills') },
+    { scope: 'project', discoveryRoot: path.join(project, '.cursor', 'skills') },
+  ]);
+  assert.equal(
+    cursor?.roots.find(({ kind, scope }) => kind === 'shared' && scope === 'global')?.consumption,
+    'consumed',
+  );
+  assert.equal(
+    cursor?.roots.find(({ kind, scope }) => kind === 'shared' && scope === 'global')?.discoveryRoot,
+    shared,
+  );
+  assert.ok(cursor?.evidence.some(({ url }) => url === 'https://cursor.com/docs/skills'));
+  assert.ok(cursor?.evidence.some(({ url }) => url === 'https://cursor.com/help/customization/skills'));
+  assert.ok(cursor?.evidence.every(({ verifiedVersion }) => verifiedVersion === 'docs-2026-09-10'));
+  assert.deepEqual(fs.readdirSync(home.configDir, { recursive: true }).sort(), before);
+
+  const scanned = scanGlobalInventory(home, targets, { persist: false });
+  assert.ok(scanned.relationships.some((relationship) =>
+    relationship.targetKey === 'cursor' && relationship.slot === 'demo' && relationship.activation === 'on'));
   assert.deepEqual(fs.readdirSync(home.configDir, { recursive: true }).sort(), before);
 });
 
@@ -544,6 +609,10 @@ test('Harness operation dispatch reports unsupported optional capabilities', () 
   assert.throws(
     () => planHarnessOperation('codex', 'setup', home, targets),
     /Codex does not support setup.*no configuration write is required/i,
+  );
+  assert.throws(
+    () => planHarnessOperation('cursor', 'setup', home, targets),
+    /Cursor does not support setup.*no configuration write is required/i,
   );
   assert.throws(
     () => planHarnessOperation('missing', 'setup', home, targets),

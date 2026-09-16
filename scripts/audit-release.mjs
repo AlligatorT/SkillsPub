@@ -50,6 +50,7 @@ assert.deepEqual(
   [
     ['claude', 'managed'],
     ['codex', 'discoverable'],
+    ['cursor', 'discoverable'],
     ['grok', 'managed'],
     ['pi', 'managed'],
   ],

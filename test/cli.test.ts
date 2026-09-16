@@ -612,6 +612,13 @@ test('legacy migration previews and adds built-in Targets introduced after runti
     parkingRoot: path.join(userHome, '.codex', '.skillspub-off', 'skills'),
     projectPath: '.codex/skills',
     relationship: { support: 'discoverable', link: 'supported' },
+  }, {
+    key: 'cursor',
+    kind: 'harness',
+    discoveryRoot: path.join(userHome, '.cursor', 'skills'),
+    parkingRoot: path.join(userHome, '.cursor', '.skillspub-off', 'skills'),
+    projectPath: '.cursor/skills',
+    relationship: { support: 'discoverable', link: 'supported' },
   }]);
   assert.equal(previewData.plan.overrides.some(({ key, disabled }: { key: string; disabled?: true }) =>
     key === 'grok' && disabled), false);
@@ -624,7 +631,7 @@ test('legacy migration previews and adds built-in Targets introduced after runti
   const appliedData = JSON.parse(applied.stdout).data;
   assert.deepEqual(appliedData.plan, previewData.plan);
   assert.deepEqual(appliedData.result.targets.map(({ key }: { key: string }) => key), [
-    'claude', 'shared', 'grok', 'pi', 'codex',
+    'claude', 'shared', 'grok', 'pi', 'codex', 'cursor',
   ]);
   const registry = JSON.parse(fs.readFileSync(path.join(configDir, 'targets.json'), 'utf8'));
   assert.equal(registry.overrides.some(({ key }: { key: string }) => key === 'grok'), false);
@@ -723,7 +730,7 @@ test('read-only CLI surfaces merge a detected built-in missing from an older Tar
   };
 
   assert.deepEqual(run('targets').map(({ key }: { key: string }) => key), [
-    'claude', 'shared', 'grok', 'pi', 'codex', 'custom',
+    'claude', 'shared', 'grok', 'pi', 'codex', 'cursor', 'custom',
   ]);
   assert.ok(run('scan').inventory.targets.some(({ key }: { key: string }) => key === 'grok'));
   assert.ok(run('harnesses').detected.some(({ key }: { key: string }) => key === 'grok'));
