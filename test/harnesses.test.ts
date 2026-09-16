@@ -5,10 +5,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { inspectHarnesses, planHarnessOperation } from '../src/harnesses/registry.ts';
+import { codexAdapter } from '../src/harnesses/codex.ts';
 import { grokAdapter } from '../src/harnesses/grok.ts';
 import { piAdapter } from '../src/harnesses/pi.ts';
 import type { Home } from '../src/core.ts';
-import type { SkillTarget } from '../src/inventory.ts';
+import { scanGlobalInventory, type SkillTarget } from '../src/inventory.ts';
 
 function setup(): {
   home: Home;
@@ -16,18 +17,21 @@ function setup(): {
   piHome: string;
   claudeHome: string;
   grokHome: string;
+  codexHome: string;
   shared: string;
 } {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-harnesses-'));
   const piHome = path.join(configDir, 'pi');
   const claudeHome = path.join(configDir, 'claude');
   const grokHome = path.join(configDir, 'grok');
+  const codexHome = path.join(configDir, 'codex');
   const shared = path.join(configDir, 'agents', 'skills');
   return {
     home: { configDir },
     piHome,
     claudeHome,
     grokHome,
+    codexHome,
     shared,
     targets: [
       {
@@ -58,6 +62,14 @@ function setup(): {
         parkingRoot: path.join(grokHome, '.skillspub-off', 'skills'),
         projectPath: '.grok/skills',
         relationship: { support: 'managed', link: 'unsupported' },
+      },
+      {
+        key: 'codex',
+        kind: 'harness',
+        discoveryRoot: path.join(codexHome, 'skills'),
+        parkingRoot: path.join(codexHome, '.skillspub-off', 'skills'),
+        projectPath: '.codex/skills',
+        relationship: { support: 'managed', link: 'supported' },
       },
     ],
   };
@@ -132,6 +144,68 @@ test('Claude Code inspection resolves official Targets without configuration wri
     { scope: 'project', discoveryRoot: path.join(project, '.claude', 'skills') },
   ]);
   assert.ok(claude?.evidence.every(({ url }) => url.startsWith('https://docs.anthropic.com/')));
+  assert.deepEqual(fs.readdirSync(home.configDir, { recursive: true }).sort(), before);
+});
+
+test('Codex Target honors CODEX_HOME and keeps the deprecated user root as its Skill Target', () => {
+  const previous = process.env.CODEX_HOME;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-codex-home-'));
+  process.env.CODEX_HOME = root;
+  try {
+    const target = codexAdapter.targetDefinition();
+    assert.equal(target.discoveryRoot, path.join(root, 'skills'));
+    assert.equal(target.parkingRoot, path.join(root, '.skillspub-off', 'skills'));
+    assert.equal(target.projectPath, '.codex/skills');
+    assert.deepEqual(target.relationship, { support: 'managed', link: 'supported' });
+  } finally {
+    if (previous === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previous;
+  }
+});
+
+test('Codex inspection reports required Shared consumption without configuration writes', () => {
+  const { home, targets, codexHome, shared } = setup();
+  const project = path.join(home.configDir, 'project');
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(path.join(project, '.codex'), { recursive: true });
+  const skillRoot = path.join(codexHome, 'skills', 'demo');
+  fs.mkdirSync(skillRoot, { recursive: true });
+  fs.copyFileSync(
+    path.join(import.meta.dirname, 'fixtures/codex/demo/SKILL.md'),
+    path.join(skillRoot, 'SKILL.md'),
+  );
+  const before = fs.readdirSync(home.configDir, { recursive: true }).sort();
+
+  const codex = inspectHarnesses(home, targets, project).detected
+    .find(({ key }) => key === 'codex');
+
+  assert.equal(codex?.name, 'Codex');
+  assert.equal(codex?.support, 'discoverable');
+  assert.equal(codex?.sharedConsumption.status, 'required');
+  assert.match(codex?.sharedConsumption.detail ?? '', /does not invent a block/i);
+  assert.equal(codex?.isolation.status, 'unmanaged');
+  assert.equal(codex?.link.supported, true);
+  assert.deepEqual(codex?.targets, [
+    { scope: 'global', discoveryRoot: path.join(codexHome, 'skills') },
+    { scope: 'project', discoveryRoot: path.join(project, '.codex', 'skills') },
+  ]);
+  assert.equal(
+    codex?.roots.find(({ kind, scope }) => kind === 'shared' && scope === 'global')?.consumption,
+    'consumed',
+  );
+  assert.equal(
+    codex?.roots.find(({ kind, scope }) => kind === 'shared' && scope === 'global')?.discoveryRoot,
+    shared,
+  );
+  assert.ok(codex?.evidence.some(({ url }) => url === 'https://developers.openai.com/codex/skills'));
+  assert.ok(codex?.evidence.some(({ url }) =>
+    url === 'https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/ext/skills/src/host_roots.rs'));
+  assert.ok(codex?.evidence.every(({ verifiedVersion }) => verifiedVersion === '0.154.0'));
+  assert.deepEqual(fs.readdirSync(home.configDir, { recursive: true }).sort(), before);
+
+  const scanned = scanGlobalInventory(home, targets, { persist: false });
+  assert.ok(scanned.relationships.some((relationship) =>
+    relationship.targetKey === 'codex' && relationship.slot === 'demo' && relationship.activation === 'on'));
   assert.deepEqual(fs.readdirSync(home.configDir, { recursive: true }).sort(), before);
 });
 
@@ -466,6 +540,10 @@ test('Harness operation dispatch reports unsupported optional capabilities', () 
   assert.throws(
     () => planHarnessOperation('claude', 'setup', home, targets),
     /Claude Code does not support setup.*no configuration write is required/i,
+  );
+  assert.throws(
+    () => planHarnessOperation('codex', 'setup', home, targets),
+    /Codex does not support setup.*no configuration write is required/i,
   );
   assert.throws(
     () => planHarnessOperation('missing', 'setup', home, targets),
