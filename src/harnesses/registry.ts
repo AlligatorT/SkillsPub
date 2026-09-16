@@ -4,6 +4,7 @@ import { claudeAdapter } from './claude.ts';
 import { codexAdapter } from './codex.ts';
 import { cursorAdapter } from './cursor.ts';
 import { grokAdapter } from './grok.ts';
+import { hermesAdapter } from './hermes.ts';
 import { piAdapter } from './pi.ts';
 import type {
   HarnessAdapter,
@@ -12,7 +13,7 @@ import type {
   HarnessOperationPlan,
 } from './types.ts';
 
-const adapters: readonly HarnessAdapter[] = [claudeAdapter, grokAdapter, piAdapter, codexAdapter, cursorAdapter];
+const adapters: readonly HarnessAdapter[] = [claudeAdapter, grokAdapter, piAdapter, codexAdapter, cursorAdapter, hermesAdapter];
 
 export function harnessAdapters(): readonly HarnessAdapter[] {
   return adapters;

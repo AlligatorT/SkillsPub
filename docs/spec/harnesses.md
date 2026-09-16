@@ -11,6 +11,7 @@ src/harnesses/pi.ts          Pi 专属知识
 src/harnesses/grok.ts        Grok Build 专属知识
 src/harnesses/codex.ts       Codex 专属知识（required-Shared 样板）
 src/harnesses/cursor.ts      Cursor 专属知识（required-Shared）
+src/harnesses/hermes.ts      Hermes 专属知识（discoverable；Shared 默认不读）
 src/harnesses/<name>.ts      后续内置 Harness Adapter
 src/sources/npx-skills.ts    固定版本的 npx skills Source Adapter
 src/inventory.ts             通用 Target/Slot/Relationship 扫描
@@ -227,6 +228,22 @@ Support 保持 `discoverable`：required Shared 使该 Harness 不能达到 `man
 
 官方证据：[Agent Skills](https://cursor.com/docs/skills)（verifiedVersion `docs-2026-09-10`）、[Skills help](https://cursor.com/help/customization/skills)。
 
+## Hermes v0.2 discoverable Adapter
+
+v0.2 为 Hermes 增加 `discoverable` Adapter（#173）。形状复用 #170 的 inspect-only Adapter：无 setup/reconcile，不做阻断 hack；Shared consumption 按核实结果声明，不把 Codex 的 `required` 套到 Hermes 上。自有 Target 仍走通用 ON/OFF/批量/Project inventory。不抽公共基类，也不实现多 Profile。
+
+### Targets
+
+- Global Target：`$HERMES_HOME/skills`，未设置时为 `~/.hermes/skills`。
+- Canonical user Shared：`$HOME/.agents/skills`。官方 loader 默认不扫描；仅当 `skills.external_dirs` 列出该目录时才消费。Adapter 不解析/写入 `config.yaml`，Shared consumption 按官方默认报告 `not-consumed`。
+- Project Target：所选项目的 `.hermes/skills`。
+- Repository Shared：所选项目的 `.agents/skills`。官方仅在 `hermes skills trust` 之后加载；Adapter 把该 root 标为 `unknown`，不把 trust/launch 门做成可写 isolation。
+- Adapter 不把 named profiles、`optional-skills` 或 hub/org mirrors 做成可写 Target。
+
+Support 保持 `discoverable`：project trust 与 cwd 相关，且 Adapter 不控制 `config.yaml`。官方 `os.walk(..., followlinks=True)` 跟随 skill-folder symlink，Link capability 为 supported。
+
+官方证据：[Skills](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills)（verifiedVersion `0.21.3`）、[pinned skill_utils.py v2026.9.14](https://github.com/NousResearch/hermes-agent/blob/v2026.9.14/agent/skill_utils.py)。
+
 ## v0.1 no-launcher boundary and empty additional shortlist
 
 SkillsPub 不拥有 Harness startup。v0.1 不增加 wrapper command、OS persistent environment provisioning、per-entry-point environment/argument profiles、IDE/GUI/daemon/service/remote/container launch integration，也不建立 Launch Profile identity、Desired state、Drift、backup 或 recovery model。already-running process 永远不被当作 reload；依赖 process environment、arguments 或特定 launcher 的 consumption 在未受控 entry point 下为 `unknown`。
@@ -235,7 +252,7 @@ Harness 只有在自己的 persistent filesystem/configuration seam 允许 Skill
 
 - OpenCode、Kimi Code、TraeCode 保持 evidence-backed `discoverable` compatibility-roadmap candidates，不实现 runtime Adapter；Codex 在 v0.2 有 `discoverable` Adapter（#170），Shared `required`，仍不能 promotion 为 `managed`；
 - Cursor 在 v0.2 有 `discoverable` Adapter（#171），Shared `required`，仍不能 promotion 为 `managed`；
-
+- Hermes 在 v0.2 有 `discoverable` Adapter（#173），Shared 默认 `not-consumed`，仍不能 promotion 为 `managed`；
 - WorkBuddy 保持 `unsupported`，不根据未合并 patch 猜 `.workbuddy/skills`；
 - adoption、path table、partial discovery 与 launch-scoped control 都不能替代 Managed evidence bar。
 
@@ -257,7 +274,7 @@ Harness 只有在自己的 persistent filesystem/configuration seam 允许 Skill
 | TraeCode | International product 有 native Global/Project roots 与 opt-in Project Shared evidence | `discoverable` roadmap candidate；toggle/schema/precedence/recovery/regional parity/real-machine evidence 不足，v0.1 无 Adapter | [research resolution](https://github.com/AlligatorT/SkillsPub/issues/107#issuecomment-5470909721) |
 | WorkBuddy | official evidence 未证明 directory-based Agent Skills Target 或 machine-readable visibility control | `unsupported`；v0.1 无 Adapter | [research resolution](https://github.com/AlligatorT/SkillsPub/issues/106#issuecomment-5470909548) |
 | DeepSeek Harness | Skill registry/provider 为 Profile plugin；default roots 可重组 | Consumer/Profile 与 Plugin composition 明确前延后 | [Developer preview](https://deepseek.com/harness/en/), [Skills subsystem](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/skills.md) |
-| Hermes | 每个 Profile 有独立 `HERMES_HOME` 与 `skills/`；可配置 external dirs | 多 Profile 需求明确前延后 | [Profiles](https://hermes-agent.nousresearch.com/docs/user-guide/profiles), [Skills](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills) |
+| Hermes | 官方 user root 为 `$HERMES_HOME/skills`（默认 `~/.hermes/skills`）；Project `.hermes/skills`；全局 Shared 仅 opt-in `skills.external_dirs`；Project `.agents/skills` 需 trust；symlink 跟随 | v0.2 `discoverable` Adapter；Shared 默认 `not-consumed`；自有 Global/Project Target 可管理；无 isolation write；多 Profile 仍不实现 | [Skills](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills), [pinned skill_utils.py 0.21.3 / v2026.9.14](https://github.com/NousResearch/hermes-agent/blob/v2026.9.14/agent/skill_utils.py), [Profiles](https://hermes-agent.nousresearch.com/docs/user-guide/profiles) |
 | OpenClaw | 多 Target roots 与 per-Agent final allowlists | 多 Agent identity model 明确前延后 | [Skills](https://docs.openclaw.ai/tools/skills), [Skills config](https://docs.openclaw.ai/tools/skills-config) |
 
 集成 candidate 已包含 complete A+C Source workspace、通过 #127 的 Pi Global/Project repair 与 promotion、Relationship/Desired-state、Effective Visibility，以及 Claude/Grok contracts。v0.1 publication 仍受 #128 exact-candidate Grok/Claude revalidation、#129 automated/package handoff 和 human release gates 阻塞。固定 Vercel `skills` 仍是唯一 remote Source lifecycle/lock owner。后续 Harness 只有满足 complete consumed-root/control/recovery evidence 才能让 resolver 给出 release-quality non-`unknown` claim。
