@@ -2,3 +2,22 @@ node_modules/
 dist/
 *.tgz
 .pi-subagents/
+
+# Local-only working files (never upload)
+.DS_Store
+.acceptance/
+.feynman/
+.lavish/
+.pi/
+.skillspub/
+assets/
+learning-records/
+lessons/
+outputs/
+reference/
+MISSION.md
+NOTES.md
+RESOURCES.md
+untitled.md
+skills-lock.json
+scripts/release-v*.sh
