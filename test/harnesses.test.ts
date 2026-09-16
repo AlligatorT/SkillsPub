@@ -9,6 +9,7 @@ import { codexAdapter } from '../src/harnesses/codex.ts';
 import { cursorAdapter } from '../src/harnesses/cursor.ts';
 import { grokAdapter } from '../src/harnesses/grok.ts';
 import { hermesAdapter } from '../src/harnesses/hermes.ts';
+import { opencodeAdapter } from '../src/harnesses/opencode.ts';
 import { piAdapter } from '../src/harnesses/pi.ts';
 import type { Home } from '../src/core.ts';
 import { scanGlobalInventory, type SkillTarget } from '../src/inventory.ts';
@@ -22,6 +23,7 @@ function setup(): {
   codexHome: string;
   cursorHome: string;
   hermesHome: string;
+  opencodeHome: string;
   shared: string;
 } {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-harnesses-'));
@@ -31,6 +33,7 @@ function setup(): {
   const codexHome = path.join(configDir, 'codex');
   const cursorHome = path.join(configDir, 'cursor');
   const hermesHome = path.join(configDir, 'hermes');
+  const opencodeHome = path.join(configDir, 'opencode');
   const shared = path.join(configDir, 'agents', 'skills');
   return {
     home: { configDir },
@@ -40,6 +43,7 @@ function setup(): {
     codexHome,
     cursorHome,
     hermesHome,
+    opencodeHome,
     shared,
     targets: [
       {
@@ -93,6 +97,14 @@ function setup(): {
         discoveryRoot: path.join(hermesHome, 'skills'),
         parkingRoot: path.join(hermesHome, '.skillspub-off', 'skills'),
         projectPath: '.hermes/skills',
+        relationship: { support: 'discoverable', link: 'supported' },
+      },
+      {
+        key: 'opencode',
+        kind: 'harness',
+        discoveryRoot: path.join(opencodeHome, 'skills'),
+        parkingRoot: path.join(opencodeHome, '.skillspub-off', 'skills'),
+        projectPath: '.opencode/skills',
         relationship: { support: 'discoverable', link: 'supported' },
       },
     ],
@@ -350,6 +362,86 @@ test('Hermes inspection reports not-consumed Shared without configuration writes
   const scanned = scanGlobalInventory(home, targets, { persist: false });
   assert.ok(scanned.relationships.some((relationship) =>
     relationship.targetKey === 'hermes' && relationship.slot === 'demo' && relationship.activation === 'on'));
+  assert.deepEqual(fs.readdirSync(home.configDir, { recursive: true }).sort(), before);
+});
+
+test('OpenCode Target honors OPENCODE_CONFIG_DIR and the XDG config home', () => {
+  const previousConfigDir = process.env.OPENCODE_CONFIG_DIR;
+  const previousXdg = process.env.XDG_CONFIG_HOME;
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-opencode-config-'));
+  const xdg = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-opencode-xdg-'));
+  process.env.OPENCODE_CONFIG_DIR = configDir;
+  try {
+    const override = opencodeAdapter.targetDefinition();
+    assert.equal(override.discoveryRoot, path.join(configDir, 'skills'));
+    assert.equal(override.parkingRoot, path.join(configDir, '.skillspub-off', 'skills'));
+    assert.equal(override.projectPath, '.opencode/skills');
+    assert.deepEqual(override.relationship, { support: 'discoverable', link: 'supported' });
+
+    delete process.env.OPENCODE_CONFIG_DIR;
+    process.env.XDG_CONFIG_HOME = xdg;
+    const target = opencodeAdapter.targetDefinition();
+    assert.equal(target.discoveryRoot, path.join(xdg, 'opencode', 'skills'));
+    assert.equal(target.parkingRoot, path.join(xdg, 'opencode', '.skillspub-off', 'skills'));
+  } finally {
+    if (previousConfigDir === undefined) delete process.env.OPENCODE_CONFIG_DIR;
+    else process.env.OPENCODE_CONFIG_DIR = previousConfigDir;
+    if (previousXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = previousXdg;
+  }
+});
+
+test('OpenCode inspection reports required Shared consumption without configuration writes', () => {
+  const { home, targets, opencodeHome, claudeHome, shared } = setup();
+  const project = path.join(home.configDir, 'project');
+  fs.mkdirSync(opencodeHome, { recursive: true });
+  fs.mkdirSync(path.join(project, '.opencode'), { recursive: true });
+  const skillRoot = path.join(opencodeHome, 'skills', 'demo');
+  fs.mkdirSync(skillRoot, { recursive: true });
+  fs.copyFileSync(
+    path.join(import.meta.dirname, 'fixtures/opencode/demo/SKILL.md'),
+    path.join(skillRoot, 'SKILL.md'),
+  );
+  const before = fs.readdirSync(home.configDir, { recursive: true }).sort();
+
+  const opencode = inspectHarnesses(home, targets, project).detected
+    .find(({ key }) => key === 'opencode');
+
+  assert.equal(opencode?.name, 'OpenCode');
+  assert.equal(opencode?.support, 'discoverable');
+  assert.equal(opencode?.sharedConsumption.status, 'required');
+  assert.match(opencode?.sharedConsumption.detail ?? '', /does not invent a block/i);
+  assert.equal(opencode?.isolation.status, 'unmanaged');
+  assert.equal(opencode?.link.supported, true);
+  assert.deepEqual(opencode?.targets, [
+    { scope: 'global', discoveryRoot: path.join(opencodeHome, 'skills') },
+    { scope: 'project', discoveryRoot: path.join(project, '.opencode', 'skills') },
+  ]);
+  assert.equal(
+    opencode?.roots.find(({ kind, scope }) => kind === 'shared' && scope === 'global')?.consumption,
+    'consumed',
+  );
+  assert.equal(
+    opencode?.roots.find(({ kind, scope }) => kind === 'shared' && scope === 'global')?.discoveryRoot,
+    shared,
+  );
+  assert.equal(
+    opencode?.roots.find(({ kind, scope }) => kind === 'compatibility' && scope === 'global')?.discoveryRoot,
+    path.join(claudeHome, 'skills'),
+  );
+  assert.equal(
+    opencode?.roots.find(({ kind, scope }) => kind === 'compatibility' && scope === 'project')?.discoveryRoot,
+    path.join(project, '.claude', 'skills'),
+  );
+  assert.ok(opencode?.evidence.some(({ url }) => url === 'https://opencode.ai/docs/skills/'));
+  assert.ok(opencode?.evidence.some(({ url }) =>
+    url === 'https://github.com/sst/opencode/blob/v1.18.31/packages/opencode/src/skill/index.ts'));
+  assert.ok(opencode?.evidence.every(({ verifiedVersion }) => verifiedVersion === '1.18.31'));
+  assert.deepEqual(fs.readdirSync(home.configDir, { recursive: true }).sort(), before);
+
+  const scanned = scanGlobalInventory(home, targets, { persist: false });
+  assert.ok(scanned.relationships.some((relationship) =>
+    relationship.targetKey === 'opencode' && relationship.slot === 'demo' && relationship.activation === 'on'));
   assert.deepEqual(fs.readdirSync(home.configDir, { recursive: true }).sort(), before);
 });
 
@@ -696,6 +788,10 @@ test('Harness operation dispatch reports unsupported optional capabilities', () 
   assert.throws(
     () => planHarnessOperation('hermes', 'setup', home, targets),
     /Hermes does not support setup.*no configuration write is required/i,
+  );
+  assert.throws(
+    () => planHarnessOperation('opencode', 'setup', home, targets),
+    /OpenCode does not support setup.*no configuration write is required/i,
   );
   assert.throws(
     () => planHarnessOperation('missing', 'setup', home, targets),

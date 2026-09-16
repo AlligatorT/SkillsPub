@@ -563,6 +563,7 @@ test('legacy migration previews and adds built-in Targets introduced after runti
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-cli-legacy-built-ins-'));
   const userHome = path.join(configDir, 'home');
   const grokHome = path.join(userHome, '.grok');
+  const opencodeHome = path.join(userHome, '.opencode-config');
   const legacyFile = path.join(configDir, 'runtimes.json');
   fs.mkdirSync(grokHome, { recursive: true });
   fs.writeFileSync(path.join(grokHome, 'config.toml'), '# detected\n');
@@ -585,6 +586,7 @@ test('legacy migration previews and adds built-in Targets introduced after runti
       GROK_HOME: grokHome,
       CODEX_HOME: path.join(userHome, '.codex'),
       HERMES_HOME: path.join(userHome, '.hermes'),
+      OPENCODE_CONFIG_DIR: opencodeHome,
       SKILLSPUB_CONFIG_DIR: configDir,
     },
   });
@@ -627,6 +629,13 @@ test('legacy migration previews and adds built-in Targets introduced after runti
     parkingRoot: path.join(userHome, '.hermes', '.skillspub-off', 'skills'),
     projectPath: '.hermes/skills',
     relationship: { support: 'discoverable', link: 'supported' },
+  }, {
+    key: 'opencode',
+    kind: 'harness',
+    discoveryRoot: path.join(opencodeHome, 'skills'),
+    parkingRoot: path.join(opencodeHome, '.skillspub-off', 'skills'),
+    projectPath: '.opencode/skills',
+    relationship: { support: 'discoverable', link: 'supported' },
   }]);
   assert.equal(previewData.plan.overrides.some(({ key, disabled }: { key: string; disabled?: true }) =>
     key === 'grok' && disabled), false);
@@ -639,7 +648,7 @@ test('legacy migration previews and adds built-in Targets introduced after runti
   const appliedData = JSON.parse(applied.stdout).data;
   assert.deepEqual(appliedData.plan, previewData.plan);
   assert.deepEqual(appliedData.result.targets.map(({ key }: { key: string }) => key), [
-    'claude', 'shared', 'grok', 'pi', 'codex', 'cursor', 'hermes',
+    'claude', 'shared', 'grok', 'pi', 'codex', 'cursor', 'hermes', 'opencode',
   ]);
   const registry = JSON.parse(fs.readFileSync(path.join(configDir, 'targets.json'), 'utf8'));
   assert.equal(registry.overrides.some(({ key }: { key: string }) => key === 'grok'), false);
@@ -731,6 +740,7 @@ test('read-only CLI surfaces merge a detected built-in missing from an older Tar
         GROK_HOME: grokHome,
         CODEX_HOME: path.join(userHome, '.codex'),
         HERMES_HOME: path.join(userHome, '.hermes'),
+        OPENCODE_CONFIG_DIR: path.join(userHome, '.opencode-config'),
         SKILLSPUB_CONFIG_DIR: configDir,
       },
     });
@@ -739,7 +749,7 @@ test('read-only CLI surfaces merge a detected built-in missing from an older Tar
   };
 
   assert.deepEqual(run('targets').map(({ key }: { key: string }) => key), [
-    'claude', 'shared', 'grok', 'pi', 'codex', 'cursor', 'hermes', 'custom',
+    'claude', 'shared', 'grok', 'pi', 'codex', 'cursor', 'hermes', 'opencode', 'custom',
   ]);
   assert.ok(run('scan').inventory.targets.some(({ key }: { key: string }) => key === 'grok'));
   assert.ok(run('harnesses').detected.some(({ key }: { key: string }) => key === 'grok'));

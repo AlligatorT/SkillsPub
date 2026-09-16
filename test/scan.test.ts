@@ -644,6 +644,7 @@ test('Target migration previews legacy Runtime overrides and Generic Targets wit
     { key: 'codex', kind: 'harness' },
     { key: 'cursor', kind: 'harness' },
     { key: 'hermes', kind: 'harness' },
+    { key: 'opencode', kind: 'harness' },
   ]);
   assert.deepEqual(plan.genericTargets.map(({ key, kind, discoveryRoot }) => ({ key, kind, discoveryRoot })), [
     { key: 'other', kind: 'generic', discoveryRoot: genericRoot },
@@ -679,6 +680,11 @@ test('Target migration previews legacy Runtime overrides and Generic Targets wit
         key: 'hermes',
         kind: 'harness',
         discoveryRoot: defaultTargetDefinitions().find(({ key }) => key === 'hermes')!.discoveryRoot,
+      },
+      {
+        key: 'opencode',
+        kind: 'harness',
+        discoveryRoot: defaultTargetDefinitions().find(({ key }) => key === 'opencode')!.discoveryRoot,
       },
       expectedTargets[1],
     ],

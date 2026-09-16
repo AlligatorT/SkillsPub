@@ -96,6 +96,7 @@ function setupVisibilityTui({grokDetected = true} = {}) {
     codex: path.join(configDir, 'codex', 'skills'),
     cursor: path.join(configDir, 'cursor', 'skills'),
     hermes: path.join(configDir, 'hermes', 'skills'),
+    opencode: path.join(configDir, 'opencode', 'skills'),
   };
   fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
     version: 1,
@@ -202,6 +203,7 @@ function setupManagedTui(skills: ManagedTuiSkill[], projectScope = false) {
       {key: 'codex', disabled: true},
       {key: 'cursor', disabled: true},
       {key: 'hermes', disabled: true},
+      {key: 'opencode', disabled: true},
       {
         key: 'shared',
         discoveryRoot: path.join(userHome, '.agents', 'skills'),
@@ -2012,6 +2014,7 @@ test('TUI separates Harness capability from current state in the target list and
       { key: 'codex', disabled: true },
       { key: 'cursor', disabled: true },
       { key: 'hermes', disabled: true },
+      { key: 'opencode', disabled: true },
       {
         key: 'pi',
         discoveryRoot: path.join(piHome, 'agent', 'skills'),
@@ -2107,6 +2110,7 @@ test('TUI keeps undetected Harnesses in a compact Available section', async () =
       { key: 'codex', disabled: true },
       { key: 'cursor', disabled: true },
       { key: 'hermes', disabled: true },
+      { key: 'opencode', disabled: true },
       {
         key: 'pi',
         discoveryRoot: path.join(piHome, 'agent', 'skills'),
@@ -2190,6 +2194,7 @@ test('Skill detail shows every built-in Effective Visibility result and not-dete
   assert.match(frame, /Codex: unknown/);
   assert.match(frame, /Cursor: unknown/);
   assert.match(frame, /Hermes: unknown/);
+  assert.match(frame, /OpenCode: unknown/);
   assert.match(frame, /e explain/);
   t.unmount();
 
@@ -2209,7 +2214,7 @@ test('Explain modal projects evidence and read-only visible/hidden plans for eac
   await t.send('e');
 
   let frame = t.stdout.frame();
-  assert.match(frame, /Explain — demo — Claude Code \[1\/6\]/);
+  assert.match(frame, /Explain — demo — Claude Code \[1\/7\]/);
   assert.match(frame, /Result: not-visible/);
   assert.match(frame, /Adapter support: managed/);
   assert.match(frame, /Shared consumption: not-consumed/);
@@ -2232,7 +2237,7 @@ test('Explain modal projects evidence and read-only visible/hidden plans for eac
 
   await t.send('\t');
   frame = t.stdout.frame();
-  assert.match(frame, /Explain — demo — Grok Build \[2\/6\]/);
+  assert.match(frame, /Explain — demo — Grok Build \[2\/7\]/);
   assert.match(frame, /Result: unknown/);
   for (let i = 0; i < 10; i++) await t.send('j');
   frame = t.stdout.frame();
@@ -2244,11 +2249,22 @@ test('Explain modal projects evidence and read-only visible/hidden plans for eac
 
   await t.send('\t');
   frame = t.stdout.frame();
-  assert.match(frame, /Explain — demo — Pi \[3\/6\]/);
+  assert.match(frame, /Explain — demo — Pi \[3\/7\]/);
   assert.match(frame, /Result: visible/);
   assert.match(frame, /Adapter support: managed/);
   assert.match(frame, /Shared consumption: excluded/);
   assert.match(frame, /on link selected/);
+  assert.deepEqual(fs.readdirSync(home.configDir, {recursive: true}).sort(), before);
+
+  await t.send('\t'); // Codex
+  await t.send('\t'); // Cursor
+  await t.send('\t'); // Hermes
+  await t.send('\t');
+  frame = t.stdout.frame();
+  assert.match(frame, /Explain — demo — OpenCode \[7\/7\]/);
+  assert.match(frame, /Result: unknown/);
+  assert.match(frame, /Adapter support: discoverable/);
+  assert.match(frame, /Shared consumption: required/);
   assert.deepEqual(fs.readdirSync(home.configDir, {recursive: true}).sort(), before);
   t.unmount();
 });
