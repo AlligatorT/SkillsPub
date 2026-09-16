@@ -15,9 +15,11 @@ import {
   skillDetail,
   sortRows,
   harnessStatusBadge,
+  projectSourceLayers,
   projectTuiSnapshot,
   tuiSnapshot,
   tuiSnapshotInventory,
+  type SourceLayerInput,
   type Target,
   type Row,
   type SkillInfo,
@@ -861,30 +863,56 @@ function candidateId(candidate: NpxSkillsCandidate): string {
   return `${candidate.source}\0${candidate.name}`;
 }
 
-function sourceDetailLines(
-  candidate: NpxSkillsCandidate | undefined,
-  row: Row | undefined,
-): string[] {
-  if (candidate) return [
-    `Identity: ${candidate.source}@${candidate.name}`,
-    `Source: ${candidate.source}`,
-    `Skill path/name: ${candidate.name}`,
-    `Destination Slot: ${normalizeNpxSkillsName(candidate.name)}`,
-    `Installs: ${candidate.installs ?? 'unknown'}`,
-    `Detail: ${candidate.detailUrl}`,
-  ];
-  if (!row) return ['No resource selected.'];
+/** Build the pure projection input for the Source tab information layers
+ *  (issue #167); layering itself lives in view.ts projectSourceLayers. */
+function sourceLayerInputFor({
+  candidate,
+  row,
+  candidateTruth,
+  visibility,
+  desired,
+  drift,
+}: {
+  candidate?: NpxSkillsCandidate;
+  row?: Row;
+  candidateTruth?: CatalogCandidateTruth;
+  visibility?: VisibilityExplanation;
+  desired: string;
+  drift: string;
+}): SourceLayerInput {
   const relationships = sourceRelationships(row);
-  return [
-    `Identity: ${row.realPath ?? row.id}`,
-    `Name: ${row.name}`,
-    `Provenance: ${row.sourceLabel}`,
-    `Real path: ${row.realPath ?? 'unresolved'}`,
-    `Update availability: ${updateStatusText(row) ?? 'unknown'}`,
-    ...(row.updateAvailability?.error ? [`Update check: ${row.updateAvailability.error}`] : []),
-    ...relationships.map((relationship) =>
-      `${relationship.readOnly ? 'Read-only inherited' : relationship.info.form} ${relationship.scope ?? 'global'}: ${relationship.info.path}`),
-  ];
+  return {
+    kind: candidate ? 'candidate' : 'resource',
+    name: candidate?.name ?? row?.displayName ?? 'none',
+    sourceLabel: candidate
+      ? (candidate.detailUrl ?? candidate.source)
+      : (row?.sourceLabel ?? 'Source unknown'),
+    update: row
+      ? (updateStatusText(row) ?? 'unknown')
+      : (candidateTruth?.updateAvailability ?? 'unknown'),
+    actual: row
+      ? relationships.map(({info}) => relationshipStatusText(info)).join(', ')
+      : candidateTruth?.actual ?? (candidate ? 'not installed' : 'none selected'),
+    desired: candidate ? (candidateTruth?.desired ?? 'not applicable') : desired,
+    drift: candidate ? (candidateTruth?.drift ?? 'not applicable') : drift,
+    relationships: row ? relationships.length : (candidateTruth?.relationships ?? 0),
+    effectiveVisibility: row
+      ? [...new Set(visibility?.harnesses.map(({effectiveVisibility}) => effectiveVisibility) ?? ['unknown'])].join('/')
+      : candidateTruth?.effectiveVisibility ?? 'not applicable',
+    identity: candidate ? `${candidate.source}@${candidate.name}` : (row?.realPath ?? row?.id ?? 'none'),
+    realPath: row?.realPath,
+    updateError: row?.updateAvailability?.error,
+    details: candidate
+      ? [
+          `Source: ${candidate.source}`,
+          `Skill path/name: ${candidate.name}`,
+          `Destination Slot: ${normalizeNpxSkillsName(candidate.name)}`,
+          `Installs: ${candidate.installs ?? 'unknown'}`,
+          `Detail: ${candidate.detailUrl}`,
+        ]
+      : relationships.map((relationship) =>
+          `${relationship.readOnly ? 'Read-only inherited' : relationship.info.form} ${relationship.scope ?? 'global'}: ${relationship.info.path}`),
+  };
 }
 
 function SourceDetail({
@@ -1318,30 +1346,30 @@ function SourceWorkspace({
 }): ReactNode {
   const candidate = surface === 'catalog' ? candidates[candidateIndex] : undefined;
   const row = surface === 'inventory' ? inventory[inventoryIndex] : undefined;
-  const relationships = sourceRelationships(row);
-  const idleDetail = sourceDetailLines(surface === 'catalog' ? candidate : undefined, surface === 'inventory' ? row : undefined);
+  const idleInput = sourceLayerInputFor({candidate, row, candidateTruth, visibility, desired, drift});
+  const addCurrentTruth = operation?.kind === 'add' ? operation.plan.currentTruth : undefined;
+  const displayedDesired = operation?.truth?.desired ?? addCurrentTruth?.desired ?? candidateTruth?.desired ?? desired;
+  const displayedDrift = operation?.truth?.drift ?? addCurrentTruth?.drift ?? candidateTruth?.drift ?? drift;
+  // Issue #167: the default surface renders only the 用户态 layers of the
+  // projection; 开发态 detail lives in the enter expansion layer / CLI --json.
+  const layers = projectSourceLayers({
+    ...idleInput,
+    update: operation?.truth?.updateAvailability ?? idleInput.update,
+    actual: operation?.truth?.actual ?? addCurrentTruth?.actual ?? idleInput.actual,
+    desired: displayedDesired,
+    drift: displayedDrift,
+    relationships: operation?.truth?.relationships.length ?? idleInput.relationships,
+    effectiveVisibility: operation?.truth?.effectiveVisibility ?? idleInput.effectiveVisibility,
+  });
   const activeDetail = operation ? sourceOperationLines(operation) : undefined;
   const operationPage = Math.max(3, height - 11);
   const operationScroll = operation?.scroll ?? 0;
   const detail = activeDetail
     ? activeDetail.lines.slice(operationScroll, operationScroll + operationPage)
-    : idleDetail;
+    : layers.user;
   const detailTitle = activeDetail
     ? `${activeDetail.title} [${Math.min(operationScroll + 1, activeDetail.lines.length)}/${activeDetail.lines.length}]`
     : surface === 'catalog' ? 'Selected candidate' : 'Selected resource';
-  const idleActual = row
-    ? relationships.map(({info}) => relationshipStatusText(info)).join(', ')
-    : candidateTruth?.actual ?? (candidate ? 'not installed' : 'none selected');
-  const idleEffective = row
-    ? [...new Set(visibility?.harnesses.map(({effectiveVisibility}) => effectiveVisibility) ?? ['unknown'])].join('/')
-    : candidateTruth?.effectiveVisibility ?? 'not applicable';
-  const addCurrentTruth = operation?.kind === 'add' ? operation.plan.currentTruth : undefined;
-  const actual = operation?.truth?.actual ?? addCurrentTruth?.actual ?? idleActual;
-  const displayedDesired = operation?.truth?.desired ?? addCurrentTruth?.desired ?? candidateTruth?.desired ?? desired;
-  const displayedDrift = operation?.truth?.drift ?? addCurrentTruth?.drift ?? candidateTruth?.drift ?? drift;
-  const displayedUpdate = operation?.truth?.updateAvailability ?? row?.updateAvailability?.status ?? candidateTruth?.updateAvailability ?? 'unknown';
-  const effective = operation?.truth?.effectiveVisibility ?? idleEffective;
-  const displayedRelationships = operation?.truth?.relationships.length ?? (row ? relationships.length : candidateTruth?.relationships ?? 0);
   const selectedIndex = surface === 'catalog' ? candidateIndex : inventoryIndex;
   const list = surface === 'catalog'
     ? candidates.map((item, index) => h(RowLine, {
@@ -1387,8 +1415,8 @@ function SourceWorkspace({
           lines: detail,
         })
       : null,
-    h(Text, {wrap: 'wrap'}, `Selected: ${idleDetail[0] ?? 'none'}  Actual: ${actual}  Desired: ${displayedDesired}`),
-    h(Text, {wrap: 'wrap'}, `Drift: ${displayedDrift}  Update: ${displayedUpdate}  Relationship: ${displayedRelationships}  Effective Visibility: ${effective}`),
+    h(Text, {wrap: 'wrap'}, layers.status.selected),
+    h(Text, {wrap: 'wrap'}, layers.status.truth),
   );
 }
 
@@ -1644,10 +1672,6 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     : '';
   const modalLines = modal ? detailLines(modalContent, Math.max(1, width - 8)) : [];
   const modalPage = Math.max(1, height - 6);
-  const sourceDetailContent = sourceDetailLines(
-    sourceSurface === 'catalog' ? sourceCandidate : undefined,
-    sourceSurface === 'inventory' ? sourceResource : undefined,
-  );
   const sourceEvidenceOperation = sourceOperation ?? latestSourceOperation;
   const sourceLogLines = sourceEvidenceOperation
     ? detailLines([
@@ -1697,6 +1721,15 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       : undefined,
     [home, sourceSurface, sourceSnapshot, sourceCandidate],
   );
+  // Issue #167: the enter expansion layer renders the 开发态 developer layer.
+  const sourceDetailContent = projectSourceLayers(sourceLayerInputFor({
+    candidate: sourceSurface === 'catalog' ? sourceCandidate : undefined,
+    row: sourceSurface === 'inventory' ? sourceResource : undefined,
+    candidateTruth: sourceCandidateTruth,
+    visibility: sourceVisibility,
+    desired: sourceTruth.desired,
+    drift: sourceTruth.drift,
+  })).developer;
   const sourceTarget = sourceSnapshot.targets.find(({name}) => name === 'shared');
   const sourceRelationship = sourceRelationships(activeSourceResource).find((relationship) =>
     !relationship.readOnly && relationship.info.form === 'local');
