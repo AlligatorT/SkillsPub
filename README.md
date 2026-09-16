@@ -26,6 +26,12 @@ Harness support levels are enforced by `npm run audit:release`. The verified-ver
 npm install --global skillspub
 ```
 
+Or via [Homebrew](https://github.com/AlligatorT/homebrew-tap) (installs the same SHA-256-verified npm tarball):
+
+```sh
+brew install AlligatorT/tap/skillspub   # upgrade: brew upgrade AlligatorT/tap/skillspub
+```
+
 Or without a global install: `npx skillspub targets`.
 
 ## First run
