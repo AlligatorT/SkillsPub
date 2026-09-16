@@ -15,6 +15,7 @@ import {
   skillDetail,
   sortRows,
   harnessStatusBadge,
+  projectSharedConsumption,
   projectSourceLayers,
   projectTuiSnapshot,
   tuiSnapshot,
@@ -377,11 +378,13 @@ export function HarnessBadge({
   harness,
   compact = false,
 }: {
-  harness: Pick<HarnessSummary, 'support' | 'isolation'>;
+  harness: Pick<HarnessSummary, 'support' | 'isolation'> & {
+    sharedConsumption?: HarnessSummary['sharedConsumption'];
+  };
   compact?: boolean;
 }): ReactNode {
   const badge = harnessStatusBadge(harness);
-  const text = compact && harness.support === 'discoverable' ? '[discover]' : badge.text;
+  const text = compact && badge.text === '[discoverable]' ? '[discover]' : badge.text;
   return h(Text, {
     color: badge.tone === 'success' ? 'green' : badge.tone === 'danger' ? 'red' : badge.tone === 'warning' ? 'yellow' : undefined,
     dimColor: badge.tone === 'muted',
@@ -606,6 +609,8 @@ function TargetInfoPanel({
       h(Text, {key: 'support'}, ' ', h(Text, {bold: true}, 'Adapter support:'), ` ${harness.support}`),
       h(Text, {key: 'shared'}, ' ', h(Text, {bold: true}, 'Shared consumption:'), ` ${harness.sharedConsumption.status}`),
       h(Text, {key: 'isolation'}, ' ', h(Text, {bold: true}, 'Isolation:'), ` ${harness.isolation.status}`),
+      ...projectSharedConsumption(harness).lines.map((line, index) =>
+        h(Text, {key: `shared-required-${index}`, wrap: 'wrap'}, ` ${line}`)),
       ...(harness.support === 'managed'
         ? [h(Text, {key: 'support-explanation', wrap: 'wrap'}, ` ${MANAGED_SUPPORT_EXPLANATION}`)]
         : []),
@@ -695,7 +700,7 @@ function InfoPanel({
             h(
               Text,
               {key: `visibility-${harness.key}`, wrap: 'wrap'},
-              ` ${harness.name}: ${harness.effectiveVisibility}${harness.detected ? '' : ' · not-detected'}`,
+              ` ${harness.name}: ${harness.effectiveVisibility}${harness.detected ? '' : ' · not-detected'}${projectSharedConsumption(harness).visibilityNote}`,
             )) ?? []),
         ]
       : h(Text, {dimColor: true}, '  nothing selected'),
@@ -1462,6 +1467,8 @@ function explanationLines(explanation: VisibilityExplanation | undefined): strin
     `Adapter support: ${harness.support}`,
     `Shared consumption: ${harness.sharedConsumption.status} — ${harness.sharedConsumption.detail}`,
     `Isolation: ${harness.isolation.status} — ${harness.isolation.detail}`,
+    ...projectSharedConsumption(harness).lines.filter((line) =>
+      !line.startsWith(`Shared consumption: ${harness.sharedConsumption.status}`)),
     '',
     'Evidence:',
     ...harness.evidence.map((evidence) =>

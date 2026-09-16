@@ -377,6 +377,11 @@ function explainHarness(
   else effectiveVisibility = selectedRoots.length > 0 ? 'visible' : 'not-visible';
 
   const reasons: ExplainMessage[] = [];
+  if (harness.sharedConsumption.status === 'required')
+    reasons.push({
+      code: 'shared_consumption_required',
+      message: 'Shared consumption is required; this Harness always reads the global Shared Skill Target and cannot isolate.',
+    });
   if (!harness.detected)
     reasons.push({ code: 'harness_not_detected', message: `${harness.name} was not detected locally.` });
   if (harness.support !== 'managed')

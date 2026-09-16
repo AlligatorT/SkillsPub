@@ -4,6 +4,7 @@ import {
   filterRows,
   harnessStatusBadge,
   projectRows,
+  projectSharedConsumption,
   projectSourceLayers,
   searchRows,
   sortRows,
@@ -90,6 +91,47 @@ test('Harness badge separates Adapter capability from isolation state', () => {
   assert.deepEqual(badge('managed', 'unknown'), {text: '[unknown]', tone: 'warning'});
   assert.deepEqual(badge('discoverable', 'managed'), {text: '[discoverable]', tone: 'muted'});
   assert.deepEqual(badge('unsupported', 'managed'), {text: '[unsupported]', tone: 'muted'});
+});
+
+test('required Shared consumption is honest in the matrix projection', () => {
+  const required = {
+    support: 'discoverable' as const,
+    isolation: {status: 'not-required' as const, detail: ''},
+    sharedConsumption: {
+      status: 'required' as const,
+      detail: 'This Harness always reads the global Shared Skill Target.',
+    },
+  };
+  const isolatable = {
+    support: 'managed' as const,
+    isolation: {status: 'not-required' as const, detail: ''},
+    sharedConsumption: {
+      status: 'not-consumed' as const,
+      detail: 'Claude Code does not discover the Shared Agent Skills directory.',
+    },
+  };
+
+  assert.deepEqual(harnessStatusBadge(required), {text: '[required]', tone: 'warning'});
+  assert.deepEqual(harnessStatusBadge(isolatable), {text: '[managed]', tone: 'success'});
+
+  const projected = projectSharedConsumption(required);
+  assert.equal(projected.required, true);
+  const explanation = projected.lines.join('\n');
+  assert.match(explanation, /Shared consumption: required/);
+  assert.match(explanation, /always reads the global Shared Skill Target/);
+  assert.match(explanation, /cannot exclude the global Shared Skill Target/);
+  assert.equal(projected.visibilityNote, ' · Shared consumption required');
+
+  const leftAlone = projectSharedConsumption(isolatable);
+  assert.equal(leftAlone.required, false);
+  assert.deepEqual(leftAlone.lines, []);
+  assert.equal(leftAlone.visibilityNote, '');
+  assert.equal(projectSharedConsumption({
+    sharedConsumption: {status: 'excluded', detail: ''},
+  }).required, false);
+  assert.equal(projectSharedConsumption({
+    sharedConsumption: {status: 'enabled', detail: ''},
+  }).required, false);
 });
 
 test('projection maps Relationship activation and form to matrix presence', () => {
