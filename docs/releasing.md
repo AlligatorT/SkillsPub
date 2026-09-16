@@ -45,7 +45,7 @@ npm run check:package -- ./skillspub-0.1.0.tgz
 npm pack --dry-run --ignore-scripts
 ```
 
-Record the commit SHA, each command and bounded result, tarball filename/SHA-256, and `npm pack --dry-run` file list on the release-candidate ticket before opening the release PR; copy that evidence into the release notes at publication. Confirm the tarball contains only `dist/**`, `SKILL.md`, `README.md`, `LICENSE`, and `package.json`. Keep real-machine acceptance output outside the package.
+Record the commit SHA, each command and bounded result, tarball filename/SHA-256, and `npm pack --dry-run` file list on the release-candidate ticket before opening the release PR; copy that evidence into the release notes at publication. Confirm the tarball contains only `dist/**`, `README.md`, `LICENSE`, and `package.json`. Keep real-machine acceptance output outside the package.
 
 ## Recoverable cutover
 

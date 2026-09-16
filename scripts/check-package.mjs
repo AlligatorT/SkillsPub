@@ -78,7 +78,6 @@ try {
   const expected = [
     'LICENSE',
     'README.md',
-    'SKILL.md',
     'package.json',
     ...runtimeFiles(path.join(root, 'dist')),
   ].sort();
