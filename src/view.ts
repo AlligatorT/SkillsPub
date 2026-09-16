@@ -18,6 +18,7 @@ import {
   type TargetScope,
   type ResourceForm,
   type SkillProvenance,
+  type RelationshipCapability,
 } from './inventory.ts';
 
 // --- view projection: InventoryScanReport -> skill × target matrix rows ---
@@ -27,6 +28,70 @@ import {
 export interface Target {
   name: string;
   dir: string;
+  relationship?: RelationshipCapability;
+}
+
+function viewTarget(target: InventoryScanReport['targets'][number]): Target {
+  return {
+    name: target.key,
+    dir: target.discoveryRoot,
+    ...(target.relationship ? { relationship: target.relationship } : {}),
+  };
+}
+
+// --- Cross-target assignment (issue #166) ---
+// Existing vocabulary only: Missing relationship, Link, Mirror.
+// Any resource → any Target. Form matches reconcile creationForm.
+
+export interface AssignmentProjection {
+  form: 'link' | 'mirror';
+  available: boolean;
+  cell: string;
+  hint: string;
+  title: string;
+  lines: string[];
+}
+
+export const ASSIGNMENT_LEGEND = [
+  'This resource can be assigned to any Target.',
+  'Link is a symlink. Mirror is a managed copy when the Target cannot Link.',
+] as const;
+
+export function projectAssignment(input: {
+  hasResource: boolean;
+  target?: Pick<Target, 'relationship'>;
+}): AssignmentProjection {
+  const form: AssignmentProjection['form'] =
+    input.target?.relationship?.support === 'managed' &&
+    input.target.relationship.link === 'unsupported'
+      ? 'mirror'
+      : 'link';
+  if (!input.hasResource) {
+    return {
+      form,
+      available: false,
+      cell: 'missing',
+      hint: '',
+      title: form === 'mirror' ? 'Mirror relationship?' : 'Link relationship?',
+      lines: [],
+    };
+  }
+  return {
+    form,
+    available: true,
+    cell: `missing · ${form}`,
+    hint: form === 'mirror' ? ' i mirror' : ' i link',
+    title: form === 'mirror' ? 'Mirror relationship?' : 'Link relationship?',
+    lines: form === 'mirror'
+      ? [
+          'Mirror is a managed copy at the Target because this Target cannot Link.',
+          'The Skill resource stays in its current directory. Updates are explicit; diverged copies are not overwritten.',
+        ]
+      : [
+          'Link is a symlink at the Target.',
+          'The Skill resource stays in its current directory. Any resource can be assigned to any Target.',
+        ],
+  };
 }
 
 export function harnessStatusBadge(
@@ -219,10 +284,7 @@ function effectiveProjectRelationship(relationships: SkillRelationship[]): Skill
 }
 
 export function viewTargets(report: InventoryScanReport): Target[] {
-  return report.targets.map((target) => ({
-    name: target.key,
-    dir: target.discoveryRoot,
-  }));
+  return report.targets.map(viewTarget);
 }
 
 function descriptionFrom(content: string): string | undefined {
@@ -517,7 +579,7 @@ function visibleTargets(
   const detected = new Set(harnesses.detected.map(({ key }) => key));
   return report.targets
     .filter(({ kind, key }) => kind !== 'harness' || detected.has(key))
-    .map((target) => ({ name: target.key, dir: target.discoveryRoot }));
+    .map(viewTarget);
 }
 
 /** Read the live disk state. Call again after every mutation (ADR-0001). */
