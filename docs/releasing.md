@@ -26,7 +26,7 @@ The first publish is an interactive maintainer 2FA cutover. Configure trusted pu
 - Homebrew installed locally for Formula audit and install tests.
 - The npm tarball URL and SHA-256 from the published immutable v0.1.0 artifact.
 
-The first Formula is manual and happens only after npm and the matching GitHub release succeed.
+The first Formula is manual and happens only after npm and the matching GitHub release succeed. Automatic Formula bumps are deferred until the release process is proven; each later version is added to the tap manually from that release's recorded tarball SHA-256.
 
 ## Reproducible preflight
 
