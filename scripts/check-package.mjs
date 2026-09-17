@@ -57,7 +57,7 @@ try {
     fs.readFileSync(path.join(root, 'package.json'), 'utf8'),
     'package.json',
   );
-  assert.equal(manifest.version, '0.1.0');
+  assert.equal(manifest.version, '0.2.0');
   assert.equal(manifest.bin?.skillspub, 'dist/cli.js');
   assert.equal(manifest.license, 'MIT');
   assert.equal(manifest.repository?.url, 'git+https://github.com/AlligatorT/SkillsPub.git');
