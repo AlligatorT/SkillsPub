@@ -34,8 +34,9 @@ jobs:
 
       # prepublishOnly runs the full release preflight:
       # typecheck, tests, build, audit:release, check:package
-      # Force empty NODE_AUTH_TOKEN so setup-node's placeholder does not
-      # override OIDC trusted publishing (npm often 404s unauthorized PUTs).
-      - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ""
+      # setup-node may inject NODE_AUTH_TOKEN=XXXXX-...; even an empty value
+      # counts as set and blocks OIDC trusted publishing. Unset it in-shell.
+      - name: Publish to npm (OIDC trusted publishing)
+        run: |
+          unset NODE_AUTH_TOKEN
+          npm publish --provenance --access public
