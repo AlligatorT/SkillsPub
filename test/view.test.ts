@@ -1,8 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  ASSIGNMENT_LEGEND,
   filterRows,
   harnessStatusBadge,
+  projectAssignment,
   projectRows,
   projectSharedConsumption,
   projectSourceLayers,
@@ -236,6 +238,46 @@ test('view targets come from the runtime registry, keyed by runtime key', () => 
     { name: 'claude', dir: '/roots/claude/skills' },
     { name: 'shared', dir: '/roots/shared/skills' },
   ]);
+});
+
+test('missing-relationship assignment is any resource to any Target', () => {
+  const linkTarget = runtime('claude');
+  const mirrorTarget = {
+    ...runtime('grok'),
+    relationship: { support: 'managed' as const, link: 'unsupported' as const },
+  };
+  const [claude, grok] = viewTargets(report({ targets: [linkTarget, mirrorTarget] }));
+
+  assert.equal(claude?.relationship, undefined);
+  assert.deepEqual(grok?.relationship, { support: 'managed', link: 'unsupported' });
+
+  const link = projectAssignment({ hasResource: true, target: claude });
+  assert.equal(link.form, 'link');
+  assert.equal(link.available, true);
+  assert.equal(link.cell, 'missing · link');
+  assert.equal(link.hint, ' i link');
+  assert.equal(link.title, 'Link relationship?');
+  assert.match(link.lines.join('\n'), /symlink/);
+  assert.match(link.lines.join('\n'), /Any resource can be assigned to any Target/);
+  assert.doesNotMatch(link.lines.join('\n'), /Shared/);
+
+  const mirror = projectAssignment({ hasResource: true, target: grok });
+  assert.equal(mirror.form, 'mirror');
+  assert.equal(mirror.cell, 'missing · mirror');
+  assert.equal(mirror.hint, ' i mirror');
+  assert.equal(mirror.title, 'Mirror relationship?');
+  assert.match(mirror.lines.join('\n'), /managed copy/);
+  assert.match(mirror.lines.join('\n'), /cannot Link/);
+  assert.doesNotMatch(mirror.lines.join('\n'), /Shared/);
+
+  const broken = projectAssignment({ hasResource: false, target: claude });
+  assert.equal(broken.available, false);
+  assert.equal(broken.cell, 'missing');
+  assert.equal(broken.hint, '');
+
+  assert.match(ASSIGNMENT_LEGEND.join('\n'), /assigned to any Target/);
+  assert.match(ASSIGNMENT_LEGEND.join('\n'), /symlink/);
+  assert.match(ASSIGNMENT_LEGEND.join('\n'), /managed copy/);
 });
 
 test('search/sort/filter/untagged operate on projected rows', () => {

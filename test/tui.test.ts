@@ -1259,6 +1259,9 @@ test('manage modal adds and removes tags for the selected skill', async () => {
   assert.match(frame, /Tags/);
   assert.match(frame, /Presets/);
   assert.match(frame, /Bundles:/);
+  assert.match(frame, /assigned to any Target/);
+  assert.match(frame, /Link is a symlink/);
+  assert.match(frame, /Mirror is a managed copy/);
 
   // create-in-flow a tag
   await t.send('a');
@@ -1958,12 +1961,17 @@ test('Skill projection confirms link and unlink before changing disk', async () 
   for (let i = 0; i < 3; i++) await t.send('j'); // grilling
   await t.send('l');
   await t.send('j'); // agent b is missing
+  assert.match(t.stdout.frame(), /missing · link/);
+  assert.match(t.stdout.frame(), / i link/);
 
   await t.send('i');
   assert.match(t.stdout.frame(), /Link relationship\?/);
   assert.match(t.stdout.frame(), /a-skills/);
   assert.match(t.stdout.frame(), /→/);
   assert.match(t.stdout.frame(), /b-skills/);
+  assert.match(t.stdout.frame(), /symlink/);
+  assert.match(t.stdout.frame(), /Any resource can be assigned to any Target/);
+  assert.doesNotMatch(t.stdout.frame(), /Shared/);
   assert.equal((t.stdout.frame().match(/grilling/g) ?? []).length, 2);
   await t.send('n');
   assert.throws(() => fs.lstatSync(target));
@@ -1982,6 +1990,62 @@ test('Skill projection confirms link and unlink before changing disk', async () 
   await t.send('y');
   assert.throws(() => fs.lstatSync(target));
   assert.ok(fs.existsSync(path.join(home.configDir, 'a-skills', 'grilling', 'SKILL.md')));
+  t.unmount();
+});
+
+test('Skill matrix assigns a local Harness Skill as Mirror when the Target cannot Link', async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-tui-assign-'));
+  const configDir = path.join(root, 'config');
+  const userHome = path.join(root, 'home');
+  const claude = path.join(userHome, '.claude', 'skills');
+  const grokHome = path.join(userHome, '.grok');
+  const grok = path.join(grokHome, 'skills');
+  fs.mkdirSync(configDir, {recursive: true});
+  mkSkill(claude, 'local-skill');
+  fs.mkdirSync(grok, {recursive: true});
+  fs.writeFileSync(path.join(grokHome, 'config.toml'), '# grok\n');
+  useFixtureEnv(context, {HOME: userHome, GROK_HOME: grokHome});
+  fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [
+      {key: 'pi', disabled: true},
+      {key: 'shared', disabled: true},
+      {key: 'codex', disabled: true},
+      {key: 'cursor', disabled: true},
+      {key: 'hermes', disabled: true},
+      {key: 'opencode', disabled: true},
+      {
+        key: 'claude',
+        discoveryRoot: claude,
+        parkingRoot: path.join(userHome, '.claude', '.skillspub-off', 'skills'),
+      },
+      {
+        key: 'grok',
+        discoveryRoot: grok,
+        parkingRoot: path.join(grokHome, '.skillspub-off', 'skills'),
+      },
+    ],
+    genericTargets: [],
+  }));
+
+  const destination = path.join(grok, 'local-skill');
+  const t = await renderApp({configDir}, 100);
+  await t.send('\t');
+  await t.send('l');
+  await t.send('j');
+  assert.match(t.stdout.frame(), /missing · mirror/);
+  assert.match(t.stdout.frame(), / i mirror/);
+
+  await t.send('i');
+  const frame = t.stdout.frame();
+  assert.match(frame, /Mirror relationship\?/);
+  assert.match(frame, /managed copy/);
+  assert.match(frame, /cannot Link/);
+  assert.doesNotMatch(frame, /Shared/);
+  assert.throws(() => fs.lstatSync(destination));
+  await t.send('y');
+  assert.equal(fs.lstatSync(destination).isSymbolicLink(), false);
+  assert.ok(fs.existsSync(path.join(destination, 'SKILL.md')));
   t.unmount();
 });
 

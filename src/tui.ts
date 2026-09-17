@@ -11,10 +11,12 @@ import {
   type Home,
 } from './core.ts';
 import {
+  ASSIGNMENT_LEGEND,
   searchRows,
   skillDetail,
   sortRows,
   harnessStatusBadge,
+  projectAssignment,
   projectSharedConsumption,
   projectSourceLayers,
   projectTuiSnapshot,
@@ -574,7 +576,10 @@ function TargetStatusList({
         `${target.name}  `,
         info
           ? h(Text, {color: statusColor(info)}, statusText(info))
-          : h(Text, {dimColor: true}, 'missing'),
+          : h(Text, {dimColor: true}, projectAssignment({
+              hasResource: Boolean(row?.realPath),
+              target,
+            }).cell),
       );
     }),
   );
@@ -752,6 +757,10 @@ function ManageModal({
     h(Text, {bold: true, wrap: 'truncate-end'}, ` Manage: ${row.displayName}`),
     h(Text, {dimColor: true, wrap: 'truncate-end'},
       ` Bundles: ${bundles.length > 0 ? bundles.join(', ') : '—'}`),
+    ...(row.realPath
+      ? ASSIGNMENT_LEGEND.map((line, index) =>
+          h(Text, {key: `assign-${index}`, wrap: 'wrap', dimColor: true}, ` ${line}`))
+      : []),
     h(Text, null, ''),
     sectionTitle('Tags', manage.section === 'tags'),
     ...tagNames.map((tag, index) =>
@@ -780,6 +789,14 @@ function ConfirmationModal({
 }: {
   confirmation: Confirmation;
 }): ReactNode {
+  const assignment = confirmation.kind === 'link' || confirmation.kind === 'mirror-create'
+    ? projectAssignment({
+        hasResource: Boolean(confirmation.row.realPath),
+        target: confirmation.target,
+      })
+    : undefined;
+  const title = assignment?.title
+    ?? `${confirmation.kind === 'link' ? 'Link' : confirmation.kind === 'unlink' ? 'Unlink' : confirmation.kind.replace('mirror-', 'Mirror ')} relationship?`;
   return h(
     Box,
     {
@@ -790,8 +807,10 @@ function ConfirmationModal({
       paddingX: 1,
       justifyContent: 'center',
     },
-    h(Text, {bold: true}, `${confirmation.kind === 'link' ? 'Link' : confirmation.kind === 'unlink' ? 'Unlink' : confirmation.kind.replace('mirror-', 'Mirror ')} relationship?`),
+    h(Text, {bold: true}, title),
     h(Text, {wrap: 'wrap'}, ` ${confirmation.source} → ${confirmation.destination}`),
+    ...(assignment?.lines.map((line, index) =>
+      h(Text, {key: `assign-${index}`, wrap: 'wrap'}, ` ${line}`)) ?? []),
     h(Text, {color: 'yellow'}, ' y confirm  n/esc cancel '),
   );
 }
@@ -2867,7 +2886,9 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
               : ''
           : ''}`
         : selectedRow.realPath
-          ? projectPath ? ' space on' : actionable ? ' i link' : ''
+          ? projectPath ? ' space on' : actionable
+            ? projectAssignment({ hasResource: true, target: selectedTarget }).hint
+            : ''
           : ''
     : '';
 
