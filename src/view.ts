@@ -30,8 +30,12 @@ export interface Target {
 }
 
 export function harnessStatusBadge(
-  harness: Pick<HarnessInspection, 'support' | 'isolation'>,
+  harness: Pick<HarnessInspection, 'support' | 'isolation'> & {
+    sharedConsumption?: HarnessInspection['sharedConsumption'];
+  },
 ): {text: string; tone: 'success' | 'muted' | 'warning' | 'danger'} {
+  const required = projectSharedConsumption(harness).badge;
+  if (required) return required;
   if (harness.support !== 'managed') return {text: `[${harness.support}]`, tone: 'muted'};
   if (harness.isolation.status === 'managed' || harness.isolation.status === 'not-required')
     return {text: '[managed]', tone: 'success'};
@@ -39,6 +43,37 @@ export function harnessStatusBadge(
   return harness.isolation.status === 'drift'
     ? {text: '[drift]', tone: 'danger'}
     : {text: '[unknown]', tone: 'warning'};
+}
+
+// --- Required Shared consumption (issue #165) ---
+// Existing vocabulary only: Shared consumption = required. Isolatable Harnesses unchanged.
+
+export interface SharedConsumptionProjection {
+  required: boolean;
+  badge?: {text: string; tone: 'warning'};
+  /** Compact matrix/info suffix. Empty when isolatable. */
+  visibilityNote: string;
+  /** Why this Harness will read the Skill, and the isolation boundary. */
+  lines: string[];
+}
+
+/** Honest matrix/explain presentation for required global Shared consumption. */
+export function projectSharedConsumption(
+  harness: {
+    sharedConsumption?: {status: string; detail: string};
+  },
+): SharedConsumptionProjection {
+  if (harness.sharedConsumption?.status !== 'required')
+    return {required: false, visibilityNote: '', lines: []};
+  return {
+    required: true,
+    badge: {text: '[required]', tone: 'warning'},
+    visibilityNote: ' · Shared consumption required',
+    lines: [
+      `Shared consumption: required — ${harness.sharedConsumption.detail}`,
+      'Isolation: cannot exclude the global Shared Skill Target',
+    ],
+  };
 }
 
 export type Presence = 'on' | 'off' | 'deadlink';

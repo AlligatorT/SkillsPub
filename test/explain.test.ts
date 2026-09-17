@@ -4,6 +4,9 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { explainVisibilityFromInventory } from '../src/explain.ts';
+import { scanGlobalInventory } from '../src/inventory.ts';
+import type { HarnessInspection } from '../src/harnesses/types.ts';
 
 const CLI = path.join(import.meta.dirname, '../src/cli.ts');
 
@@ -397,4 +400,55 @@ test('a consumed Shared Relationship bypasses a Harness-specific OFF Relationshi
   assert.ok(pi.roots.some((root: { kind: string; relationships: Array<{ selected: boolean; activation: string }> }) =>
     root.kind === 'harness' &&
     root.relationships.some((relationship) => relationship.selected && relationship.activation === 'off')));
+});
+
+test('required Shared consumption is explained without pretending isolation', () => {
+  const { configDir, roots, resource } = setup();
+  const home = { configDir };
+  const report = scanGlobalInventory(home, undefined, { persist: false });
+  const required: HarnessInspection = {
+    key: 'codex',
+    name: 'Codex',
+    detected: true,
+    support: 'discoverable',
+    evidence: [],
+    targets: [],
+    roots: [{
+      kind: 'shared',
+      targetKey: 'shared',
+      scope: 'global',
+      discoveryRoot: roots.shared,
+      consumption: 'consumed',
+      reason: 'This Harness always discovers the Shared Agent Skills root.',
+    }],
+    sharedConsumption: {
+      status: 'required',
+      detail: 'This Harness always reads the global Shared Skill Target.',
+    },
+    isolation: {
+      status: 'not-required',
+      detail: 'This Harness cannot exclude the Shared Skill Target.',
+    },
+    link: { supported: true },
+  };
+
+  const explanation = explainVisibilityFromInventory(
+    home,
+    report,
+    `skill:${resource}`,
+    { harness: 'codex' },
+    { detected: [required], available: [] },
+  );
+  const harness = explanation.harnesses[0];
+  assert.equal(harness.sharedConsumption.status, 'required');
+  assert.ok(harness.reasons.some((reason) =>
+    reason.code === 'shared_consumption_required' &&
+    /always reads the global Shared Skill Target/.test(reason.message) &&
+    /cannot isolate/.test(reason.message)));
+
+  const isolatable = explainVisibilityFromInventory(
+    home, report, `skill:${resource}`, { harness: 'claude' },
+  ).harnesses[0];
+  assert.equal(isolatable.sharedConsumption.status, 'not-consumed');
+  assert.ok(!isolatable.reasons.some((reason) => reason.code === 'shared_consumption_required'));
 });
