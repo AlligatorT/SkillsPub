@@ -2,6 +2,22 @@
 
 The skills switch matrix in your terminal.
 
+![Skill × Target matrix in the TUI](assets/readme/tui-target-matrix.png)
+
+*Target tab: every Skill Target, ON/OFF Relationships, and the bottom key area.*
+
+![One skill across Targets, including missing link cells](assets/readme/tui-skill-matrix.png)
+
+*Skill tab: per-Target state, including `missing · link` cells you can create.*
+
+![Codex Target with required Shared consumption](assets/readme/tui-required-shared.png)
+
+*`[required]` Shared consumption — harnesses that always read the global Shared root, with no fake isolation.*
+
+![Explain surface for next-load Effective visibility](assets/readme/tui-explain.png)
+
+*`e` explain: next-load Effective visibility, Shared consumption, and contributing roots.*
+
 SkillsPub turns Agent Skills on and off across AI coding harnesses from one
 place. Open it and you get a skill × Target grid: what is on disk, which
 harness will pick it up on next load, and which shared folders they still
@@ -63,7 +79,8 @@ skillspub
 ```
 
 That opens the full-screen matrix (same as `skillspub tui`). Move with
-`j`/`k` and `h`/`l`. `space` toggles an existing relationship. Link, unlink,
+`j`/`k` and `h`/`l`. `space` toggles an existing relationship. The bottom key
+area lists the keys that apply to the current tab and focus. Link, unlink,
 mirror, Source, and Harness writes still ask for a confirm.
 
 The CLI prints the same grid:
@@ -132,8 +149,9 @@ Kimi Code and TraeCode remain observed only.
 
 `skillspub` in a terminal opens the keyboard-driven browser (`skillspub tui`;
 add `--project [path]` for a project-scope view). Browse the skill × Target
-matrix, toggle skills, manage Tags, Bundles, and Presets, and run the Source
-lifecycle (find, add, update, remove).
+matrix, read Shared consumption and Effective visibility (`e` explain), toggle
+skills, manage Tags, Bundles, and Presets, and run the Source lifecycle (find,
+add, update, remove). The bottom key area stays in view and regroups by context.
 
 Everything the TUI does is also a scriptable command:
 

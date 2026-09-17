@@ -10,7 +10,9 @@ dist/
 .lavish/
 .pi/
 .skillspub/
-assets/
+assets/*
+!assets/readme/
+!assets/readme/**
 learning-records/
 lessons/
 outputs/
