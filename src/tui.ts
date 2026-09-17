@@ -1,4 +1,4 @@
-import {createElement as h, useEffect, useMemo, useRef, useState} from 'react';
+import {Children, createElement as h, useEffect, useMemo, useRef, useState} from 'react';
 import type {ReactNode} from 'react';
 import {spawn} from 'node:child_process';
 import fs from 'node:fs';
@@ -328,12 +328,14 @@ function ListColumn({
   focused,
   width,
   flexGrow,
+  height,
   children,
 }: {
   title: string;
   focused: boolean;
   width?: number;
   flexGrow?: number;
+  height?: number;
   children?: ReactNode;
 }): ReactNode {
   return h(
@@ -342,16 +344,31 @@ function ListColumn({
       flexDirection: 'column',
       width,
       flexGrow,
+      height,
       flexShrink: width === undefined ? 1 : 0,
       borderStyle: 'single',
       borderColor: focused ? 'cyan' : 'gray',
     },
+    // The title never yields to overflowing content: children clip at the
+    // bottom of the column instead of the header vanishing (issue #169).
     h(
-      Text,
-      {bold: focused, color: focused ? 'cyan' : undefined},
-      ` ${title}`,
+      Box,
+      {flexShrink: 0},
+      h(
+        Text,
+        {bold: focused, color: focused ? 'cyan' : undefined},
+        ` ${title}`,
+      ),
     ),
-    children,
+    // Clip overflow at the bottom in document order; without this wrapper Yoga
+    // shrinks arbitrary child rows to height 0 when the column overflows.
+    // Children are pinned at natural height so the squeeze always clips the
+    // tail rows instead of eating arbitrary ones.
+    h(
+      Box,
+      {flexDirection: 'column', flexShrink: 1, overflow: 'hidden'},
+      Children.map(children, (child) => h(Box, {flexShrink: 0}, child)),
+    ),
   );
 }
 
@@ -595,10 +612,12 @@ function TargetInfoPanel({
   target,
   harness,
   width,
+  height,
 }: {
   target: Target;
   harness?: TuiSnapshot['harnesses']['detected'][number];
   width: number;
+  height?: number;
 }): ReactNode {
   const rows: ReactNode[] = [
     h(Text, {key: 'target-name', bold: true, wrap: 'wrap'}, ` ${target.name}`),
@@ -625,7 +644,7 @@ function TargetInfoPanel({
         : []),
     );
   }
-  return h(ListColumn, {title: 'Info', focused: false, width}, ...rows);
+  return h(ListColumn, {title: 'Info', focused: false, width, height}, ...rows);
 }
 
 function InfoPanel({
@@ -634,12 +653,14 @@ function InfoPanel({
   membership,
   visibility,
   width,
+  height,
 }: {
   row?: Row;
   info?: SkillInfo;
   membership?: Membership;
   visibility?: VisibilityExplanation;
   width: number;
+  height?: number;
 }): ReactNode {
   const inner = Math.max(8, width - 2); // column borders
   /** OSC 8 terminal hyperlink: every wrapped line maps to the full URL, so
@@ -671,7 +692,7 @@ function InfoPanel({
   };
   return h(
     ListColumn,
-    {title: 'Info', focused: false, width},
+    {title: 'Info', focused: false, width, height},
     row
       ? [
           h(Text, {key: 'name', bold: true, wrap: 'wrap'}, ` ${row.displayName}`),
@@ -830,8 +851,8 @@ function DetailModal({
   scroll: number;
   height: number;
 }): ReactNode {
-  // header + footer + modal chrome/title leave this many content rows
-  const viewHeight = Math.max(1, height - 8);
+  // paddingTop + border + title leave this many content rows
+  const viewHeight = Math.max(1, height - 4);
   const visible = lines.slice(scroll, scroll + viewHeight);
   return h(
     Box,
@@ -979,29 +1000,181 @@ function relationshipEffectLines(effects: NonNullable<SharedMutationPlan['relati
   return lines;
 }
 
-function sourceOperationHint(operation: SourceOperationState): string {
+function sourceOperationKeys(operation: SourceOperationState): string[] {
   switch (operation.phase) {
     case 'preview': {
       const blocked = operation.kind === 'update'
         ? operation.plan.blockers.length > 0 || !operation.plan.items.some(({included}) => included)
         : (operation.plan.blockers?.length ?? 0) > 0;
       return blocked
-        ? ' ↑↓/j/k scroll  l full log/evidence  blocked — esc cancel '
-        : ' ↑↓/j/k scroll  l full log/evidence  enter continue  esc cancel ';
+        ? ['↑↓/j/k scroll', 'l full log/evidence', 'blocked — esc cancel']
+        : ['↑↓/j/k scroll', 'l full log/evidence', 'enter continue', 'esc cancel'];
     }
     case 'confirm':
       return operation.kind === 'remove'
-        ? ' ↑↓/j/k scroll  enter confirm cascade  esc cancel '
-        : ' ↑↓/j/k scroll  enter confirm  esc cancel ';
+        ? ['↑↓/j/k scroll', 'l full log/evidence', 'enter confirm cascade', 'esc cancel']
+        : ['↑↓/j/k scroll', 'l full log/evidence', 'enter confirm', 'esc cancel'];
     case 'source-confirm':
-      return ' ↑↓/j/k scroll  l log/evidence  enter confirm source deletion  esc keep source ';
+      return ['↑↓/j/k scroll', 'l log/evidence', 'enter confirm source deletion', 'esc keep source'];
     case 'run':
-      return ' running — scope switching and unrelated mutations disabled ';
+      return ['running — scope switching and unrelated mutations disabled'];
     case 'verify':
-      return ' ↑↓/j/k scroll  l full log/evidence  enter acknowledge Verify truth ';
+      return ['↑↓/j/k scroll', 'l full log/evidence', 'enter/esc acknowledge Verify truth'];
     case 'failed':
-      return ' ↑↓/j/k scroll  l full log/evidence  t retry  esc acknowledge remaining Drift ';
+      return ['↑↓/j/k scroll', 'l full log/evidence', 't retry', 'esc acknowledge remaining Drift'];
   }
+}
+
+/** One labeled group of key hints in the key area. */
+interface KeyHintGroup {
+  label: string;
+  keys: string[];
+}
+
+/** Projected key-area content for the current tab/focus/modal state (issue #169). */
+interface KeyAreaContent {
+  /** Input prompt line (search / batch tag), shown instead of hint groups. */
+  prompt?: string;
+  /** Latest action feedback, on its own line. */
+  feedback?: string;
+  groups: KeyHintGroup[];
+}
+
+interface KeyAreaContext {
+  sourceLogOpen: boolean;
+  sourceDetailOpen: boolean;
+  targetInfoOpen: boolean;
+  explainOpen: boolean;
+  modalOpen: boolean;
+  manageOpen: boolean;
+  batchConfirmOpen: boolean;
+  batchTag: {action: 'add' | 'rm'; value: string} | null;
+  /** Marked count in batch mode; null when not in batch mode. */
+  batchMarks: number | null;
+  confirmationOpen: boolean;
+  searching: boolean;
+  query: string;
+  tab: Tab;
+  columnName: string;
+  feedback: string;
+  sort: SortOrder;
+  enterLabel: string;
+  canExplain: boolean;
+  actionKeys: string[];
+  sourceOperation?: SourceOperationState;
+  hasLatestSourceOperation: boolean;
+  sourceSurface: SourceSurface;
+  hasSourceCandidate: boolean;
+  sourceMarks: number;
+  sourceCanUpdate: boolean;
+  sourceRemovable: boolean;
+}
+
+/**
+ * Key-hint projection: which keys are available right now, grouped for the
+ * dedicated key area. Branch order mirrors the modal/focus priority of the App.
+ */
+function keyAreaContent(context: KeyAreaContext): KeyAreaContent {
+  if (context.sourceLogOpen)
+    return {groups: [{label: 'Log', keys: ['↑↓/j/k scroll', 'esc close log']}]};
+  if (context.sourceDetailOpen)
+    return {groups: [{label: 'Detail', keys: ['esc close']}]};
+  if (context.targetInfoOpen)
+    return {groups: [{label: 'Target info', keys: ['esc close']}]};
+  if (context.explainOpen)
+    return {groups: [{label: 'Explain', keys: ['tab Harness', 'v visible', 'h hidden', 'd diagnosis', '↑↓/j/k scroll', 'PgUp/PgDn page', 'esc close']}]};
+  if (context.modalOpen)
+    return {groups: [{label: 'SKILL.md', keys: ['↑↓/jk scroll', 'PgUp/PgDn page', 'esc close']}]};
+  if (context.manageOpen)
+    return {
+      feedback: context.feedback || undefined,
+      groups: [{label: 'Manage', keys: ['j/k move', 'tab section', 'space toggle', 'a add', 'x rm tag', 'esc close']}],
+    };
+  // Mirrors input-handler priority: search editing wins over batch/confirm keys.
+  if (context.searching)
+    return {prompt: ` search: ${context.query || '…'}  enter ${context.tab === 'source' ? 'search Source' : 'apply'}  esc clear`, groups: []};
+  if (context.batchConfirmOpen)
+    return {groups: [{label: 'Confirm', keys: ['y confirm', 'n/esc cancel']}]};
+  if (context.batchTag)
+    return {prompt: ` tag ${context.batchTag.action === 'add' ? 'add' : 'rm'}: ${context.batchTag.value}  enter apply  esc cancel`, groups: []};
+  if (context.batchMarks !== null)
+    return {
+      feedback: context.feedback || undefined,
+      groups: [{label: 'Batch', keys: [`${context.batchMarks} marked`, 'v/esc exit', 'space mark', 'o on', 'O off', 't tag', 'T untag', '↑↓/jk move', 'enter SKILL.md', '/ search', 'tab switch', 'q quit']}],
+    };
+  if (context.confirmationOpen)
+    return {groups: [{label: 'Confirm', keys: ['y confirm', 'n/esc cancel']}]};
+  if (context.tab === 'source') {
+    if (context.sourceOperation)
+      return {groups: [{label: `source:${context.columnName}`, keys: sourceOperationKeys(context.sourceOperation)}]};
+    return {
+      feedback: context.feedback || undefined,
+      groups: [
+        {label: `source:${context.columnName}`, keys: [
+          '↑↓/jk',
+          'enter detail',
+          ...(context.hasSourceCandidate ? ['a add/replace'] : []),
+          ...(context.sourceSurface === 'inventory'
+            ? [
+                `space mark (${context.sourceMarks})`,
+                ...(context.sourceCanUpdate ? ['u update'] : []),
+                ...(context.sourceMarks > 0 ? ['b batch update'] : []),
+                ...(context.sourceRemovable ? ['d remove'] : []),
+              ]
+            : []),
+        ]},
+        {label: 'View', keys: [
+          '/ search',
+          'r refresh',
+          ...(context.hasLatestSourceOperation ? ['l latest transcript'] : []),
+        ]},
+        {label: 'Workspace', keys: ['tab Catalog/Inventory', '1/2 matrices', 'q']},
+      ],
+    };
+  }
+  return {
+    feedback: context.feedback || undefined,
+    groups: [
+      {label: `${context.tab}:${context.columnName}`, keys: ['←→/hl', '↑↓/jk', ...(context.canExplain ? ['e explain'] : [])]},
+      {label: 'Actions', keys: [...context.actionKeys, `enter ${context.enterLabel}`, 'm manage', 'v batch']},
+      {label: 'View', keys: ['/ search', `s sort:${sortLabel(context.sort)}`, 'R refresh']},
+      {label: 'Workspace', keys: ['tab', '1/2/3 workspace', 'q']},
+    ],
+  };
+}
+
+/** Rows the key area occupies: divider + prompt + feedback + one line per group. */
+function keyAreaRows(content: KeyAreaContent): number {
+  return 1 + (content.prompt ? 1 : 0) + (content.feedback ? 1 : 0) + content.groups.length;
+}
+
+/** Dedicated bottom key area: a divider plus one line per context group. */
+function KeyArea({content}: {content: KeyAreaContent}): ReactNode {
+  return h(
+    Box,
+    {
+      flexDirection: 'column',
+      flexShrink: 0,
+      borderStyle: 'single',
+      borderColor: 'gray',
+      borderTop: true,
+      borderBottom: false,
+      borderLeft: false,
+      borderRight: false,
+    },
+    content.prompt ? h(Text, {wrap: 'truncate-end'}, content.prompt) : null,
+    content.feedback ? h(Text, {color: 'yellow', wrap: 'truncate-end'}, ` ${content.feedback}`) : null,
+    ...content.groups.map((group, index) =>
+      h(
+        Text,
+        {key: index, wrap: 'truncate-end'},
+        // A lone group carries no grouping information; skip its label so
+        // narrow terminals keep the full hint text.
+        content.groups.length > 1 ? h(Text, {dimColor: true}, ` ${group.label}  `) : ' ',
+        group.keys.join('  '),
+      ),
+    ),
+  );
 }
 
 function sourceOperationLines(operation: SourceOperationState): {title: string; lines: string[]} {
@@ -1413,7 +1586,7 @@ function SourceWorkspace({
       });
   return h(
     Box,
-    {height, flexDirection: 'column'},
+    {height, flexDirection: 'column', overflow: 'hidden'},
     h(Text, {wrap: 'wrap'}, `Scope: Global (default/recommended)  Path: ${scopePath}`),
     h(Text, {color: 'cyan', wrap: 'wrap'}, 'Discover → Inspect & plan → Confirm ownership → Run & maintain → Verify truth'),
     h(
@@ -1537,7 +1710,7 @@ function ExplainModal({
   scroll: number;
   height: number;
 }): ReactNode {
-  const viewHeight = Math.max(1, height - 8);
+  const viewHeight = Math.max(1, height - 4);
   return h(
     Box,
     {
@@ -1681,8 +1854,6 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
           .map((row) => row.id),
       )
     : undefined;
-  const bodyHeight = Math.max(3, height - 2);
-  const listHeight = Math.max(1, bodyHeight - 3);
   const targetStatusWidth = Math.max(
     28,
     Math.min(40, Math.max(0, ...targets.map((target) => target.name.length)) + 24),
@@ -1697,7 +1868,6 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     ? (skillDetail(home, modal.row.id, projectPath)?.content ?? 'SKILL.md unavailable')
     : '';
   const modalLines = modal ? detailLines(modalContent, Math.max(1, width - 8)) : [];
-  const modalPage = Math.max(1, height - 6);
   const sourceEvidenceOperation = sourceOperation ?? latestSourceOperation;
   const sourceLogLines = sourceEvidenceOperation
     ? detailLines([
@@ -1785,6 +1955,70 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   );
   const selectedCell = selectedRow && selectedTarget;
   const actionable = focusColumn === 1 && selectedCell;
+  const columnName =
+    tab === 'source'
+      ? sourceSurface
+      : tab === 'target'
+        ? focusColumn === 0
+          ? 'targets'
+          : 'relationships'
+        : focusColumn === 0
+          ? 'skills'
+          : 'targets';
+  const actionKeys: string[] = !selectedCell || inheritedOn(selectedInfo)
+    ? []
+    : selectedInfo && !selectedInfo.readOnly
+      ? [
+          `space ${selectedInfo.underOff ? 'on' : 'off'}`,
+          ...(actionable
+            ? selectedInfo.mirrored
+              ? ['S sync', 'o overwrite', 'c convert', 'u remove']
+              : selectedInfo.linked
+                ? ['u unlink']
+                : []
+            : []),
+        ]
+      : selectedRow.realPath
+        ? projectPath ? ['space on'] : actionable
+          ? [projectAssignment({hasResource: true, target: selectedTarget}).hint.trim()]
+          : []
+        : [];
+  // Key area projection (issue #169): context-appropriate keys in a dedicated
+  // bottom area; the main viewport shrinks by however many rows it needs.
+  const keyArea = keyAreaContent({
+    sourceLogOpen,
+    sourceDetailOpen,
+    targetInfoOpen,
+    explainOpen: explainModal !== null,
+    modalOpen: modal !== null,
+    manageOpen: manage !== null,
+    batchConfirmOpen: batchConfirm !== null,
+    batchTag,
+    batchMarks: batch ? batch.marks.size : null,
+    confirmationOpen: confirmation !== null,
+    searching,
+    query,
+    tab,
+    columnName,
+    feedback,
+    sort,
+    enterLabel: tab === 'target' && focusColumn === 0 ? 'details' : 'SKILL.md',
+    canExplain: Boolean(selectedRow?.realPath),
+    actionKeys,
+    sourceOperation,
+    hasLatestSourceOperation: Boolean(latestSourceOperation),
+    sourceSurface,
+    hasSourceCandidate: sourceSurface === 'catalog' && Boolean(sourceCandidate),
+    sourceMarks: sourceMarks.size,
+    sourceCanUpdate: Boolean(
+      sourceResource?.updateAvailability?.status === 'available' &&
+      mutableSourceRelationship(sourceResource),
+    ),
+    sourceRemovable,
+  });
+  const bodyHeight = Math.max(3, height - 1 - keyAreaRows(keyArea));
+  const listHeight = Math.max(1, bodyHeight - 3);
+  const modalPage = Math.max(1, bodyHeight - 4);
   const manageRow = manage ? rows.find((candidate) => candidate.id === manage.rowId) : undefined;
   const membership = useMemo((): Membership | undefined => {
     if (!selectedRow) return undefined;
@@ -2864,34 +3098,6 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     }
   });
 
-  const columnName =
-    tab === 'source'
-      ? sourceSurface
-      : tab === 'target'
-        ? focusColumn === 0
-          ? 'targets'
-          : 'relationships'
-        : focusColumn === 0
-          ? 'skills'
-          : 'targets';
-  const actionHint = selectedCell
-    ? inheritedOn(selectedInfo)
-      ? ''
-      : selectedInfo && !selectedInfo.readOnly
-        ? ` space ${selectedInfo.underOff ? 'on' : 'off'}${actionable
-          ? selectedInfo.mirrored
-            ? '  S sync  o overwrite  c convert  u remove'
-            : selectedInfo.linked
-              ? '  u unlink'
-              : ''
-          : ''}`
-        : selectedRow.realPath
-          ? projectPath ? ' space on' : actionable
-            ? projectAssignment({ hasResource: true, target: selectedTarget }).hint
-            : ''
-          : ''
-    : '';
-
   return h(
     Box,
     {flexDirection: 'column', width, height},
@@ -2938,6 +3144,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
             target,
             harness: targetHarness,
             width: Math.max(12, width - 4),
+            height: bodyHeight - 1,
           }),
         )
       : explainModal
@@ -2951,14 +3158,14 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
               harnessCount: Math.max(1, explainHarnesses.length),
               lines: explainDetailLines,
               scroll: explainModal.scroll,
-              height,
+              height: bodyHeight,
             }),
           )
       : modal
         ? h(
             Box,
             {height: bodyHeight, paddingLeft: 2, paddingRight: 2, paddingTop: 1},
-            h(DetailModal, {row: modal.row, lines: modalLines, scroll: modal.scroll, height}),
+            h(DetailModal, {row: modal.row, lines: modalLines, scroll: modal.scroll, height: bodyHeight}),
           )
       : manage && manageRow
         ? h(
@@ -3027,6 +3234,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
                     target,
                     harness: targetHarness,
                     width: infoWidth,
+                    height: listHeight,
                   })
                 : h(InfoPanel, {
                     row: entry?.row,
@@ -3034,6 +3242,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
                     membership,
                     visibility,
                     width: infoWidth,
+                    height: listHeight,
                   })
               : null,
           )
@@ -3055,6 +3264,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
                   membership,
                   visibility,
                   width: infoWidth,
+                  height: listHeight,
                 })
               : null,
             h(TargetStatusList, {
@@ -3066,37 +3276,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
               height: listHeight,
             }),
           ),
-    h(
-      Text,
-      {inverse: true, wrap: 'truncate-end'},
-      sourceLogOpen
-        ? ' ↑↓/j/k scroll  esc close log '
-        : sourceDetailOpen
-        ? ' esc close '
-        : targetInfoOpen
-        ? ' esc close '
-        : explainModal
-          ? ' tab Harness  v visible  h hidden  d diagnosis  ↑↓/j/k scroll  PgUp/PgDn page  esc close '
-        : modal
-          ? ' ↑↓/jk scroll  PgUp/PgDn page  esc close '
-        : manage
-          ? ` ${feedback}${feedback ? '  ' : ''}j/k move  tab section  space toggle  a add  x rm tag  esc close `
-        : batchConfirm
-          ? ' y confirm  n/esc cancel '
-        : batchTag
-          ? ` tag ${batchTag.action === 'add' ? 'add' : 'rm'}: ${batchTag.value}`
-        : batch
-          ? ` ${feedback}${feedback ? '  ' : ''}${batch.marks.size} marked  v/esc exit  space mark  o on  O off  t tag  T untag `
-        : confirmation
-          ? ' y confirm  n/esc cancel '
-        : searching
-          ? ` search: ${query || '…'}  enter ${tab === 'source' ? 'search Source' : 'apply'}  esc clear `
-          : tab === 'source'
-            ? sourceOperation
-              ? sourceOperationHint(sourceOperation)
-              : ` ${feedback}${feedback ? '  ' : ''}source:${columnName}${latestSourceOperation ? '  l latest transcript' : ''}  tab Catalog/Inventory  / search  ↑↓/jk  enter detail${sourceSurface === 'catalog' && sourceCandidate ? '  a add/replace' : ''}  r refresh${sourceSurface === 'inventory' ? `  space mark (${sourceMarks.size})${sourceResource?.updateAvailability?.status === 'available' && mutableSourceRelationship(sourceResource) ? '  u update' : ''}${sourceMarks.size > 0 ? '  b batch update' : ''}${sourceRemovable ? '  d remove' : ''}` : ''}  1/2 matrices  q `
-            : ` ${feedback}${feedback ? '  ' : ''}${tab}:${columnName}  ←→/hl  ↑↓/jk${selectedRow?.realPath ? '  e explain' : ''}${actionHint}  enter ${tab === 'target' && focusColumn === 0 ? 'details' : 'SKILL.md'}  m manage  / search  s sort:${sortLabel(sort)}  R refresh  tab  1/2/3 workspace  q `,
-    ),
+    h(KeyArea, {content: keyArea}),
   );
 }
 
