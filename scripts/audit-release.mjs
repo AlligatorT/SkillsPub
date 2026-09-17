@@ -56,7 +56,7 @@ assert.deepEqual(
     ['opencode', 'discoverable'],
     ['pi', 'managed'],
   ],
-  'v0.1.0 Harness boundary changed',
+  'v0.2.0 Harness boundary changed',
 );
 const license = fs.readFileSync(path.join(root, 'LICENSE'), 'utf8');
 assert.equal(manifest.license, 'MIT');
@@ -76,5 +76,5 @@ const licenseProblems = Object.entries(lock.packages)
 assert.deepEqual(licenseProblems, [], `runtime dependency license audit failed:\n${licenseProblems.join('\n')}`);
 
 process.stdout.write(
-  `release audit passed: ${tracked.length} tracked files, v0.1.0 Harness boundary and runtime dependency licenses checked\n`,
+  `release audit passed: ${tracked.length} tracked files, v0.2.0 Harness boundary and runtime dependency licenses checked\n`,
 );

@@ -1,6 +1,6 @@
 {
   "name": "skillspub",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "SkillsPub multi-agent skills on/off manager — disk is the source of truth",
   "type": "module",
   "files": [

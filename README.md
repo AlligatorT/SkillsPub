@@ -174,7 +174,7 @@ npm run build
 npm run audit:release
 npm run check:package
 npm pack --ignore-scripts
-npm run check:package -- ./skillspub-0.1.0.tgz
+npm run check:package -- ./skillspub-0.2.0.tgz
 npm pack --dry-run --ignore-scripts
 ```
 
