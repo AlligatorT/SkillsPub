@@ -1011,6 +1011,87 @@ function DetailModal({
   );
 }
 
+/** Pure Projection of one Adapter inspection. Wide keeps full evidence; narrow reduces passive URLs. */
+function harnessInspectionLines(harness: HarnessSummary, wide: boolean): string[] {
+  const lines = [
+    `Harness: ${harness.name}`,
+    `Detected: ${harness.detected ? 'yes' : 'no'}`,
+    `Adapter support: ${harness.support}`,
+    ...(harness.support === 'managed' ? [MANAGED_SUPPORT_EXPLANATION] : []),
+    `Shared consumption: ${harness.sharedConsumption.status}`,
+    `  ${harness.sharedConsumption.detail}`,
+    `Isolation: ${harness.isolation.status}`,
+    `  ${harness.isolation.detail}`,
+    ...projectSharedConsumption(harness).lines,
+    `Link: ${harness.link.supported ? 'supported' : 'unsupported'}`,
+    ...(harness.mirror
+      ? [`Mirror: ${harness.mirror.supported ? 'supported' : 'unsupported'}`]
+      : []),
+    '',
+    'Resolved Targets:',
+    ...(harness.targets.length === 0
+      ? ['  (none)']
+      : harness.targets.map((target) => `  ${target.scope}: ${target.discoveryRoot}`)),
+    '',
+    'Discovery roots:',
+    ...harness.roots.flatMap((root) => [
+      `  ${root.kind}/${root.targetKey} ${root.scope} [${root.consumption}]`,
+      `    ${root.discoveryRoot}`,
+      `    ${root.reason}`,
+    ]),
+    '',
+    'Evidence:',
+  ];
+  if (harness.evidence.length === 0) {
+    lines.push('  (none)');
+  } else if (wide) {
+    for (const evidence of harness.evidence) {
+      lines.push(
+        `  verified ${evidence.verifiedVersion}`,
+        `  ${evidence.detail}`,
+        `  ${evidence.url}`,
+      );
+    }
+  } else {
+    // Narrow: status stays readable; passive evidence collapses to versions only.
+    lines.push(`  ${harness.evidence.map((evidence) => evidence.verifiedVersion).join(', ')}`);
+  }
+  return lines;
+}
+
+function HarnessDetailModal({
+  harness,
+  lines,
+  scroll,
+  height,
+}: {
+  harness: HarnessSummary;
+  lines: string[];
+  scroll: number;
+  height: number;
+}): ReactNode {
+  const viewHeight = Math.max(1, height - 4);
+  return h(
+    Box,
+    {
+      flexGrow: 1,
+      flexDirection: 'column',
+      borderStyle: 'round',
+      borderColor: 'cyan',
+      paddingX: 1,
+      overflow: 'hidden',
+    },
+    h(
+      Text,
+      {bold: true, wrap: 'truncate-end'},
+      `Harness — ${harness.name}  [${Math.min(scroll + 1, lines.length)}/${lines.length}]`,
+    ),
+    ...lines.slice(scroll, scroll + viewHeight).map((line, index) =>
+      h(Text, {key: scroll + index, wrap: 'truncate-end'}, line || ' '),
+    ),
+  );
+}
+
 function mutableSourceRelationship(
   row: Row | undefined,
 ): SkillRelationship | undefined {
@@ -1180,6 +1261,7 @@ interface KeyAreaContext {
   sourceLogOpen: boolean;
   sourceDetailOpen: boolean;
   targetInfoOpen: boolean;
+  harnessDetailOpen: boolean;
   explainOpen: boolean;
   modalOpen: boolean;
   manageOpen: boolean;
@@ -1217,6 +1299,8 @@ function keyAreaContent(context: KeyAreaContext): KeyAreaContent {
     return {groups: [{label: 'Detail', keys: ['esc close']}]};
   if (context.targetInfoOpen)
     return {groups: [{label: 'Target info', keys: ['esc close']}]};
+  if (context.harnessDetailOpen)
+    return {groups: [{label: 'Harness detail', keys: ['↑↓/jk scroll', 'PgUp/PgDn page', 'esc close']}]};
   if (context.explainOpen)
     return {groups: [{label: 'Explain', keys: ['tab Harness', 'v visible', 'h hidden', 'd diagnosis', '↑↓/j/k scroll', 'PgUp/PgDn page', 'esc close']}]};
   if (context.modalOpen)
@@ -1268,12 +1352,12 @@ function keyAreaContent(context: KeyAreaContext): KeyAreaContent {
       ],
     };
   }
-  // Harness tab skeleton (#191): browse-only Projection; no actions yet (#192–#196).
+  // Harness tab (#191/#192): Projection browse + row detail; setup/reconcile later (#193+).
   if (context.tab === 'harness') {
     return {
       feedback: context.feedback || undefined,
       groups: [
-        {label: 'harness:adapters', keys: ['↑↓/jk']},
+        {label: 'harness:adapters', keys: ['↑↓/jk', 'enter detail']},
         {label: 'View', keys: ['R refresh']},
         {label: 'Workspace', keys: ['tab', '1/2/3/4 workspace', 'q']},
       ],
@@ -1949,6 +2033,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   const [modal, setModal] = useState<{row: Row; scroll: number} | null>(null);
   const [explainModal, setExplainModal] = useState<ExplainModalState | null>(null);
   const [targetInfoOpen, setTargetInfoOpen] = useState(false);
+  const [harnessDetail, setHarnessDetail] = useState<{scroll: number} | null>(null);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [manage, setManage] = useState<ManageState | null>(null);
   const [batch, setBatch] = useState<{ marks: Set<string> } | null>(null);
@@ -2021,6 +2106,13 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     ? (skillDetail(home, modal.row.id, projectPath)?.content ?? 'SKILL.md unavailable')
     : '';
   const modalLines = modal ? detailLines(modalContent, Math.max(1, width - 8)) : [];
+  const selectedHarness = harnessRows[selectedHarnessIndex];
+  const harnessDetailSource = harnessDetail && selectedHarness
+    ? harnessInspectionLines(selectedHarness, wide)
+    : [];
+  const harnessDetailLines = harnessDetail
+    ? detailLines(harnessDetailSource.join('\n'), Math.max(1, width - 8))
+    : [];
   const sourceEvidenceOperation = sourceOperation ?? latestSourceOperation;
   const sourceLogLines = sourceEvidenceOperation
     ? detailLines([
@@ -2144,6 +2236,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     sourceLogOpen,
     sourceDetailOpen,
     targetInfoOpen,
+    harnessDetailOpen: harnessDetail !== null,
     explainOpen: explainModal !== null,
     modalOpen: modal !== null,
     manageOpen: manage !== null,
@@ -2646,6 +2739,22 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       if (key.escape) setTargetInfoOpen(false);
       return;
     }
+    if (harnessDetail) {
+      if (key.escape) return setHarnessDetail(null);
+      if (key.downArrow || input === 'j')
+        return setHarnessDetail({
+          scroll: Math.min(Math.max(0, harnessDetailLines.length - 1), harnessDetail.scroll + 1),
+        });
+      if (key.upArrow || input === 'k')
+        return setHarnessDetail({scroll: Math.max(0, harnessDetail.scroll - 1)});
+      if (key.pageDown || (key.ctrl && input === 'd'))
+        return setHarnessDetail({
+          scroll: Math.min(Math.max(0, harnessDetailLines.length - 1), harnessDetail.scroll + modalPage),
+        });
+      if (key.pageUp || (key.ctrl && input === 'u'))
+        return setHarnessDetail({scroll: Math.max(0, harnessDetail.scroll - modalPage)});
+      return;
+    }
     if (explainModal) {
       if (key.escape) return setExplainModal(null);
       if (key.tab && explainHarnesses.length > 0) {
@@ -2949,7 +3058,11 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         setHarnessIndex((value) => Math.max(0, value - 1));
         return;
       }
-      // Skeleton: no row actions, detail surface, or setup/reconcile yet (#192–#196).
+      if (key.return && selectedHarness) {
+        setHarnessDetail({scroll: 0});
+        return;
+      }
+      // No setup/reconcile/plan/apply yet (#193+).
       return;
     }
     if (tab === 'source') {
@@ -3338,6 +3451,17 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
             harness: targetHarness,
             width: Math.max(12, width - 4),
             height: bodyHeight - 1,
+          }),
+        )
+      : harnessDetail && selectedHarness
+      ? h(
+          Box,
+          {height: bodyHeight, paddingLeft: 2, paddingRight: 2, paddingTop: 1},
+          h(HarnessDetailModal, {
+            harness: selectedHarness,
+            lines: harnessDetailLines,
+            scroll: harnessDetail.scroll,
+            height: bodyHeight,
           }),
         )
       : explainModal

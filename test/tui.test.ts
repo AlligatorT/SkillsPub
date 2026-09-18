@@ -2280,10 +2280,10 @@ test('Harness tab cycles with Tab/4 and shows context-valid keys only', async ()
   let frame = t.stdout.frame();
   assert.match(frame, /4 Harness/);
   assert.match(frame, /Harnesses/);
-  assert.match(frame, /harness:adapters {2}↑↓\/jk/);
+  assert.match(frame, /harness:adapters {2}↑↓\/jk {2}enter detail/);
   assert.match(frame, /View {2}R refresh/);
   assert.match(frame, /Workspace {2}tab {2}1\/2\/3\/4 workspace {2}q/);
-  assert.doesNotMatch(frame, /enter details|enter SKILL|m manage|v batch|space off|space on|\/ search|s sort:/);
+  assert.doesNotMatch(frame, /enter details|enter SKILL|m manage|v batch|space off|space on|\/ search|s sort:|setup|reconcile/i);
 
   await t.send('\t'); // target
   assert.match(t.stdout.frame(), /1 Target/);
@@ -2310,8 +2310,9 @@ test('Harness tab lists one row per Adapter with honest support/shared/isolation
   assert.match(frame, /Hermes\s+\[discover(?:able)?\]\s+\[not-consumed\]\s+\[not-required\]/);
   assert.match(frame, /OpenCode\s+\[discoverable\]\s+\[required\]\s+\[unmanaged\]/);
 
-  // No-op rows: status only, no action affordance in the key area.
-  assert.doesNotMatch(frame, /setup|reconcile|enter detail|a add/i);
+  // Browse + detail only; no setup/reconcile action affordance yet.
+  assert.doesNotMatch(frame, /setup|reconcile|a add/i);
+  assert.match(frame, /enter detail/);
   t.unmount();
 });
 
@@ -2337,6 +2338,95 @@ test('Harness tab keeps badges intact on narrow terminals and navigates rows', a
   assert.match(frame, /\[required\]/);
   assert.match(frame, /\[unmanaged\]/);
   t.unmount();
+});
+
+test('Harness row detail opens on Enter, traps focus, and closes on Esc without mutating', async () => {
+  const {home} = setupHarnessTabHome();
+  const before = fs.readdirSync(home.configDir, {recursive: true}).sort();
+  const t = await renderApp(home, 120, 34);
+  await t.send('4');
+  await t.send('j');
+  await t.send('j'); // Pi
+  await t.send('\r');
+
+  let frame = t.stdout.frame();
+  assert.match(frame, /Harness — Pi/);
+  assert.match(frame, /Shared consumption:\s*excluded/);
+  assert.match(frame, /Isolation:\s*unmanaged/);
+  assert.match(frame, /Resolved Targets:/);
+  assert.match(frame, /Discovery roots:/);
+  assert.match(frame, /Evidence:/);
+  assert.match(frame, /verified /);
+  // Lone key group drops its label so the full hint stays on one line.
+  assert.match(frame, /↑↓\/jk scroll {2}PgUp\/PgDn page {2}esc close/);
+  assert.doesNotMatch(frame, /harness:adapters|R refresh|1\/2\/3\/4 workspace/);
+
+  // Focus trap: row nav / tab / refresh do not escape the detail surface.
+  await t.send('j');
+  assert.match(t.stdout.frame(), /Harness — Pi/);
+  await t.send('4');
+  assert.match(t.stdout.frame(), /Harness — Pi/);
+  await t.send('R');
+  assert.match(t.stdout.frame(), /Harness — Pi/);
+  await t.send('\t');
+  frame = t.stdout.frame();
+  assert.match(frame, /Harness — Pi/);
+  assert.doesNotMatch(frame, /› Claude Code|› Grok Build/);
+
+  await t.send('\x1b');
+  frame = t.stdout.frame();
+  assert.match(frame, /Harnesses/);
+  assert.match(frame, /› Pi/);
+  assert.match(frame, /enter detail/);
+  assert.doesNotMatch(frame, /Harness — Pi|esc close/);
+
+  const after = fs.readdirSync(home.configDir, {recursive: true}).sort();
+  assert.deepEqual(after, before);
+  t.unmount();
+});
+
+test('Harness row detail shows full evidence wide and reduces passive evidence narrow', async () => {
+  const {home} = setupHarnessTabHome();
+
+  const wide = await renderApp(home, 120, 40);
+  await wide.send('4');
+  await wide.send('j');
+  await wide.send('j'); // Pi
+  await wide.send('\r');
+  let frame = wide.stdout.frame();
+  assert.match(frame, /Harness — Pi/);
+  assert.match(frame, /Shared consumption:\s*excluded/);
+  assert.match(frame, /Isolation:\s*unmanaged/);
+  assert.match(frame, /Resolved Targets:/);
+  assert.match(frame, /Discovery roots:/);
+  assert.match(frame, /harness\/pi|shared\/shared/);
+  // Scroll to the Evidence block if the first page is status-heavy.
+  for (let i = 0; i < 30 && !/Evidence:/.test(frame); i++) {
+    await wide.send('j');
+    frame = wide.stdout.frame();
+  }
+  assert.match(frame, /Evidence:/);
+  assert.match(frame, /verified /);
+  assert.match(frame, /https?:\/\//);
+  wide.unmount();
+
+  const narrow = await renderApp(home, 52, 40);
+  await narrow.send('4');
+  await narrow.send('j');
+  await narrow.send('j'); // Pi
+  await narrow.send('\r');
+  frame = narrow.stdout.frame();
+  assert.match(frame, /Harness — Pi/);
+  assert.match(frame, /Shared consumption:\s*excluded/);
+  assert.match(frame, /Isolation:\s*unmanaged/);
+  for (let i = 0; i < 40 && !/Evidence:/.test(frame); i++) {
+    await narrow.send('j');
+    frame = narrow.stdout.frame();
+  }
+  assert.match(frame, /Evidence:/);
+  // Status readable; passive evidence URLs collapsed away on narrow.
+  assert.doesNotMatch(frame, /https?:\/\//);
+  narrow.unmount();
 });
 
 test('footer reflects available navigation actions and modal state', async () => {
