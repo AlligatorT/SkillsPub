@@ -95,6 +95,7 @@ import { harnessAdapters, planHarnessOperation } from './harnesses/registry.ts';
 import type {
   HarnessOperation,
   HarnessOperationPlan,
+  HarnessOperationResult,
   HarnessRelationshipImpact,
 } from './harnesses/types.ts';
 
@@ -241,20 +242,116 @@ function stableHarnessPlanFingerprint(plan: HarnessOperationPlan): string {
   });
 }
 
+function harnessResultDisplayLines(state: {
+  operation: HarnessMutateOp;
+  phase: 'applying' | 'result' | 'failed';
+  name: string;
+  recovery: readonly string[];
+  result?: HarnessOperationResult;
+  error?: string;
+  partialEffects?: 'none' | 'present' | 'unknown';
+}): string[] {
+  if (state.phase === 'applying') {
+    return [
+      `Applying ${state.name} ${state.operation}…`,
+      'Unrelated actions disabled until apply finishes.',
+    ];
+  }
+  if (state.phase === 'failed') {
+    const out = [
+      'Apply failed — completed work preserved as-is (no broad rollback).',
+      `Error: ${state.error ?? 'unknown error'}`,
+      `Partial effects: ${state.partialEffects ?? 'unknown'}`,
+      'Retry only via a fresh plan from a fresh inspection.',
+    ];
+    if (state.recovery.length > 0) {
+      out.push('', 'Recovery:');
+      for (const line of state.recovery) out.push(`  ${line}`);
+    }
+    return out;
+  }
+  const result = state.result;
+  if (!result) {
+    return [
+      `${state.name} ${state.operation} verified.`,
+      'Adapter provided no detailed result observations.',
+      'Enter acknowledges verified result.',
+    ];
+  }
+  const out = [
+    // Distinct labeled observations — do not collapse into one status line.
+    `Actual: ${result.actual.unlinkedRelationships} unlinked · ` +
+      `${result.actual.retainedRelationships} retained · ` +
+      `${result.actual.preservedSourceResources} sources preserved`,
+    `Desired: ${result.desired.unlinkedRelationships} unlinked · ` +
+      `${result.desired.retainedRelationships} retained · ` +
+      `${result.desired.preservedSourceResources} sources preserved`,
+    `Isolation: ${result.isolation.status} — ${result.isolation.detail}`,
+  ];
+  if (result.sharedConsumption) {
+    out.push(
+      `Shared consumption: ${result.sharedConsumption.status} — ${result.sharedConsumption.detail}`,
+    );
+  }
+  out.push(
+    `Recovery artifacts: config backup ${result.recovery.configBackupPreserved ? 'preserved' : 'missing'}` +
+      (result.recovery.stateBackupPreserved === undefined
+        ? ''
+        : `; state backup ${result.recovery.stateBackupPreserved ? 'preserved' : 'missing'}`) +
+      `; manifest ${result.recovery.manifestPreserved ? 'preserved' : 'missing'}` +
+      (result.recovery.manifestPath ? ` (${result.recovery.manifestPath})` : ''),
+  );
+  if (result.effectiveVisibility) {
+    out.push(
+      `Effective Visibility (next load): ${result.effectiveVisibility.status} — ` +
+        `${result.effectiveVisibility.detail}`,
+    );
+  }
+  out.push('Relationship outcomes:');
+  if (result.relationshipEffects.length === 0) {
+    out.push('  (none)');
+  } else {
+    for (const effect of result.relationshipEffects) {
+      out.push(
+        `  ${effect.outcome}: ${effect.form}/${effect.activation} name=${effect.name} ` +
+          `source=${effect.sourcePath} target=${effect.targetPath}`,
+      );
+    }
+  }
+  out.push('', 'Enter acknowledges verified result.');
+  return out;
+}
+
 function harnessPlanDisplayLines(state: {
   title: string;
+  name: string;
   operation: HarnessMutateOp;
-  phase: 'plan' | 'confirm' | 'stale';
+  phase: HarnessPlanState['phase'];
   lines: readonly string[];
   recovery: readonly string[];
   impact?: HarnessRelationshipImpact;
   explanation?: string;
+  result?: HarnessOperationResult;
+  error?: string;
+  partialEffects?: 'none' | 'present' | 'unknown';
 }): string[] {
+  if (state.phase === 'applying' || state.phase === 'result' || state.phase === 'failed') {
+    return harnessResultDisplayLines({
+      operation: state.operation,
+      phase: state.phase,
+      name: state.name,
+      recovery: state.recovery,
+      result: state.result,
+      error: state.error,
+      partialEffects: state.partialEffects,
+    });
+  }
   // Phase banners first so confirm/stale explanations stay above the fold.
   const out: string[] = [];
   if (state.phase === 'confirm') {
     out.push(
       'Confirm this plan. Enter rechecks fresh state before any apply; Esc cancels with zero mutation.',
+      'Unrelated actions are disabled while this plan is confirmed or applied.',
       '',
     );
   }
@@ -303,7 +400,7 @@ interface HarnessPlanState {
   key: string;
   name: string;
   operation: HarnessMutateOp;
-  phase: 'plan' | 'confirm' | 'stale';
+  phase: 'plan' | 'confirm' | 'stale' | 'applying' | 'result' | 'failed';
   title: string;
   lines: readonly string[];
   recovery: readonly string[];
@@ -311,6 +408,9 @@ interface HarnessPlanState {
   fingerprint: string;
   scroll: number;
   explanation?: string;
+  result?: HarnessOperationResult;
+  error?: string;
+  partialEffects?: 'none' | 'present' | 'unknown';
 }
 
 function badgeToneProps(tone: BadgeTone): {color?: string; dimColor?: boolean} {
@@ -1213,7 +1313,7 @@ function HarnessDetailModal({
   );
 }
 
-/** Plan/confirm/stale surface for Harness setup|reconcile (#193). Projection only until apply (#194). */
+/** Plan/confirm/apply/result surface for Harness setup|reconcile (#193/#194). */
 function HarnessPlanModal({
   state,
   lines,
@@ -1224,16 +1324,17 @@ function HarnessPlanModal({
   height: number;
 }): ReactNode {
   const viewHeight = Math.max(1, height - 4);
-  const phaseLabel = state.phase === 'plan' ? 'plan'
-    : state.phase === 'confirm' ? 'confirm'
-      : 'stale';
+  const phaseLabel = state.phase;
+  const borderColor = state.phase === 'stale' || state.phase === 'failed' ? 'yellow'
+    : state.phase === 'result' ? 'green'
+      : 'cyan';
   return h(
     Box,
     {
       flexGrow: 1,
       flexDirection: 'column',
       borderStyle: 'round',
-      borderColor: state.phase === 'stale' ? 'yellow' : 'cyan',
+      borderColor,
       paddingX: 1,
       overflow: 'hidden',
     },
@@ -1463,6 +1564,12 @@ function keyAreaContent(context: KeyAreaContext): KeyAreaContent {
       return {groups: [{label: 'Harness stale', keys: ['↑↓/jk scroll', 'esc back']}]};
     if (context.harnessPlan.phase === 'confirm')
       return {groups: [{label: 'Harness confirm', keys: ['↑↓/jk scroll', 'enter confirm', 'esc cancel']}]};
+    if (context.harnessPlan.phase === 'applying')
+      return {groups: [{label: 'Harness applying', keys: ['unrelated actions disabled']}]};
+    if (context.harnessPlan.phase === 'result')
+      return {groups: [{label: 'Harness result', keys: ['↑↓/jk scroll', 'enter/esc acknowledge']}]};
+    if (context.harnessPlan.phase === 'failed')
+      return {groups: [{label: 'Harness failed', keys: ['↑↓/jk scroll', 'esc back · fresh plan required']}]};
     return {groups: [{label: 'Harness plan', keys: ['↑↓/jk scroll', 'enter continue', 'esc cancel']}]};
   }
   if (context.harnessDetailOpen)
@@ -2918,7 +3025,20 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       return;
     }
     if (harnessPlan) {
+      // Applying traps focus with no keys; result/failed require explicit ack.
+      if (harnessPlan.phase === 'applying') return;
+      if (harnessPlan.phase === 'result' && (key.escape || key.return)) {
+        setHarnessPlan(null);
+        return;
+      }
+      if (harnessPlan.phase === 'failed' && key.escape) {
+        setHarnessPlan(null);
+        setFeedback(`${harnessPlan.name} ${harnessPlan.operation} failed — open a fresh plan to retry`);
+        return;
+      }
       if (key.escape) {
+        // Esc cancels only unconfirmed plan/confirm/stale — never rolls back applied work.
+        if (harnessPlan.phase === 'result' || harnessPlan.phase === 'failed') return;
         setHarnessPlan(null);
         return;
       }
@@ -2952,7 +3072,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         return;
       }
       if (harnessPlan.phase === 'confirm' && key.return) {
-        // Pre-apply re-inspect (#193). No apply yet (#194).
+        // Pre-apply re-inspect, then Adapter apply → verify → result (#194).
         try {
           const report = tuiSnapshotInventory(takeSnapshot())
             ?? (projectPath
@@ -2975,11 +3095,53 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
             });
             return;
           }
-          // Valid plan — confirm gate holds; apply is a later ticket.
-          setFeedback(
-            `${harnessPlan.name} ${harnessPlan.operation} plan still valid (apply not available yet)`,
-          );
-          setHarnessPlan(null);
+          try {
+            fresh.apply();
+            const inspection = fresh.verify();
+            const result = fresh.result?.(inspection);
+            // Full inventory rescan so every matrix reflects post-mutation Actual state.
+            const next = takeSnapshot();
+            setSnapshot(next);
+            setSourceSnapshot(sourceTakeSnapshot());
+            const nextHarnesses = harnessAdapterRows(next.harnesses);
+            setHarnessIndex(Math.max(
+              0,
+              nextHarnesses.findIndex(({key: harnessKey}) => harnessKey === harnessPlan.key),
+            ));
+            setHarnessPlan({
+              ...harnessPlan,
+              phase: 'result',
+              scroll: 0,
+              result,
+              recovery: result?.recovery.instructions ?? harnessPlan.recovery,
+            });
+            setFeedback(`${harnessPlan.name} ${harnessPlan.operation} verified`);
+          } catch (error) {
+            const cause = error as Error & {
+              partialEffects?: 'none' | 'present' | 'unknown';
+            };
+            // Preserve partial work; still rescan so matrices show Actual state.
+            try {
+              const next = takeSnapshot();
+              setSnapshot(next);
+              setSourceSnapshot(sourceTakeSnapshot());
+              const nextHarnesses = harnessAdapterRows(next.harnesses);
+              setHarnessIndex(Math.max(
+                0,
+                nextHarnesses.findIndex(({key: harnessKey}) => harnessKey === harnessPlan.key),
+              ));
+            } catch {
+              // Rescan failure must not hide the apply error.
+            }
+            setHarnessPlan({
+              ...harnessPlan,
+              phase: 'failed',
+              scroll: 0,
+              error: cause.message,
+              partialEffects: cause.partialEffects ?? 'unknown',
+            });
+            setFeedback(`${harnessPlan.name} ${harnessPlan.operation} failed`);
+          }
         } catch (error) {
           setHarnessPlan({
             ...harnessPlan,
