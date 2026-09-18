@@ -1694,7 +1694,9 @@ test('skill tab: tab switch preserves the selected instance identity', async () 
   await t.send('\t');
   for (let i = 0; i < 3; i++) await t.send('j');
   assert.match(t.stdout.frame(), /› grilling/);
-  await t.send('\t'); // to agent tab
+  await t.send('\t'); // harness tab
+  assert.match(t.stdout.frame(), /Harnesses/);
+  await t.send('\t'); // target tab
   assert.match(t.stdout.frame(), /Relationships/);
   await t.send('\t'); // back to skill tab
   const frame = t.stdout.frame();
@@ -2236,6 +2238,107 @@ test('narrow TUI opens Harness details from a selected Target', async () => {
   t.unmount();
 });
 
+function setupHarnessTabHome() {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-tui-harness-tab-'));
+  const roots = {
+    shared: path.join(configDir, 'agents', 'skills'),
+    pi: path.join(configDir, 'pi', 'agent', 'skills'),
+    claude: path.join(configDir, 'claude', 'skills'),
+    grok: path.join(configDir, 'grok', 'skills'),
+    codex: path.join(configDir, 'codex', 'skills'),
+    cursor: path.join(configDir, 'cursor', 'skills'),
+    hermes: path.join(configDir, 'hermes', 'skills'),
+    opencode: path.join(configDir, 'opencode', 'skills'),
+  };
+  fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: Object.entries(roots).map(([key, discoveryRoot]) => ({
+      key,
+      discoveryRoot,
+      parkingRoot: path.join(path.dirname(discoveryRoot), '.skillspub-off', 'skills'),
+    })),
+    genericTargets: [],
+  }));
+  for (const discoveryRoot of Object.values(roots)) {
+    fs.mkdirSync(discoveryRoot, {recursive: true});
+  }
+  fs.writeFileSync(path.join(path.dirname(roots.pi), 'settings.json'), JSON.stringify({
+    skills: [`!${roots.shared}/**`],
+  }));
+  fs.writeFileSync(path.join(path.dirname(roots.grok), 'config.toml'), '[');
+  return {home: {configDir}, roots};
+}
+
+test('Harness tab cycles with Tab/4 and shows context-valid keys only', async () => {
+  const {home} = setupHarnessTabHome();
+  const t = await renderApp(home, 120, 34);
+  assert.match(t.stdout.frame(), /4 Harness/);
+  assert.match(t.stdout.frame(), /1\/2\/3\/4 workspace/);
+
+  await t.send('\t'); // skill
+  await t.send('\t'); // harness
+  let frame = t.stdout.frame();
+  assert.match(frame, /4 Harness/);
+  assert.match(frame, /Harnesses/);
+  assert.match(frame, /harness:adapters {2}↑↓\/jk/);
+  assert.match(frame, /View {2}R refresh/);
+  assert.match(frame, /Workspace {2}tab {2}1\/2\/3\/4 workspace {2}q/);
+  assert.doesNotMatch(frame, /enter details|enter SKILL|m manage|v batch|space off|space on|\/ search|s sort:/);
+
+  await t.send('\t'); // target
+  assert.match(t.stdout.frame(), /1 Target/);
+  assert.match(t.stdout.frame(), /target:targets/);
+
+  await t.send('4');
+  frame = t.stdout.frame();
+  assert.match(frame, /Harnesses/);
+  assert.match(frame, /harness:adapters/);
+  t.unmount();
+});
+
+test('Harness tab lists one row per Adapter with honest support/shared/isolation badges', async () => {
+  const {home} = setupHarnessTabHome();
+  const t = await renderApp(home, 120, 34);
+  await t.send('4');
+  const frame = t.stdout.frame();
+
+  assert.match(frame, /Claude Code\s+\[managed\]\s+\[not-consumed\]\s+\[not-required\]/);
+  assert.match(frame, /Grok Build\s+\[managed\]/);
+  assert.match(frame, /Pi\s+\[managed\]/);
+  assert.match(frame, /Codex\s+\[discoverable\]\s+\[required\]\s+\[unmanaged\]/);
+  assert.match(frame, /Cursor\s+\[discoverable\]\s+\[required\]\s+\[unmanaged\]/);
+  assert.match(frame, /Hermes\s+\[discover(?:able)?\]\s+\[not-consumed\]\s+\[not-required\]/);
+  assert.match(frame, /OpenCode\s+\[discoverable\]\s+\[required\]\s+\[unmanaged\]/);
+
+  // No-op rows: status only, no action affordance in the key area.
+  assert.doesNotMatch(frame, /setup|reconcile|enter detail|a add/i);
+  t.unmount();
+});
+
+test('Harness tab keeps badges intact on narrow terminals and navigates rows', async () => {
+  const {home} = setupHarnessTabHome();
+  const t = await renderApp(home, 52, 34);
+  await t.send('4');
+  let frame = t.stdout.frame();
+  assert.match(frame, /› Claude Code/);
+  // Compact badges stay whole — no mid-token truncation of required/unmanaged.
+  assert.match(frame, /\[required\]/);
+  assert.match(frame, /\[unmanaged\]/);
+  assert.match(frame, /\[not-cons\]|\[not-consumed\]/);
+  assert.match(frame, /\[not-req\]|\[not-required\]/);
+  assert.doesNotMatch(frame, /\[requir[^\]]*$/m);
+  assert.doesNotMatch(frame, /\[unmanag[^\]]*$/m);
+
+  await t.send('j');
+  await t.send('j');
+  await t.send('j'); // Codex (claude, grok, pi, codex)
+  frame = t.stdout.frame();
+  assert.match(frame, /› Codex/);
+  assert.match(frame, /\[required\]/);
+  assert.match(frame, /\[unmanaged\]/);
+  t.unmount();
+});
+
 test('footer reflects available navigation actions and modal state', async () => {
   const { home } = setup();
   const t = await renderApp(home);
@@ -2261,7 +2364,7 @@ test('key area groups context-appropriate keys below a divider', async () => {
   assert.match(frame, /─+\n target:targets {2}←→\/hl {2}↑↓\/jk/);
   assert.match(frame, /Actions {2}space off {2}enter details {2}m manage/);
   assert.match(frame, /View {2}\/ search {2}s sort:Name {2}R refresh/);
-  assert.match(frame, /Workspace {2}tab {2}1\/2\/3 workspace {2}q/);
+  assert.match(frame, /Workspace {2}tab {2}1\/2\/3\/4 workspace {2}q/);
   // tab switch re-projects the location group
   await t.send('\t');
   frame = t.stdout.frame();
@@ -2273,7 +2376,7 @@ test('key area groups context-appropriate keys below a divider', async () => {
   assert.doesNotMatch(frame, /Workspace/);
   await t.send('\x1b');
   frame = t.stdout.frame();
-  assert.match(frame, /Workspace {2}tab {2}1\/2\/3 workspace {2}q/);
+  assert.match(frame, /Workspace {2}tab {2}1\/2\/3\/4 workspace {2}q/);
   // batch mode exposes its own keys plus the fallthrough navigation keys
   await t.send('v');
   frame = t.stdout.frame();

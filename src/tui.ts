@@ -91,6 +91,7 @@ import {
   type CatalogCandidateTruth,
   type SourceVerification,
 } from './source-verification.ts';
+import { harnessAdapters } from './harnesses/registry.ts';
 
 /** Below this width the passive summary column is hidden. */
 const WIDE_MIN = 80;
@@ -168,9 +169,71 @@ function startSourceRefresh(home: Home): ActiveSourceRefresh {
   return {child, childPid, result, operationLock};
 }
 
-type Tab = 'target' | 'skill' | 'source';
+type Tab = 'target' | 'skill' | 'source' | 'harness';
 type SourceSurface = 'catalog' | 'inventory';
 type HarnessSummary = TuiSnapshot['harnesses']['detected'][number];
+type BadgeTone = 'success' | 'muted' | 'warning' | 'danger';
+
+const TAB_CYCLE: readonly Tab[] = ['target', 'skill', 'harness'];
+
+function nextMatrixTab(tab: Tab): Tab {
+  const index = TAB_CYCLE.indexOf(tab);
+  if (index === -1) return 'target';
+  return TAB_CYCLE[(index + 1) % TAB_CYCLE.length]!;
+}
+
+/** Built-in Adapter rows in registry order (Projection over snapshot inspection). */
+function harnessAdapterRows(harnesses: TuiSnapshot['harnesses']): HarnessSummary[] {
+  const byKey = new Map(
+    [...harnesses.detected, ...harnesses.available].map((harness) => [harness.key, harness]),
+  );
+  return harnessAdapters()
+    .map((adapter) => byKey.get(adapter.key))
+    .filter((harness): harness is HarnessSummary => harness !== undefined);
+}
+
+function badgeToneProps(tone: BadgeTone): {color?: string; dimColor?: boolean} {
+  return {
+    color: tone === 'success' ? 'green' : tone === 'danger' ? 'red' : tone === 'warning' ? 'yellow' : undefined,
+    dimColor: tone === 'muted',
+  };
+}
+
+function supportStatusBadge(
+  support: HarnessSummary['support'],
+  compact = false,
+): {text: string; tone: BadgeTone} {
+  const label = compact && support === 'discoverable' ? 'discover' : support;
+  return {
+    text: `[${label}]`,
+    tone: support === 'managed' ? 'success' : 'muted',
+  };
+}
+
+function sharedConsumptionBadge(
+  status: HarnessSummary['sharedConsumption']['status'],
+  compact = false,
+): {text: string; tone: BadgeTone} {
+  const label = compact && status === 'not-consumed' ? 'not-cons' : status;
+  return {
+    text: `[${label}]`,
+    tone: status === 'required' ? 'warning' : 'muted',
+  };
+}
+
+function isolationStatusBadge(
+  status: HarnessSummary['isolation']['status'],
+  compact = false,
+): {text: string; tone: BadgeTone} {
+  const label = compact && status === 'not-required' ? 'not-req' : status;
+  return {
+    text: `[${label}]`,
+    tone: status === 'managed' ? 'success'
+      : status === 'drift' ? 'danger'
+      : status === 'unknown' ? 'warning'
+      : 'muted',
+  };
+}
 
 interface RelEntry {
   row: Row;
@@ -416,6 +479,79 @@ function HarnessRow({harness}: {harness: HarnessSummary}): ReactNode {
     {width: '100%'},
     h(Box, {flexGrow: 1, flexShrink: 1}, h(Text, {dimColor: true, wrap: 'truncate-end'}, `  ${harness.name}`)),
     h(Box, {flexShrink: 0}, h(HarnessBadge, {harness, compact: true})),
+  );
+}
+
+function StatusBadgeText({
+  badge,
+  active = false,
+}: {
+  badge: {text: string; tone: BadgeTone};
+  active?: boolean;
+}): ReactNode {
+  return h(Text, {
+    inverse: active,
+    ...badgeToneProps(badge.tone),
+  }, ` ${badge.text}`);
+}
+
+/** One row per built-in Adapter: name + support/shared/isolation badges (no actions). */
+function HarnessAdapterRow({
+  harness,
+  active,
+  compact,
+}: {
+  harness: HarnessSummary;
+  active: boolean;
+  compact: boolean;
+}): ReactNode {
+  return h(
+    Box,
+    {width: '100%', flexShrink: 0},
+    h(Text, {inverse: active, bold: active}, active ? '› ' : '  '),
+    h(
+      Box,
+      {flexGrow: 1, flexShrink: 1, overflow: 'hidden'},
+      h(Text, {inverse: active, wrap: 'truncate-end'}, harness.name),
+    ),
+    h(
+      Box,
+      {flexShrink: 0},
+      h(StatusBadgeText, {active, badge: supportStatusBadge(harness.support, compact)}),
+      h(StatusBadgeText, {active, badge: sharedConsumptionBadge(harness.sharedConsumption.status, compact)}),
+      h(StatusBadgeText, {active, badge: isolationStatusBadge(harness.isolation.status, compact)}),
+    ),
+  );
+}
+
+function HarnessWorkspace({
+  harnesses,
+  selected,
+  width,
+  height,
+}: {
+  harnesses: readonly HarnessSummary[];
+  selected: number;
+  width: number;
+  height: number;
+}): ReactNode {
+  const compact = width < WIDE_MIN;
+  const listHeight = Math.max(1, height - 1);
+  const start = windowStart(harnesses.length, selected, listHeight);
+  return h(
+    Box,
+    {height, flexDirection: 'column', overflow: 'hidden'},
+    h(
+      ListColumn,
+      {title: 'Harnesses', focused: true, flexGrow: 1, height},
+      ...harnesses.slice(start, start + listHeight).map((harness, index) =>
+        h(HarnessAdapterRow, {
+          key: harness.key,
+          harness,
+          active: start + index === selected,
+          compact,
+        })),
+    ),
   );
 }
 
@@ -1128,7 +1264,18 @@ function keyAreaContent(context: KeyAreaContext): KeyAreaContent {
           'r refresh',
           ...(context.hasLatestSourceOperation ? ['l latest transcript'] : []),
         ]},
-        {label: 'Workspace', keys: ['tab Catalog/Inventory', '1/2 matrices', 'q']},
+        {label: 'Workspace', keys: ['tab Catalog/Inventory', '1/2/4 workspace', 'q']},
+      ],
+    };
+  }
+  // Harness tab skeleton (#191): browse-only Projection; no actions yet (#192–#196).
+  if (context.tab === 'harness') {
+    return {
+      feedback: context.feedback || undefined,
+      groups: [
+        {label: 'harness:adapters', keys: ['↑↓/jk']},
+        {label: 'View', keys: ['R refresh']},
+        {label: 'Workspace', keys: ['tab', '1/2/3/4 workspace', 'q']},
       ],
     };
   }
@@ -1138,7 +1285,7 @@ function keyAreaContent(context: KeyAreaContext): KeyAreaContent {
       {label: `${context.tab}:${context.columnName}`, keys: ['←→/hl', '↑↓/jk', ...(context.canExplain ? ['e explain'] : [])]},
       {label: 'Actions', keys: [...context.actionKeys, `enter ${context.enterLabel}`, 'm manage', 'v batch']},
       {label: 'View', keys: ['/ search', `s sort:${sortLabel(context.sort)}`, 'R refresh']},
-      {label: 'Workspace', keys: ['tab', '1/2/3 workspace', 'q']},
+      {label: 'Workspace', keys: ['tab', '1/2/3/4 workspace', 'q']},
     ],
   };
 }
@@ -1791,6 +1938,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   const [tab, setTab] = useState<Tab>('target');
   const [focusColumn, setFocusColumn] = useState<0 | 1>(0);
   const [targetIndex, setTargetIndex] = useState(0);
+  const [harnessIndex, setHarnessIndex] = useState(0);
   const [relationshipKey, setRelationshipKey] = useState<string>();
   // Skill-tab selection is tracked by instance id so tab switches keep identity.
   const [instanceId, setInstanceId] = useState<string>();
@@ -1810,6 +1958,11 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
 
   const targets = snapshot.targets;
   const target = targets[Math.min(targetIndex, Math.max(0, targets.length - 1))];
+  const harnessRows = useMemo(
+    () => harnessAdapterRows(snapshot.harnesses),
+    [snapshot.harnesses],
+  );
+  const selectedHarnessIndex = Math.min(harnessIndex, Math.max(0, harnessRows.length - 1));
   const targetHarness = target
     ? [...snapshot.harnesses.detected, ...snapshot.harnesses.available]
         .find((harness) => harness.key === target.name)
@@ -1958,13 +2111,15 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   const columnName =
     tab === 'source'
       ? sourceSurface
-      : tab === 'target'
-        ? focusColumn === 0
-          ? 'targets'
-          : 'relationships'
-        : focusColumn === 0
-          ? 'skills'
-          : 'targets';
+      : tab === 'harness'
+        ? 'adapters'
+        : tab === 'target'
+          ? focusColumn === 0
+            ? 'targets'
+            : 'relationships'
+          : focusColumn === 0
+            ? 'skills'
+            : 'targets';
   const actionKeys: string[] = !selectedCell || inheritedOn(selectedInfo)
     ? []
     : selectedInfo && !selectedInfo.readOnly
@@ -2749,7 +2904,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       if (input === 'n' || key.escape) return setConfirmation(null);
       return;
     }
-    if (input === '1' || input === '2' || input === '3') {
+    if (input === '1' || input === '2' || input === '3' || input === '4') {
       setBatch(null);
       setQuery('');
       if (input === '3') {
@@ -2760,7 +2915,41 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
           setFeedback((error as Error).message);
         }
       }
-      setTab(input === '1' ? 'target' : input === '2' ? 'skill' : 'source');
+      setTab(
+        input === '1' ? 'target'
+          : input === '2' ? 'skill'
+            : input === '3' ? 'source'
+              : 'harness',
+      );
+      return;
+    }
+    if (tab === 'harness') {
+      if (input === 'q' || (key.ctrl && input === 'c')) return exit();
+      if (key.tab) {
+        setTab(nextMatrixTab('harness'));
+        return;
+      }
+      if (input === 'R') {
+        const currentTarget = target?.name;
+        const currentInstanceTarget = instanceTarget?.name;
+        const currentHarness = harnessRows[selectedHarnessIndex]?.key;
+        const next = takeSnapshot();
+        setSnapshot(next);
+        setTargetIndex(Math.max(0, next.targets.findIndex(({name}) => name === currentTarget)));
+        setInstanceTargetIndex(Math.max(0, next.targets.findIndex(({name}) => name === currentInstanceTarget)));
+        const nextHarnesses = harnessAdapterRows(next.harnesses);
+        setHarnessIndex(Math.max(0, nextHarnesses.findIndex(({key: harnessKey}) => harnessKey === currentHarness)));
+        return;
+      }
+      if (key.downArrow || input === 'j') {
+        setHarnessIndex((value) => Math.min(Math.max(0, harnessRows.length - 1), value + 1));
+        return;
+      }
+      if (key.upArrow || input === 'k') {
+        setHarnessIndex((value) => Math.max(0, value - 1));
+        return;
+      }
+      // Skeleton: no row actions, detail surface, or setup/reconcile yet (#192–#196).
       return;
     }
     if (tab === 'source') {
@@ -2907,7 +3096,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       if (input === 'v' || key.escape) return setBatch(null);
       if (key.tab) {
         setBatch({marks: new Set()});
-        return setTab((value) => (value === 'target' ? 'skill' : 'target'));
+        return setTab((value) => nextMatrixTab(value === 'source' ? 'target' : value));
       }
       if (input === ' ' && selectedRow?.realPath) {
         const marks = new Set(batch.marks);
@@ -2967,7 +3156,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       setInstanceTargetIndex(Math.max(0, next.targets.findIndex(({name}) => name === currentInstanceTarget)));
       return;
     }
-    if (key.tab) return setTab((value) => (value === 'target' ? 'skill' : 'target'));
+    if (key.tab) return setTab((value) => nextMatrixTab(value));
     if (key.rightArrow || input === 'l') return setFocusColumn(1);
     if (key.leftArrow || input === 'h') return setFocusColumn(0);
     if (key.downArrow || input === 'j') {
@@ -3109,10 +3298,14 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       h(Text, {inverse: tab === 'skill'}, ' 2 Skill '),
       ' ',
       h(Text, {inverse: tab === 'source'}, ' 3 Source '),
+      ' ',
+      h(Text, {inverse: tab === 'harness'}, ' 4 Harness '),
       snapshot.project && tab !== 'source' ? h(Text, {color: 'cyan'}, `  Project: ${snapshot.project}`) : null,
       tab === 'source'
         ? `  ${sourceSurface === 'catalog' ? 'Catalog' : 'Inventory'}`
-        : `  Sort: ${sortLabel(sort)}${query ? `  Search: ${query}` : ''}`,
+        : tab === 'harness'
+          ? ''
+          : `  Sort: ${sortLabel(sort)}${query ? `  Search: ${query}` : ''}`,
     ),
     sourceLogOpen && sourceEvidenceOperation
       ? h(
@@ -3204,6 +3397,13 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
             desired: sourceTruth.desired,
             drift: sourceTruth.drift,
             operation: sourceOperation,
+            width,
+            height: bodyHeight,
+          })
+      : tab === 'harness'
+        ? h(HarnessWorkspace, {
+            harnesses: harnessRows,
+            selected: selectedHarnessIndex,
             width,
             height: bodyHeight,
           })
