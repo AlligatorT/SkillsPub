@@ -206,7 +206,9 @@ function adapterDeclaresOperation(key: string, operation: HarnessMutateOp): bool
 }
 
 /** Action availability: declared operation + isolation gate (no per-Harness hardcoding). */
-function harnessAvailableOperations(harness: HarnessSummary): HarnessMutateOp[] {
+function harnessAvailableOperations(
+  harness: Pick<HarnessSummary, 'key' | 'isolation'>,
+): HarnessMutateOp[] {
   const available: HarnessMutateOp[] = [];
   if (
     adapterDeclaresOperation(harness.key, 'setup') &&
@@ -219,6 +221,17 @@ function harnessAvailableOperations(harness: HarnessSummary): HarnessMutateOp[] 
     harness.isolation.status === 'drift'
   ) available.push('reconcile');
   return available;
+}
+
+/** Target-matrix / Explain breadcrumb when setup or reconcile is available (#196). */
+function harnessDiscoverabilityHint(
+  harness: Pick<HarnessSummary, 'key' | 'isolation'>,
+  compact = false,
+): string {
+  const ops = harnessAvailableOperations(harness);
+  if (ops.includes('reconcile')) return compact ? 'reconcile' : 'reconcile available';
+  if (ops.includes('setup')) return compact ? 'setup' : 'setup available';
+  return '';
 }
 
 /** Stabilize recovery ids so re-plan fingerprints compare intent, not timestamps. */
@@ -682,16 +695,20 @@ export function HarnessBadge({
   compact = false,
 }: {
   harness: Pick<HarnessSummary, 'support' | 'isolation'> & {
+    key?: string;
     sharedConsumption?: HarnessSummary['sharedConsumption'];
   };
   compact?: boolean;
 }): ReactNode {
   const badge = harnessStatusBadge(harness);
   const text = compact && badge.text === '[discoverable]' ? '[discover]' : badge.text;
+  const hint = harness.key
+    ? harnessDiscoverabilityHint({key: harness.key, isolation: harness.isolation}, compact)
+    : '';
   return h(Text, {
     color: badge.tone === 'success' ? 'green' : badge.tone === 'danger' ? 'red' : badge.tone === 'warning' ? 'yellow' : undefined,
     dimColor: badge.tone === 'muted',
-  }, ` ${text}`);
+  }, ` ${text}${hint ? ` ${hint}` : ''}`);
 }
 
 function HarnessRow({harness}: {harness: HarnessSummary}): ReactNode {
@@ -797,15 +814,20 @@ function TargetList({
   const detected = new Map(harnesses.detected.map((harness) => [harness.key, harness]));
   const pendingKeys = new Set(pendingTargetKeys);
   const pending = harnesses.detected.filter(({ key }) => pendingKeys.has(key));
-  const rowText = (name: string, harness?: HarnessSummary) =>
-    `  ${name}${harness ? ` ${harnessStatusBadge(harness).text}` : ''}`;
+  const compact = maxWidth < 36;
+  const rowText = (name: string, harness?: HarnessSummary) => {
+    if (!harness) return `  ${name}`;
+    const hint = harnessDiscoverabilityHint(harness, compact);
+    return `  ${name} ${harnessStatusBadge(harness).text}${hint ? ` ${hint}` : ''}`;
+  };
   const rows = [
     ...targets.map(({name}) => rowText(name, detected.get(name))),
     ...(pending.length === 0 ? [] : [' Pending migration']),
     ...(harnesses.available.length === 0 ? [] : [' Available']),
     ...[...pending, ...harnesses.available].map((harness) => rowText(harness.name, harness)),
   ];
-  const width = Math.min(maxWidth, 32, Math.max(18, ...rows.map((row) => row.length + 2)));
+  // 40 lets "[manageable] setup available" fit on wide; narrow uses compact "setup".
+  const width = Math.min(maxWidth, compact ? 32 : 40, Math.max(18, ...rows.map((row) => row.length + 2)));
   return h(
     ListColumn,
     {title: 'Targets', focused, width},
@@ -815,7 +837,7 @@ function TargetList({
         RowLine,
         {key: `target:${target.name}`, active: start + index === selected, focused},
         target.name,
-        harness ? h(HarnessBadge, {harness}) : null,
+        harness ? h(HarnessBadge, {harness, compact}) : null,
       );
     }),
     ...(pending.length === 0
@@ -2159,6 +2181,7 @@ function resolveVisibility(
 function explanationLines(explanation: VisibilityExplanation | undefined): string[] {
   const harness = explanation?.harnesses[0];
   if (!harness) return ['Explain unavailable; refresh Inventory and try again.'];
+  const discoverability = harnessDiscoverabilityHint(harness);
   const lines = [
     `Result: ${harness.effectiveVisibility}${harness.detected ? '' : ' · not-detected'}`,
     `Detected: ${harness.detected ? 'yes' : 'no'}`,
@@ -2167,6 +2190,9 @@ function explanationLines(explanation: VisibilityExplanation | undefined): strin
     `Isolation: ${harness.isolation.status} — ${harness.isolation.detail}`,
     ...projectSharedConsumption(harness).lines.filter((line) =>
       !line.startsWith(`Shared consumption: ${harness.sharedConsumption.status}`)),
+    ...(discoverability
+      ? [`${discoverability} — open the Harness tab (4)`]
+      : []),
     '',
     'Evidence:',
     ...harness.evidence.map((evidence) =>
