@@ -8,7 +8,8 @@ import { createElement as h } from 'react';
 import { render } from 'ink';
 import { App, HarnessBadge } from '../src/tui.ts';
 import { sharedRefresh } from '../src/shared.ts';
-import { hashDirectory } from '../src/inventory.ts';
+import { hashDirectory, loadTargets } from '../src/inventory.ts';
+import { planHarnessOperation } from '../src/harnesses/registry.ts';
 
 const ANSI_PATTERN = /\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][0-9A-B]/g;
 const RENDER_CONTROL_PATTERN = /\x1b\[(2K|2J|3J|1A|\d+F)/;
@@ -1158,7 +1159,7 @@ test('TUI reports a detected built-in pending explicit legacy migration without 
   const wideLines = wide.stdout.frame().split('\n');
   wide.unmount();
   const widePending = wideLines.find((line) => line.includes('Pending migration'));
-  const wideHarness = wideLines.find((line) => line.includes('Grok Build [manageable]'));
+  const wideHarness = wideLines.find((line) => line.includes('Grok Build') && line.includes('[manageable]'));
   const wideTarget = wideLines.find((line) => line.includes('claude [managed]'));
   assert.equal(widePending?.indexOf('Pending migration'), 2);
   assert.equal(wideTarget?.indexOf('claude'), 3);
@@ -2133,6 +2134,86 @@ test('TUI separates Harness capability from current state in the target list and
   t.unmount();
 });
 
+test('Target-matrix Harness column shows setup/reconcile hints and clears when managed', async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-tui-harness-hint-'));
+  const piHome = path.join(configDir, 'pi');
+  const shared = path.join(configDir, 'agents', 'skills');
+  fs.mkdirSync(path.join(piHome, 'agent'), {recursive: true});
+  fs.mkdirSync(shared, {recursive: true});
+  fs.writeFileSync(path.join(configDir, 'targets.json'), JSON.stringify({
+    version: 1,
+    overrides: [
+      {key: 'claude', disabled: true},
+      {key: 'grok', disabled: true},
+      {key: 'codex', disabled: true},
+      {key: 'cursor', disabled: true},
+      {key: 'hermes', disabled: true},
+      {key: 'opencode', disabled: true},
+      {
+        key: 'pi',
+        discoveryRoot: path.join(piHome, 'agent', 'skills'),
+        parkingRoot: path.join(piHome, 'agent', '.skillspub-off', 'skills'),
+      },
+      {
+        key: 'shared',
+        discoveryRoot: shared,
+        parkingRoot: path.join(configDir, 'agents', '.skillspub-off', 'skills'),
+        lockFile: path.join(configDir, 'agents', '.skill-lock.json'),
+      },
+    ],
+    genericTargets: [],
+  }));
+  fs.writeFileSync(path.join(piHome, 'agent', 'settings.json'), JSON.stringify({
+    theme: 'dark',
+    skills: ['+local'],
+  }, null, 2));
+
+  const home = {configDir};
+  const t = await renderApp(home, 120, 34);
+  let frame = t.stdout.frame();
+  assert.match(frame, /pi\s+\[manageable\]\s+setup available/);
+  assert.doesNotMatch(frame, /shared\s+\[.*\]\s+(?:setup|reconcile) available/);
+
+  // Drift swaps setup → reconcile on the same column.
+  const settingsFile = path.join(piHome, 'agent', 'settings.json');
+  fs.writeFileSync(settingsFile, JSON.stringify({skills: []}));
+  fs.writeFileSync(path.join(configDir, 'state.json'), JSON.stringify({
+    piIsolation: {
+      version: 1,
+      scope: 'global',
+      file: settingsFile,
+      sharedRoot: shared,
+      exclusion: `!${path.resolve(shared)}/**`,
+      settingsHash: 'stale-hash',
+    },
+  }));
+  await t.send('R');
+  frame = t.stdout.frame();
+  assert.match(frame, /pi\s+\[drift\]\s+reconcile available/);
+  assert.doesNotMatch(frame, /pi\s+\[drift\].*setup available/);
+
+  // Managed with no Drift clears the breadcrumb entirely.
+  planHarnessOperation('pi', 'reconcile', home, loadTargets(home)).apply();
+  await t.send('R');
+  frame = t.stdout.frame();
+  assert.match(frame, /pi\s+\[managed\]/);
+  assert.doesNotMatch(frame, /setup available|reconcile available/);
+  t.unmount();
+});
+
+test('Target-matrix never hints no-op Harnesses (required/unmanaged, not-required)', async () => {
+  const {home} = setupHarnessTabHome();
+  const t = await renderApp(home, 140, 34);
+  const frame = t.stdout.frame();
+  // Capability-bearing rows may hint; required/unmanaged and not-required never do.
+  assert.doesNotMatch(frame, /codex\s+\[[^\]]+\]\s+(?:setup|reconcile) available/i);
+  assert.doesNotMatch(frame, /cursor\s+\[[^\]]+\]\s+(?:setup|reconcile) available/i);
+  assert.doesNotMatch(frame, /opencode\s+\[[^\]]+\]\s+(?:setup|reconcile) available/i);
+  assert.doesNotMatch(frame, /claude\s+\[[^\]]+\]\s+(?:setup|reconcile) available/i);
+  assert.doesNotMatch(frame, /hermes\s+\[[^\]]+\]\s+(?:setup|reconcile) available/i);
+  t.unmount();
+});
+
 test('TUI reports Grok managed Mirror capability without writing Grok files', async () => {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-tui-grok-'));
   const grokHome = path.join(configDir, 'grok-home');
@@ -2206,8 +2287,8 @@ test('TUI keeps undetected Harnesses in a compact Available section', async () =
     const harness = lines.find((line) => line.includes('Pi'));
     assert.equal(heading?.indexOf('Available'), 2);
     assert.equal(harness?.indexOf('Pi'), 3);
-    assert.match(t.stdout.frame(), /Pi \[manageable\]/);
-    assert.doesNotMatch(t.stdout.frame(), /Pi \[discoverable\]/);
+    assert.match(t.stdout.frame(), /Pi\s+\[manageable\]/);
+    assert.doesNotMatch(t.stdout.frame(), /Pi\s+\[discoverable\]/);
     assert.doesNotMatch(t.stdout.frame(), /Shared enabled|Isolation unmanaged/);
     t.unmount();
   }
@@ -2832,6 +2913,7 @@ test('Explain modal projects evidence and read-only visible/hidden plans for eac
   assert.match(frame, /Adapter support: managed/);
   assert.match(frame, /Shared consumption: not-consumed/);
   assert.match(frame, /Isolation: not-required/);
+  assert.doesNotMatch(frame, /setup available|reconcile available|Harness tab \(4\)/);
   assert.match(frame, /Evidence:/);
   assert.match(frame, /consumed global\/harness/);
   assert.match(frame, /excluded global\/shared/);
@@ -2866,10 +2948,15 @@ test('Explain modal projects evidence and read-only visible/hidden plans for eac
   assert.match(frame, /Result: visible/);
   assert.match(frame, /Adapter support: managed/);
   assert.match(frame, /Shared consumption: excluded/);
+  // Unowned equivalent exclusion → setup still available; pointer to Harness tab.
+  assert.match(frame, /setup available — open the Harness tab \(4\)/);
   assert.match(frame, /on link selected/);
   assert.deepEqual(fs.readdirSync(home.configDir, {recursive: true}).sort(), before);
 
   await t.send('\t'); // Codex
+  frame = t.stdout.frame();
+  assert.match(frame, /Explain — demo — Codex/);
+  assert.doesNotMatch(frame, /setup available|reconcile available|Harness tab \(4\)/);
   await t.send('\t'); // Cursor
   await t.send('\t'); // Hermes
   await t.send('\t');
@@ -2878,6 +2965,7 @@ test('Explain modal projects evidence and read-only visible/hidden plans for eac
   assert.match(frame, /Result: unknown/);
   assert.match(frame, /Adapter support: discoverable/);
   assert.match(frame, /Shared consumption: required/);
+  assert.doesNotMatch(frame, /setup available|reconcile available|Harness tab \(4\)/);
   assert.deepEqual(fs.readdirSync(home.configDir, {recursive: true}).sort(), before);
   t.unmount();
 });
