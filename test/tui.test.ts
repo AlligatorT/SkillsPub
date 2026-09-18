@@ -2531,7 +2531,7 @@ test('Harness plan surface shows lines, recovery, and full Relationship impact; 
   t.unmount();
 });
 
-test('Harness plan confirm/cancel gate never mutates; confirm of a valid plan still skips apply', async () => {
+test('Harness plan confirm gate holds until Enter; cancel never mutates', async () => {
   const {home, roots} = setupHarnessTabHome();
   fs.writeFileSync(path.join(path.dirname(roots.pi), 'settings.json'), JSON.stringify({
     theme: 'dark',
@@ -2552,16 +2552,143 @@ test('Harness plan confirm/cancel gate never mutates; confirm of a valid plan st
   assert.match(frame, /Harness confirm — Pi setup/);
   assert.match(frame, /enter confirm/);
   assert.match(frame, /Confirm this plan/);
+  assert.match(frame, /Unrelated actions are disabled/);
+  // Still no write before final confirm.
+  assert.equal(fs.readFileSync(settingsPath, 'utf8'), before);
 
-  await t.send('\r'); // confirm → re-inspect; #193 does not apply
+  await t.send('\x1b'); // cancel confirm
   frame = t.stdout.frame();
-  assert.match(frame, /still valid|apply not available/i);
+  assert.match(frame, /Harnesses/);
   assert.doesNotMatch(frame, /Harness plan —|Harness confirm —/);
   assert.equal(fs.readFileSync(settingsPath, 'utf8'), before);
   assert.deepEqual(
     fs.readdirSync(home.configDir, {recursive: true}).sort().map(String),
     treeBefore,
   );
+  t.unmount();
+});
+
+test('Harness confirmed plan applies, verifies, and requires result acknowledgment', async () => {
+  const {home, roots} = setupHarnessTabHome();
+  const settingsPath = path.join(path.dirname(roots.pi), 'settings.json');
+  fs.writeFileSync(settingsPath, JSON.stringify({theme: 'dark', skills: []}, null, 2));
+  const sharedSkill = path.join(roots.shared, 'shared-skill');
+  const piLink = path.join(roots.pi, 'shared-skill');
+  fs.mkdirSync(sharedSkill, {recursive: true});
+  fs.writeFileSync(path.join(sharedSkill, 'SKILL.md'), '# shared');
+  fs.symlinkSync(sharedSkill, piLink, 'dir');
+
+  const t = await renderApp(home, 120, 40);
+  await t.send('4');
+  await t.send('j');
+  await t.send('j'); // Pi
+  assert.match(t.stdout.frame(), /\[unmanaged\]/);
+  await t.send('s');
+  await t.send('\r'); // plan → confirm
+  assert.match(t.stdout.frame(), /Harness confirm — Pi setup/);
+  await t.send('\r'); // confirm → apply/verify/result
+
+  let frame = t.stdout.frame();
+  assert.match(frame, /Harness result — Pi setup/);
+  assert.match(frame, /Actual:.*unlinked.*retained.*sources preserved/);
+  assert.match(frame, /Desired:.*unlinked.*retained.*sources preserved/);
+  assert.match(frame, /Isolation: managed/);
+  assert.match(frame, /Shared consumption: excluded/);
+  assert.match(frame, /Recovery artifacts:.*config backup preserved/);
+  assert.match(frame, /manifest preserved/);
+  assert.match(frame, /Effective Visibility \(next load\):/);
+  assert.match(frame, /Relationship outcomes:/);
+  assert.match(frame, /enter\/esc acknowledge/);
+  // Focus trap until acknowledged.
+  await t.send('4');
+  assert.match(t.stdout.frame(), /Harness result — Pi setup/);
+  await t.send('R');
+  assert.match(t.stdout.frame(), /Harness result — Pi setup/);
+
+  // Disk mutated through Adapter seam.
+  const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as {skills?: string[]};
+  assert.ok(settings.skills?.some((entry) => entry.startsWith('!')));
+  assert.ok(fs.existsSync(piLink));
+
+  await t.send('\r'); // acknowledge
+  frame = t.stdout.frame();
+  assert.match(frame, /Harnesses/);
+  assert.match(frame, /› Pi\s+\[managed\].*\[excluded\].*\[managed\]/);
+  assert.doesNotMatch(frame, /Harness result —|s setup/);
+  t.unmount();
+});
+
+test('Harness apply failure shows error, preserves partial work, and demands a fresh plan', async () => {
+  const {home, roots} = setupHarnessTabHome();
+  const settingsPath = path.join(path.dirname(roots.pi), 'settings.json');
+  fs.writeFileSync(settingsPath, JSON.stringify({theme: 'dark', skills: []}, null, 2));
+
+  const t = await renderApp(home, 120, 40);
+  await t.send('4');
+  await t.send('j');
+  await t.send('j'); // Pi
+  await t.send('s');
+  await t.send('\r'); // → confirm
+  assert.match(t.stdout.frame(), /Harness confirm — Pi setup/);
+
+  // Block writes after preview so re-inspect still matches, but apply fails.
+  fs.chmodSync(settingsPath, 0o444);
+  fs.chmodSync(path.dirname(settingsPath), 0o555);
+  try {
+    await t.send('\r'); // re-inspect OK → apply fails
+    let frame = t.stdout.frame();
+    assert.match(frame, /Harness failed — Pi setup/);
+    assert.match(frame, /Apply failed/);
+    assert.match(frame, /Error:/);
+    assert.match(frame, /Partial effects:/);
+    assert.match(frame, /fresh plan/i);
+    assert.match(frame, /esc back/);
+
+    // No retry key on the failed surface — only back to browse for a fresh plan.
+    assert.doesNotMatch(frame, /enter confirm|enter continue|t retry/);
+    await t.send('\r');
+    assert.match(t.stdout.frame(), /Harness failed — Pi setup/);
+
+    await t.send('\x1b');
+    frame = t.stdout.frame();
+    assert.match(frame, /Harnesses/);
+    assert.doesNotMatch(frame, /Harness failed —/);
+    assert.match(frame, /failed.*fresh plan/i);
+  } finally {
+    fs.chmodSync(path.dirname(settingsPath), 0o755);
+    fs.chmodSync(settingsPath, 0o644);
+  }
+  t.unmount();
+});
+
+test('Harness post-apply snapshot rescan updates matrices to Actual state', async () => {
+  const {home, roots} = setupHarnessTabHome();
+  const settingsPath = path.join(path.dirname(roots.pi), 'settings.json');
+  fs.writeFileSync(settingsPath, JSON.stringify({theme: 'dark', skills: []}, null, 2));
+
+  const t = await renderApp(home, 120, 40);
+  // Target matrix still shows pi as manageable before setup (Target key is lowercase).
+  assert.match(t.stdout.frame(), /pi \[manageable\]/);
+
+  await t.send('4');
+  await t.send('j');
+  await t.send('j'); // Pi
+  await t.send('s');
+  await t.send('\r');
+  await t.send('\r'); // apply
+  assert.match(t.stdout.frame(), /Harness result — Pi setup/);
+  await t.send('\r'); // ack
+
+  // Harness tab reflects managed isolation after rescan.
+  let frame = t.stdout.frame();
+  assert.match(frame, /› Pi\s+\[managed\].*\[excluded\].*\[managed\]/);
+  assert.doesNotMatch(frame, /s setup/);
+
+  // Target matrix also rescanned — manageable hint cleared.
+  await t.send('1');
+  frame = t.stdout.frame();
+  assert.match(frame, /pi \[managed\]/);
+  assert.doesNotMatch(frame, /pi \[manageable\]/);
   t.unmount();
 });
 
