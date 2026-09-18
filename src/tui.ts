@@ -91,7 +91,12 @@ import {
   type CatalogCandidateTruth,
   type SourceVerification,
 } from './source-verification.ts';
-import { harnessAdapters } from './harnesses/registry.ts';
+import { harnessAdapters, planHarnessOperation } from './harnesses/registry.ts';
+import type {
+  HarnessOperation,
+  HarnessOperationPlan,
+  HarnessRelationshipImpact,
+} from './harnesses/types.ts';
 
 /** Below this width the passive summary column is hidden. */
 const WIDE_MIN = 80;
@@ -190,6 +195,122 @@ function harnessAdapterRows(harnesses: TuiSnapshot['harnesses']): HarnessSummary
   return harnessAdapters()
     .map((adapter) => byKey.get(adapter.key))
     .filter((harness): harness is HarnessSummary => harness !== undefined);
+}
+
+/** Setup/reconcile only — migrate stays CLI-only (spec #190). Capability from Adapter.operations. */
+type HarnessMutateOp = Extract<HarnessOperation, 'setup' | 'reconcile'>;
+
+function adapterDeclaresOperation(key: string, operation: HarnessMutateOp): boolean {
+  return Boolean(harnessAdapters().find((adapter) => adapter.key === key)?.operations?.[operation]);
+}
+
+/** Action availability: declared operation + isolation gate (no per-Harness hardcoding). */
+function harnessAvailableOperations(harness: HarnessSummary): HarnessMutateOp[] {
+  const available: HarnessMutateOp[] = [];
+  if (
+    adapterDeclaresOperation(harness.key, 'setup') &&
+    harness.isolation.status !== 'managed' &&
+    harness.isolation.status !== 'not-required' &&
+    harness.isolation.status !== 'drift'
+  ) available.push('setup');
+  if (
+    adapterDeclaresOperation(harness.key, 'reconcile') &&
+    harness.isolation.status === 'drift'
+  ) available.push('reconcile');
+  return available;
+}
+
+/** Stabilize recovery ids so re-plan fingerprints compare intent, not timestamps. */
+function stableHarnessPlanText(value: string): string {
+  return value.replace(/\d{10,}-[0-9a-f]{8}-[0-9a-f-]{27}/gi, '<recovery-id>');
+}
+
+function stableHarnessPlanFingerprint(plan: HarnessOperationPlan): string {
+  const impact = plan.relationshipImpact;
+  return JSON.stringify({
+    title: plan.title,
+    lines: plan.lines.map(stableHarnessPlanText),
+    recovery: (plan.recovery ?? []).map(stableHarnessPlanText),
+    summary: impact?.summary ?? null,
+    actual: impact?.actual ?? null,
+    desired: impact?.desired ?? null,
+    groups: impact?.groups ?? null,
+    configPath: impact?.configuration.path ?? null,
+    configAction: impact?.configuration.plannedAction ?? null,
+    originalHash: impact?.configuration.originalHash ?? null,
+  });
+}
+
+function harnessPlanDisplayLines(state: {
+  title: string;
+  operation: HarnessMutateOp;
+  phase: 'plan' | 'confirm' | 'stale';
+  lines: readonly string[];
+  recovery: readonly string[];
+  impact?: HarnessRelationshipImpact;
+  explanation?: string;
+}): string[] {
+  // Phase banners first so confirm/stale explanations stay above the fold.
+  const out: string[] = [];
+  if (state.phase === 'confirm') {
+    out.push(
+      'Confirm this plan. Enter rechecks fresh state before any apply; Esc cancels with zero mutation.',
+      '',
+    );
+  }
+  if (state.phase === 'stale') {
+    out.push(
+      'Stale plan aborted — nothing was written.',
+      state.explanation ?? 'Disk or configuration changed since preview.',
+      '',
+    );
+  }
+  out.push(`Operation: ${state.operation}`, state.title);
+  // Full impact list up front so a headline count never replaces the Relationships.
+  if (state.impact) {
+    const {summary, groups} = state.impact;
+    out.push(
+      `Relationship impact: ${summary.affectedRelationships} affected · ` +
+        `${summary.unlinkedRelationships} unlink · ${summary.retainedRelationships} retain · ` +
+        `${summary.preservedSourceResources} sources preserved`,
+      `Actual: ${state.impact.actual.relationshipCount} Relationships; isolation ${state.impact.actual.isolation}`,
+      `Desired: ${state.impact.desired.relationshipCount} Relationships; isolation ${state.impact.desired.isolation}`,
+    );
+    if (groups.length === 0) {
+      out.push('  (no Relationship groups)');
+    } else {
+      for (const group of groups) {
+        out.push(`Scope ${group.scope} · Target ${group.targetKey} (${group.targetId})`);
+        for (const effect of group.relationships) {
+          out.push(
+            `  ${effect.plannedAction}: ${effect.form}/${effect.activation} ` +
+              `name=${effect.name} source=${effect.sourcePath} target=${effect.targetPath}`,
+          );
+        }
+      }
+    }
+    out.push('');
+  }
+  out.push(...state.lines);
+  if (state.recovery.length > 0) {
+    out.push('', 'Recovery:');
+    for (const line of state.recovery) out.push(`  ${line}`);
+  }
+  return out;
+}
+
+interface HarnessPlanState {
+  key: string;
+  name: string;
+  operation: HarnessMutateOp;
+  phase: 'plan' | 'confirm' | 'stale';
+  title: string;
+  lines: readonly string[];
+  recovery: readonly string[];
+  impact?: HarnessRelationshipImpact;
+  fingerprint: string;
+  scroll: number;
+  explanation?: string;
 }
 
 function badgeToneProps(tone: BadgeTone): {color?: string; dimColor?: boolean} {
@@ -1092,6 +1213,42 @@ function HarnessDetailModal({
   );
 }
 
+/** Plan/confirm/stale surface for Harness setup|reconcile (#193). Projection only until apply (#194). */
+function HarnessPlanModal({
+  state,
+  lines,
+  height,
+}: {
+  state: HarnessPlanState;
+  lines: string[];
+  height: number;
+}): ReactNode {
+  const viewHeight = Math.max(1, height - 4);
+  const phaseLabel = state.phase === 'plan' ? 'plan'
+    : state.phase === 'confirm' ? 'confirm'
+      : 'stale';
+  return h(
+    Box,
+    {
+      flexGrow: 1,
+      flexDirection: 'column',
+      borderStyle: 'round',
+      borderColor: state.phase === 'stale' ? 'yellow' : 'cyan',
+      paddingX: 1,
+      overflow: 'hidden',
+    },
+    h(
+      Text,
+      {bold: true, wrap: 'truncate-end'},
+      `Harness ${phaseLabel} — ${state.name} ${state.operation}  ` +
+        `[${Math.min(state.scroll + 1, lines.length)}/${lines.length}]`,
+    ),
+    ...lines.slice(state.scroll, state.scroll + viewHeight).map((line, index) =>
+      h(Text, {key: state.scroll + index, wrap: 'truncate-end'}, line || ' '),
+    ),
+  );
+}
+
 function mutableSourceRelationship(
   row: Row | undefined,
 ): SkillRelationship | undefined {
@@ -1262,6 +1419,8 @@ interface KeyAreaContext {
   sourceDetailOpen: boolean;
   targetInfoOpen: boolean;
   harnessDetailOpen: boolean;
+  harnessPlan?: HarnessPlanState;
+  harnessOps: HarnessMutateOp[];
   explainOpen: boolean;
   modalOpen: boolean;
   manageOpen: boolean;
@@ -1299,6 +1458,13 @@ function keyAreaContent(context: KeyAreaContext): KeyAreaContent {
     return {groups: [{label: 'Detail', keys: ['esc close']}]};
   if (context.targetInfoOpen)
     return {groups: [{label: 'Target info', keys: ['esc close']}]};
+  if (context.harnessPlan) {
+    if (context.harnessPlan.phase === 'stale')
+      return {groups: [{label: 'Harness stale', keys: ['↑↓/jk scroll', 'esc back']}]};
+    if (context.harnessPlan.phase === 'confirm')
+      return {groups: [{label: 'Harness confirm', keys: ['↑↓/jk scroll', 'enter confirm', 'esc cancel']}]};
+    return {groups: [{label: 'Harness plan', keys: ['↑↓/jk scroll', 'enter continue', 'esc cancel']}]};
+  }
   if (context.harnessDetailOpen)
     return {groups: [{label: 'Harness detail', keys: ['↑↓/jk scroll', 'PgUp/PgDn page', 'esc close']}]};
   if (context.explainOpen)
@@ -1352,12 +1518,14 @@ function keyAreaContent(context: KeyAreaContext): KeyAreaContent {
       ],
     };
   }
-  // Harness tab (#191/#192): Projection browse + row detail; setup/reconcile later (#193+).
+  // Harness tab (#191–#193): browse + detail + capability-gated setup/reconcile plan/confirm.
   if (context.tab === 'harness') {
+    const opKeys = context.harnessOps.map((op) =>
+      op === 'setup' ? 's setup' : 'r reconcile');
     return {
       feedback: context.feedback || undefined,
       groups: [
-        {label: 'harness:adapters', keys: ['↑↓/jk', 'enter detail']},
+        {label: 'harness:adapters', keys: ['↑↓/jk', 'enter detail', ...opKeys]},
         {label: 'View', keys: ['R refresh']},
         {label: 'Workspace', keys: ['tab', '1/2/3/4 workspace', 'q']},
       ],
@@ -2034,6 +2202,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   const [explainModal, setExplainModal] = useState<ExplainModalState | null>(null);
   const [targetInfoOpen, setTargetInfoOpen] = useState(false);
   const [harnessDetail, setHarnessDetail] = useState<{scroll: number} | null>(null);
+  const [harnessPlan, setHarnessPlan] = useState<HarnessPlanState | null>(null);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [manage, setManage] = useState<ManageState | null>(null);
   const [batch, setBatch] = useState<{ marks: Set<string> } | null>(null);
@@ -2112,6 +2281,13 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     : [];
   const harnessDetailLines = harnessDetail
     ? detailLines(harnessDetailSource.join('\n'), Math.max(1, width - 8))
+    : [];
+  const selectedHarnessOps = selectedHarness
+    ? harnessAvailableOperations(selectedHarness)
+    : [];
+  const harnessPlanSource = harnessPlan ? harnessPlanDisplayLines(harnessPlan) : [];
+  const harnessPlanLines = harnessPlan
+    ? detailLines(harnessPlanSource.join('\n'), Math.max(1, width - 8))
     : [];
   const sourceEvidenceOperation = sourceOperation ?? latestSourceOperation;
   const sourceLogLines = sourceEvidenceOperation
@@ -2237,6 +2413,8 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     sourceDetailOpen,
     targetInfoOpen,
     harnessDetailOpen: harnessDetail !== null,
+    harnessPlan: harnessPlan ?? undefined,
+    harnessOps: selectedHarnessOps,
     explainOpen: explainModal !== null,
     modalOpen: modal !== null,
     manageOpen: manage !== null,
@@ -2739,6 +2917,81 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
       if (key.escape) setTargetInfoOpen(false);
       return;
     }
+    if (harnessPlan) {
+      if (key.escape) {
+        setHarnessPlan(null);
+        return;
+      }
+      if (key.downArrow || input === 'j') {
+        setHarnessPlan({
+          ...harnessPlan,
+          scroll: Math.min(Math.max(0, harnessPlanLines.length - 1), harnessPlan.scroll + 1),
+        });
+        return;
+      }
+      if (key.upArrow || input === 'k') {
+        setHarnessPlan({...harnessPlan, scroll: Math.max(0, harnessPlan.scroll - 1)});
+        return;
+      }
+      if (key.pageDown || (key.ctrl && input === 'd')) {
+        setHarnessPlan({
+          ...harnessPlan,
+          scroll: Math.min(
+            Math.max(0, harnessPlanLines.length - 1),
+            harnessPlan.scroll + modalPage,
+          ),
+        });
+        return;
+      }
+      if (key.pageUp || (key.ctrl && input === 'u')) {
+        setHarnessPlan({...harnessPlan, scroll: Math.max(0, harnessPlan.scroll - modalPage)});
+        return;
+      }
+      if (harnessPlan.phase === 'plan' && key.return) {
+        setHarnessPlan({...harnessPlan, phase: 'confirm', scroll: 0});
+        return;
+      }
+      if (harnessPlan.phase === 'confirm' && key.return) {
+        // Pre-apply re-inspect (#193). No apply yet (#194).
+        try {
+          const report = tuiSnapshotInventory(takeSnapshot())
+            ?? (projectPath
+              ? scanProjectInventory(home, projectPath, undefined, {persist: false})
+              : scanGlobalInventory(home, undefined, {persist: false}));
+          const fresh = planHarnessOperation(
+            harnessPlan.key,
+            harnessPlan.operation,
+            home,
+            report.targets,
+            projectPath,
+          );
+          if (stableHarnessPlanFingerprint(fresh) !== harnessPlan.fingerprint) {
+            setHarnessPlan({
+              ...harnessPlan,
+              phase: 'stale',
+              scroll: 0,
+              explanation:
+                'Fresh inspection no longer matches this plan. Disk or configuration changed since preview. Cancel and open a fresh plan.',
+            });
+            return;
+          }
+          // Valid plan — confirm gate holds; apply is a later ticket.
+          setFeedback(
+            `${harnessPlan.name} ${harnessPlan.operation} plan still valid (apply not available yet)`,
+          );
+          setHarnessPlan(null);
+        } catch (error) {
+          setHarnessPlan({
+            ...harnessPlan,
+            phase: 'stale',
+            scroll: 0,
+            explanation: (error as Error).message,
+          });
+        }
+        return;
+      }
+      return;
+    }
     if (harnessDetail) {
       if (key.escape) return setHarnessDetail(null);
       if (key.downArrow || input === 'j')
@@ -3062,7 +3315,39 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         setHarnessDetail({scroll: 0});
         return;
       }
-      // No setup/reconcile/plan/apply yet (#193+).
+      if ((input === 's' || input === 'r') && selectedHarness) {
+        const operation: HarnessMutateOp = input === 's' ? 'setup' : 'reconcile';
+        if (!selectedHarnessOps.includes(operation)) return;
+        try {
+          const report = tuiSnapshotInventory(snapshot)
+            ?? (projectPath
+              ? scanProjectInventory(home, projectPath, undefined, {persist: false})
+              : scanGlobalInventory(home, undefined, {persist: false}));
+          const plan = planHarnessOperation(
+            selectedHarness.key,
+            operation,
+            home,
+            report.targets,
+            projectPath,
+          );
+          setHarnessDetail(null);
+          setHarnessPlan({
+            key: selectedHarness.key,
+            name: selectedHarness.name,
+            operation,
+            phase: 'plan',
+            title: plan.title,
+            lines: plan.lines,
+            recovery: plan.recovery ?? [],
+            impact: plan.relationshipImpact,
+            fingerprint: stableHarnessPlanFingerprint(plan),
+            scroll: 0,
+          });
+        } catch (error) {
+          setFeedback((error as Error).message);
+        }
+        return;
+      }
       return;
     }
     if (tab === 'source') {
@@ -3451,6 +3736,16 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
             harness: targetHarness,
             width: Math.max(12, width - 4),
             height: bodyHeight - 1,
+          }),
+        )
+      : harnessPlan
+      ? h(
+          Box,
+          {height: bodyHeight, paddingLeft: 2, paddingRight: 2, paddingTop: 1},
+          h(HarnessPlanModal, {
+            state: harnessPlan,
+            lines: harnessPlanLines,
+            height: bodyHeight,
           }),
         )
       : harnessDetail && selectedHarness

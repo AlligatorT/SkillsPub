@@ -2283,7 +2283,7 @@ test('Harness tab cycles with Tab/4 and shows context-valid keys only', async ()
   assert.match(frame, /harness:adapters {2}↑↓\/jk {2}enter detail/);
   assert.match(frame, /View {2}R refresh/);
   assert.match(frame, /Workspace {2}tab {2}1\/2\/3\/4 workspace {2}q/);
-  assert.doesNotMatch(frame, /enter details|enter SKILL|m manage|v batch|space off|space on|\/ search|s sort:|setup|reconcile/i);
+  assert.doesNotMatch(frame, /enter details|enter SKILL|m manage|v batch|space off|space on|\/ search|s sort:/i);
 
   await t.send('\t'); // target
   assert.match(t.stdout.frame(), /1 Target/);
@@ -2310,8 +2310,8 @@ test('Harness tab lists one row per Adapter with honest support/shared/isolation
   assert.match(frame, /Hermes\s+\[discover(?:able)?\]\s+\[not-consumed\]\s+\[not-required\]/);
   assert.match(frame, /OpenCode\s+\[discoverable\]\s+\[required\]\s+\[unmanaged\]/);
 
-  // Browse + detail only; no setup/reconcile action affordance yet.
-  assert.doesNotMatch(frame, /setup|reconcile|a add/i);
+  // Capability-gated keys only — Claude (selected) declares no setup/reconcile.
+  assert.doesNotMatch(frame, /s setup|r reconcile|a add/i);
   assert.match(frame, /enter detail/);
   t.unmount();
 });
@@ -2427,6 +2427,179 @@ test('Harness row detail shows full evidence wide and reduces passive evidence n
   // Status readable; passive evidence URLs collapsed away on narrow.
   assert.doesNotMatch(frame, /https?:\/\//);
   narrow.unmount();
+});
+
+test('Harness setup/reconcile keys are capability-gated; reconcile only under drift', async () => {
+  const {home, roots} = setupHarnessTabHome();
+  const t = await renderApp(home, 120, 34);
+  await t.send('4');
+
+  // Claude: no operations map — no setup/reconcile keys.
+  assert.match(t.stdout.frame(), /› Claude Code/);
+  assert.doesNotMatch(t.stdout.frame(), /s setup|r reconcile/);
+
+  await t.send('j');
+  await t.send('j'); // Pi — isolation unmanaged, declares setup
+  let frame = t.stdout.frame();
+  assert.match(frame, /› Pi/);
+  assert.match(frame, /s setup/);
+  assert.doesNotMatch(frame, /r reconcile/);
+
+  // Induce Pi drift: SkillsPub claim present but exclusion missing from settings.
+  const settingsPath = path.join(path.dirname(roots.pi), 'settings.json');
+  fs.writeFileSync(settingsPath, JSON.stringify({skills: []}));
+  fs.writeFileSync(path.join(home.configDir, 'state.json'), JSON.stringify({
+    piIsolation: {
+      version: 1,
+      scope: 'global',
+      file: settingsPath,
+      sharedRoot: roots.shared,
+      exclusion: `!${path.resolve(roots.shared)}/**`,
+      settingsHash: 'stale-hash',
+    },
+  }));
+  await t.send('R');
+  frame = t.stdout.frame();
+  assert.match(frame, /› Pi/);
+  assert.match(frame, /\[drift\]/);
+  assert.match(frame, /r reconcile/);
+  assert.doesNotMatch(frame, /s setup/);
+
+  // Codex declares no operations despite unmanaged isolation.
+  await t.send('j'); // Codex
+  frame = t.stdout.frame();
+  assert.match(frame, /› Codex/);
+  assert.doesNotMatch(frame, /s setup|r reconcile/);
+  t.unmount();
+});
+
+test('Harness plan surface shows lines, recovery, and full Relationship impact; cancel writes nothing', async () => {
+  const {home, roots} = setupHarnessTabHome();
+  // Unmanaged Pi without exclusion → real setup plan with recovery + impact shape.
+  fs.writeFileSync(path.join(path.dirname(roots.pi), 'settings.json'), JSON.stringify({
+    theme: 'dark',
+    skills: ['+local'],
+  }, null, 2));
+  const sharedSkill = path.join(roots.shared, 'shared-skill');
+  const piLink = path.join(roots.pi, 'shared-skill');
+  fs.mkdirSync(sharedSkill, {recursive: true});
+  fs.writeFileSync(path.join(sharedSkill, 'SKILL.md'), '# shared');
+  fs.symlinkSync(sharedSkill, piLink, 'dir');
+
+  const before = fs.readdirSync(home.configDir, {recursive: true}).sort().map(String);
+  const settingsBefore = fs.readFileSync(path.join(path.dirname(roots.pi), 'settings.json'), 'utf8');
+
+  const t = await renderApp(home, 120, 40);
+  await t.send('4');
+  await t.send('j');
+  await t.send('j'); // Pi
+  assert.match(t.stdout.frame(), /s setup/);
+  await t.send('s');
+
+  let frame = t.stdout.frame();
+  assert.match(frame, /Harness plan — Pi setup/);
+  assert.match(frame, /Pi Global isolation plan/);
+  assert.match(frame, /stop consuming Shared|add exclusion/i);
+  assert.match(frame, /Relationship impact:/);
+  assert.match(frame, /Scope global · Target pi/);
+  assert.match(frame, /retain: link\/on name=shared-skill/);
+  assert.match(frame, /enter continue/);
+  assert.match(frame, /esc cancel/);
+  // Recovery is below the fold on long plans — scroll until visible.
+  for (let i = 0; i < 80 && !/Recovery:/.test(frame); i++) {
+    await t.send('j');
+    frame = t.stdout.frame();
+  }
+  assert.match(frame, /Recovery:/);
+  // Focus trap while plan is open.
+  await t.send('4');
+  assert.match(t.stdout.frame(), /Harness plan — Pi setup/);
+
+  await t.send('\x1b');
+  frame = t.stdout.frame();
+  assert.match(frame, /Harnesses/);
+  assert.match(frame, /› Pi/);
+  assert.doesNotMatch(frame, /Harness plan —/);
+
+  const after = fs.readdirSync(home.configDir, {recursive: true}).sort().map(String);
+  assert.deepEqual(after, before);
+  assert.equal(
+    fs.readFileSync(path.join(path.dirname(roots.pi), 'settings.json'), 'utf8'),
+    settingsBefore,
+  );
+  assert.ok(fs.existsSync(piLink));
+  t.unmount();
+});
+
+test('Harness plan confirm/cancel gate never mutates; confirm of a valid plan still skips apply', async () => {
+  const {home, roots} = setupHarnessTabHome();
+  fs.writeFileSync(path.join(path.dirname(roots.pi), 'settings.json'), JSON.stringify({
+    theme: 'dark',
+    skills: [],
+  }, null, 2));
+  const settingsPath = path.join(path.dirname(roots.pi), 'settings.json');
+  const before = fs.readFileSync(settingsPath, 'utf8');
+  const treeBefore = fs.readdirSync(home.configDir, {recursive: true}).sort().map(String);
+
+  const t = await renderApp(home, 120, 40);
+  await t.send('4');
+  await t.send('j');
+  await t.send('j'); // Pi
+  await t.send('s');
+  assert.match(t.stdout.frame(), /Harness plan — Pi setup/);
+  await t.send('\r'); // plan → confirm
+  let frame = t.stdout.frame();
+  assert.match(frame, /Harness confirm — Pi setup/);
+  assert.match(frame, /enter confirm/);
+  assert.match(frame, /Confirm this plan/);
+
+  await t.send('\r'); // confirm → re-inspect; #193 does not apply
+  frame = t.stdout.frame();
+  assert.match(frame, /still valid|apply not available/i);
+  assert.doesNotMatch(frame, /Harness plan —|Harness confirm —/);
+  assert.equal(fs.readFileSync(settingsPath, 'utf8'), before);
+  assert.deepEqual(
+    fs.readdirSync(home.configDir, {recursive: true}).sort().map(String),
+    treeBefore,
+  );
+  t.unmount();
+});
+
+test('Harness pre-apply re-inspection aborts a stale plan with an explanation', async () => {
+  const {home, roots} = setupHarnessTabHome();
+  const settingsPath = path.join(path.dirname(roots.pi), 'settings.json');
+  fs.writeFileSync(settingsPath, JSON.stringify({theme: 'dark', skills: []}, null, 2));
+  const before = fs.readFileSync(settingsPath, 'utf8');
+
+  const t = await renderApp(home, 120, 40);
+  await t.send('4');
+  await t.send('j');
+  await t.send('j'); // Pi
+  await t.send('s');
+  assert.match(t.stdout.frame(), /Harness plan — Pi setup/);
+  await t.send('\r'); // → confirm
+  assert.match(t.stdout.frame(), /Harness confirm — Pi setup/);
+
+  // Concurrent disk change after preview — originalHash / lines diverge.
+  fs.writeFileSync(settingsPath, JSON.stringify({theme: 'light', skills: []}, null, 2));
+  await t.send('\r'); // re-inspect → stale abort
+
+  let frame = t.stdout.frame();
+  assert.match(frame, /Harness stale — Pi setup/);
+  assert.match(frame, /Stale plan aborted/);
+  assert.match(frame, /no longer matches|changed since preview/i);
+  assert.match(frame, /esc back/);
+  assert.equal(fs.readFileSync(settingsPath, 'utf8'), JSON.stringify({theme: 'light', skills: []}, null, 2));
+  assert.notEqual(fs.readFileSync(settingsPath, 'utf8'), before);
+
+  await t.send('\x1b');
+  frame = t.stdout.frame();
+  assert.match(frame, /Harnesses/);
+  assert.doesNotMatch(frame, /Harness stale —/);
+  // Still the concurrent write only — no plan apply side effects.
+  assert.equal(fs.readFileSync(settingsPath, 'utf8'), JSON.stringify({theme: 'light', skills: []}, null, 2));
+  assert.equal(fs.existsSync(path.join(home.configDir, 'pi-recovery')), false);
+  t.unmount();
 });
 
 test('footer reflects available navigation actions and modal state', async () => {
