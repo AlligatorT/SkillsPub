@@ -2810,6 +2810,82 @@ test('Harness pre-apply re-inspection aborts a stale plan with an explanation', 
   t.unmount();
 });
 
+test('Harness Project scope: rows render, setup/reconcile disabled with CLI pointer, no migrate', async () => {
+  const {home, roots} = setupHarnessTabHome();
+  // Unmanaged Pi would offer setup in Global — Project must refuse and point at CLI.
+  fs.writeFileSync(path.join(path.dirname(roots.pi), 'settings.json'), JSON.stringify({
+    theme: 'dark',
+    skills: [],
+  }, null, 2));
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillspub-harness-project-'));
+  const before = fs.readdirSync(home.configDir, {recursive: true}).sort().map(String);
+  const settingsBefore = fs.readFileSync(path.join(path.dirname(roots.pi), 'settings.json'), 'utf8');
+
+  const t = await renderApp(home, 120, 34, projectDir);
+  await t.send('4');
+  let frame = t.stdout.frame();
+
+  // Rows still render under exact Project context.
+  assert.match(frame, /Harnesses/);
+  assert.match(frame, /Project:/);
+  assert.match(frame, /Claude Code/);
+  assert.match(frame, /Pi/);
+  assert.match(frame, /Grok Build/);
+  assert.match(frame, /Codex/);
+
+  // Boundary stated, not hidden: no TUI mutation keys; CLI pointer present.
+  assert.doesNotMatch(frame, /\bs setup\b|\br reconcile\b/);
+  assert.doesNotMatch(frame, /\bm migrate\b|migrate/i);
+  assert.match(frame, /setup\/reconcile CLI-only: skillspub project <path> harnesses/);
+
+  await t.send('j');
+  await t.send('j'); // Pi — would be setup-capable in Global
+  frame = t.stdout.frame();
+  assert.match(frame, /› Pi/);
+  assert.doesNotMatch(frame, /\bs setup\b|\br reconcile\b/);
+  assert.match(frame, /setup\/reconcile CLI-only: skillspub project <path> harnesses/);
+
+  // s/r refuse mutation and keep the pointer visible as feedback.
+  await t.send('s');
+  frame = t.stdout.frame();
+  assert.doesNotMatch(frame, /Harness plan —/);
+  assert.match(frame, /setup\/reconcile CLI-only: skillspub project <path> harnesses/);
+  await t.send('r');
+  frame = t.stdout.frame();
+  assert.doesNotMatch(frame, /Harness plan —/);
+  assert.match(frame, /setup\/reconcile CLI-only: skillspub project <path> harnesses/);
+  assert.doesNotMatch(frame, /\bm migrate\b|\bmigrate\b/i);
+
+  assert.equal(
+    fs.readFileSync(path.join(path.dirname(roots.pi), 'settings.json'), 'utf8'),
+    settingsBefore,
+  );
+  assert.deepEqual(
+    fs.readdirSync(home.configDir, {recursive: true}).sort().map(String),
+    before,
+  );
+  t.unmount();
+});
+
+test('Harness Global scope: setup key still offered for unmanaged Pi', async () => {
+  const {home, roots} = setupHarnessTabHome();
+  fs.writeFileSync(path.join(path.dirname(roots.pi), 'settings.json'), JSON.stringify({
+    theme: 'dark',
+    skills: [],
+  }, null, 2));
+
+  const t = await renderApp(home, 120, 34);
+  await t.send('4');
+  await t.send('j');
+  await t.send('j'); // Pi
+  const frame = t.stdout.frame();
+  assert.match(frame, /› Pi/);
+  assert.match(frame, /\bs setup\b/);
+  assert.doesNotMatch(frame, /CLI-only: skillspub project/);
+  assert.doesNotMatch(frame, /\bm migrate\b|\bmigrate\b/i);
+  t.unmount();
+});
+
 test('footer reflects available navigation actions and modal state', async () => {
   const { home } = setup();
   const t = await renderApp(home);

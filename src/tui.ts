@@ -1537,6 +1537,10 @@ interface KeyAreaContent {
   groups: KeyHintGroup[];
 }
 
+/** Project-scope Harness mutations stay CLI-only (#195 / #190). */
+const HARNESS_PROJECT_CLI_POINTER =
+  'setup/reconcile CLI-only: skillspub project <path> harnesses …';
+
 interface KeyAreaContext {
   sourceLogOpen: boolean;
   sourceDetailOpen: boolean;
@@ -1544,6 +1548,8 @@ interface KeyAreaContext {
   harnessDetailOpen: boolean;
   harnessPlan?: HarnessPlanState;
   harnessOps: HarnessMutateOp[];
+  /** Exact Project context: state visible, mutations pointed at CLI. */
+  harnessProjectCliOnly: boolean;
   explainOpen: boolean;
   modalOpen: boolean;
   manageOpen: boolean;
@@ -1647,10 +1653,12 @@ function keyAreaContent(context: KeyAreaContext): KeyAreaContent {
       ],
     };
   }
-  // Harness tab (#191–#193): browse + detail + capability-gated setup/reconcile plan/confirm.
+  // Harness tab (#191–#195): browse + detail; Global setup/reconcile; Project points at CLI.
   if (context.tab === 'harness') {
-    const opKeys = context.harnessOps.map((op) =>
-      op === 'setup' ? 's setup' : 'r reconcile');
+    const opKeys = context.harnessProjectCliOnly
+      ? [HARNESS_PROJECT_CLI_POINTER]
+      : context.harnessOps.map((op) =>
+          op === 'setup' ? 's setup' : 'r reconcile');
     return {
       feedback: context.feedback || undefined,
       groups: [
@@ -2415,7 +2423,8 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
   const harnessDetailLines = harnessDetail
     ? detailLines(harnessDetailSource.join('\n'), Math.max(1, width - 8))
     : [];
-  const selectedHarnessOps = selectedHarness
+  // Global-only mutations (#195): Project scope still lists rows, never offers setup/reconcile/migrate.
+  const selectedHarnessOps = selectedHarness && !projectPath
     ? harnessAvailableOperations(selectedHarness)
     : [];
   const harnessPlanSource = harnessPlan ? harnessPlanDisplayLines(harnessPlan) : [];
@@ -2548,6 +2557,7 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
     harnessDetailOpen: harnessDetail !== null,
     harnessPlan: harnessPlan ?? undefined,
     harnessOps: selectedHarnessOps,
+    harnessProjectCliOnly: Boolean(projectPath),
     explainOpen: explainModal !== null,
     modalOpen: modal !== null,
     manageOpen: manage !== null,
@@ -3101,15 +3111,12 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         // Pre-apply re-inspect, then Adapter apply → verify → result (#194).
         try {
           const report = tuiSnapshotInventory(takeSnapshot())
-            ?? (projectPath
-              ? scanProjectInventory(home, projectPath, undefined, {persist: false})
-              : scanGlobalInventory(home, undefined, {persist: false}));
+            ?? scanGlobalInventory(home, undefined, {persist: false});
           const fresh = planHarnessOperation(
             harnessPlan.key,
             harnessPlan.operation,
             home,
             report.targets,
-            projectPath,
           );
           if (stableHarnessPlanFingerprint(fresh) !== harnessPlan.fingerprint) {
             setHarnessPlan({
@@ -3504,19 +3511,20 @@ export function App({home, projectPath}: {home: Home; projectPath?: string}): Re
         return;
       }
       if ((input === 's' || input === 'r') && selectedHarness) {
+        if (projectPath) {
+          setFeedback(HARNESS_PROJECT_CLI_POINTER);
+          return;
+        }
         const operation: HarnessMutateOp = input === 's' ? 'setup' : 'reconcile';
         if (!selectedHarnessOps.includes(operation)) return;
         try {
           const report = tuiSnapshotInventory(snapshot)
-            ?? (projectPath
-              ? scanProjectInventory(home, projectPath, undefined, {persist: false})
-              : scanGlobalInventory(home, undefined, {persist: false}));
+            ?? scanGlobalInventory(home, undefined, {persist: false});
           const plan = planHarnessOperation(
             selectedHarness.key,
             operation,
             home,
             report.targets,
-            projectPath,
           );
           setHarnessDetail(null);
           setHarnessPlan({
