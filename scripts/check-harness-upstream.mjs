@@ -31,22 +31,43 @@ const UPSTREAM = {
   cursor: { extraDocs: ['https://cursor.com/changelog'] },
 };
 
+// Node's fetch ignores proxy env vars (unless NODE_USE_ENV_PROXY is set at
+// launch); curl honors them. When a proxy is configured, use curl as the
+// primary transport so fetch path — and thus content hashes — stay stable.
+const useCurl = Boolean(process.env.https_proxy || process.env.HTTPS_PROXY);
+
+function curlFetch(url) {
+  return execFileSync('curl', ['-sfL', '--max-time', '30', url], {
+    encoding: 'utf8',
+    maxBuffer: 32 * 1024 * 1024,
+  });
+}
+
 async function fetchJson(url) {
   const headers = { 'user-agent': 'skillspub-harness-watch' };
   if (process.env.GITHUB_TOKEN && url.includes('api.github.com'))
     headers.authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
-  const response = await fetch(url, { headers, signal: AbortSignal.timeout(30_000) });
-  if (!response.ok) throw new Error(`${url} -> ${response.status}`);
-  return response.json();
+  try {
+    const response = await fetch(url, { headers, signal: AbortSignal.timeout(30_000) });
+    if (!response.ok) throw new Error(`${url} -> ${response.status}`);
+    return await response.json();
+  } catch (error) {
+    return JSON.parse(curlFetch(url));
+  }
 }
 
 async function fetchText(url) {
-  const response = await fetch(url, {
-    headers: { 'user-agent': 'skillspub-harness-watch' },
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!response.ok) throw new Error(`${url} -> ${response.status}`);
-  return response.text();
+  if (useCurl) return curlFetch(url);
+  try {
+    const response = await fetch(url, {
+      headers: { 'user-agent': 'skillspub-harness-watch' },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) throw new Error(`${url} -> ${response.status}`);
+    return await response.text();
+  } catch (error) {
+    return curlFetch(url);
+  }
 }
 
 function sha256(text) {
@@ -81,6 +102,14 @@ const PINNED = [
   /\/commit\/[0-9a-f]{7,40}/,
 ];
 const isMutableDocsUrl = (url) => !PINNED.some((pattern) => pattern.test(url));
+
+// Pages whose bytes churn run-to-run (dynamic bundles/anti-bot): hashing only
+// produces noise. Their harnesses are covered by version/release signals.
+const SKIP_DOCS = new Set([
+  'https://docs.x.ai/build/settings/reference',
+  'https://docs.x.ai/build/features/skills-plugins-marketplaces',
+  'https://hermes-agent.nousresearch.com/docs/user-guide/features/skills',
+]);
 
 async function checkVersion(adapter, hashes, findings) {
   const upstream = UPSTREAM[adapter.key];
@@ -133,7 +162,7 @@ async function checkVersion(adapter, hashes, findings) {
 
 async function checkDocs(adapter, hashes, findings) {
   const urls = [...adapter.urls, ...(UPSTREAM[adapter.key]?.extraDocs ?? [])];
-  for (const url of urls.filter(isMutableDocsUrl)) {
+  for (const url of urls.filter((u) => isMutableDocsUrl(u) && !SKIP_DOCS.has(u))) {
     let body;
     try {
       body = await fetchText(url);
