@@ -1,0 +1,11 @@
+{
+  "https://docs.anthropic.com/en/docs/claude-code/skills": "9cc6de1b89d3978b1c035a4ffa1b69a997ffd3e0b38aea0fb0966ea21ec8dded",
+  "https://docs.anthropic.com/en/docs/claude-code/settings": "b29cedbccbec224fa6adba94fb02333183e08138b9ced214245a0693ce77562b",
+  "https://cursor.com/docs/skills": "e5441d06868057e7546854bd528c5c46ead23904b91d7d923df21e1db685ffd0",
+  "https://cursor.com/help/customization/skills": "779bb3acc5fb8da0037d60c8b8339d8658d5d85f7f0ec7931bf341567bf9a900",
+  "npm:@anthropic-ai/claude-code": "2.1.278",
+  "https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md": "54ad047868ac051debc25361c6e2c2fe23422ca47e557c6dd4c011e1f4a34e24",
+  "https://cursor.com/changelog": "83bd13ba28de653b990587eaf3b356300a714bf2f67f8832c6535f7bfdb0fc55",
+  "https://opencode.ai/docs/skills/": "f052c6874782132ed601d3639a0b4d7dae4290083533ad4332c71990d4029b0f",
+  "https://developers.openai.com/codex/skills": "53c957179a943ff97af727ec8dcb712cd018737b0b2f0b064fde785fa892b9d7"
+}
