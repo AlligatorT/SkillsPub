@@ -1,0 +1,19 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      # v5.0.0
+      # Maintains an always-open Release PR (version bump + CHANGELOG.md).
+      # Merging that PR is the human release gate: it tags v*, which
+      # triggers publish.yml (OIDC trusted publishing to npm).
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7
