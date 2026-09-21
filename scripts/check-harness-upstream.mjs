@@ -20,6 +20,15 @@ const UPSTREAM = {
   opencode: { kind: 'npm', package: 'opencode-ai' },
   hermes: { kind: 'github-release', repo: 'NousResearch/hermes-agent' },
   grok: { kind: 'github-head', repo: 'xai-org/grok-build' },
+  // Closed source: no repo to pin; adapter pin is a docs date. Track the npm
+  // version against the acknowledged baseline in hashes.json instead.
+  claude: {
+    kind: 'npm-track',
+    package: '@anthropic-ai/claude-code',
+    extraDocs: ['https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md'],
+  },
+  // Closed-source IDE: no npm/repo signal; watch the changelog page on top of docs.
+  cursor: { extraDocs: ['https://cursor.com/changelog'] },
 };
 
 async function fetchJson(url) {
@@ -73,10 +82,10 @@ const PINNED = [
 ];
 const isMutableDocsUrl = (url) => !PINNED.some((pattern) => pattern.test(url));
 
-async function checkVersion(adapter, findings) {
+async function checkVersion(adapter, hashes, findings) {
   const upstream = UPSTREAM[adapter.key];
   const pin = adapter.versions[0];
-  if (!upstream || !pin) return;
+  if (!upstream) return;
   try {
     if (upstream.kind === 'npm') {
       const latest = (await fetchJson(
@@ -102,6 +111,20 @@ async function checkVersion(adapter, findings) {
         detail: `adapter evidence pinned to \`${pinnedTag}\` (verifiedVersion \`${pin}\`), latest release is \`${tag}\``,
         url: `https://github.com/${upstream.repo}/releases`,
       });
+    } else if (upstream.kind === 'npm-track') {
+      const latest = (await fetchJson(
+        `https://registry.npmjs.org/${upstream.package.replace('/', '%2f')}/latest`,
+      )).version;
+      const baselineKey = `npm:${upstream.package}`;
+      const baseline = hashes[baselineKey];
+      if (!baseline) {
+        hashes[baselineKey] = latest;
+        console.error(`seed: baseline version recorded for ${baselineKey} = ${latest}`);
+      } else if (baseline !== latest) findings.push({
+        kind: 'version-moved',
+        detail: `upstream npm latest moved \`${baseline}\` → \`${latest}\` (adapter pin is docs-date \`${pin ?? 'n/a'}\`; re-check skills docs)`,
+        url: `https://www.npmjs.com/package/${upstream.package}?activeTab=versions`,
+      });
     }
   } catch (error) {
     console.error(`warn: ${adapter.key} version check failed: ${error.message}`);
@@ -109,7 +132,8 @@ async function checkVersion(adapter, findings) {
 }
 
 async function checkDocs(adapter, hashes, findings) {
-  for (const url of adapter.urls.filter(isMutableDocsUrl)) {
+  const urls = [...adapter.urls, ...(UPSTREAM[adapter.key]?.extraDocs ?? [])];
+  for (const url of urls.filter(isMutableDocsUrl)) {
     let body;
     try {
       body = await fetchText(url);
@@ -164,7 +188,7 @@ const adapters = readAdapters();
 const allFindings = [];
 for (const adapter of adapters) {
   const findings = [];
-  await checkVersion(adapter, findings);
+  await checkVersion(adapter, hashes, findings);
   await checkDocs(adapter, hashes, findings);
   if (findings.length > 0) allFindings.push({ adapter, findings });
 }
