@@ -76,6 +76,7 @@ try {
   const entrypoint = path.join(root, manifest.bin.skillspub);
   assert.match(fs.readFileSync(entrypoint, 'utf8'), /^#!\/usr\/bin\/env node\n/);
   const expected = [
+    'CHANGELOG.md',
     'LICENSE',
     'README.md',
     'package.json',
