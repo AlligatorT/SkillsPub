@@ -253,7 +253,8 @@ export function checkNpxSkillsSource(skills: NpxManagedSkill[]): NpxSkillsUpdate
           return { slot: skill.slot, status: 'upstream-missing' };
         let latestHash: string;
         if (!skill.computedHash && (!skill.sourceType || skill.sourceType === 'github')) {
-          const revision = folder === '.' ? 'HEAD^{tree}' : `HEAD:${folder}`;
+          // skills@1.5.21 stores GitHub /git/trees/<ref> response.sha for a root Skill: the commit SHA, not HEAD^{tree}.
+          const revision = folder === '.' ? 'HEAD' : `HEAD:${folder}`;
           const result = spawnSync('git', ['-C', checkout, 'rev-parse', '--verify', revision], {
             encoding: 'utf8',
             stdio: 'pipe',
