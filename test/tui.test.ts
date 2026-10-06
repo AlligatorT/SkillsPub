@@ -256,7 +256,7 @@ if (args[0] === 'clone') {
 if (args[0] === '-C' && args[2] === 'rev-parse') {
   const source = fs.readFileSync(args[1] + '.source', 'utf8');
   const revision = args.at(-1);
-  const folder = revision === 'HEAD^{tree}' ? '.' : revision.slice('HEAD:'.length);
+  const folder = revision === 'HEAD' || revision === 'HEAD^{tree}' ? '.' : revision.slice('HEAD:'.length);
   if (!trees[source]?.[folder]) process.exit(1);
   process.stdout.write(trees[source][folder] + '\\n');
   process.exit(0);
